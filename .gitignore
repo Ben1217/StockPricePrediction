@@ -1,0 +1,41 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Data files (don't commit large datasets)
+data/raw/*.csv
+data/processed/*.csv
+*.h5
+*.pkl
+
+# Models (too large for git)
+models/saved_models/*.h5
+models/saved_models/*.pkl
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results
+results/figures/*.png
+results/figures/*.jpg
