@@ -1,27 +1,16 @@
-# Virtual Environment
-venv/
-env/
-ENV/
-
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 
-# Data files (don't commit large datasets)
-data/raw/*.csv
-data/processed/*.csv
-*.h5
-*.pkl
+# Virtual environments
+venv/
+env/
+.venv/
 
-# Models (too large for git)
-models/saved_models/*.h5
-models/saved_models/*.pkl
-
-# Jupyter Notebooks checkpoints
-.ipynb_checkpoints/
+# Environment variables
+.env
 
 # IDE
 .vscode/
@@ -29,13 +18,44 @@ models/saved_models/*.pkl
 *.swp
 *.swo
 
-# Environment variables
-.env
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
 
-# OS
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Data files (too large for git)
+data/raw/
+data/processed/
+data/indicators/
+*.csv
+*.parquet
+
+# Model files (too large for git)
+models/saved_models/**/*.h5
+models/saved_models/**/*.pkl
+models/saved_models/**/*.joblib
+models/scalers/**/*.pkl
+
+# Database
+database/*.db
+database/*.sqlite
+
+# Logs
+logs/**/*.log
+
+# OS files
 .DS_Store
 Thumbs.db
 
-# Results
-results/figures/*.png
-results/figures/*.jpg
+# Temporary files
+*.tmp
+*.temp

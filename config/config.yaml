@@ -1,0 +1,242 @@
+# ================================
+# APPLICATION CONFIGURATION
+# ================================
+app:
+  name: "Stock Prediction Dashboard"
+  version: "1.0.0"
+  debug: true
+
+# ================================
+# DATA SOURCES
+# ================================
+data:
+  sources:
+    primary: "yfinance"
+    fallback: ["alpha_vantage", "polygon"]
+
+  indices:
+    sp500:
+      enabled: true
+      constituents_url: "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+      max_stocks: 503
+
+    russell2000:
+      enabled: false
+      constituents_url: "https://en.wikipedia.org/wiki/Russell_2000_Index"
+      max_stocks: 2000
+
+  date_range:
+    start: "2019-01-01"
+    end: "2024-12-31"
+    lookback_days: 60
+
+  intervals:
+    daily:
+      enabled: true
+      priority: 1
+
+    intraday_15min:
+      enabled: true
+      priority: 2
+      max_days_history: 60
+
+    intraday_5min:
+      enabled: true
+      priority: 3
+      max_days_history: 60
+
+# ================================
+# FEATURE ENGINEERING
+# ================================
+features:
+  technical_indicators:
+    trend:
+      - sma_20
+      - sma_50
+      - sma_200
+      - ema_12
+      - ema_26
+
+    momentum:
+      - rsi_14
+      - macd
+      - stochastic
+      - williams_r
+
+    volatility:
+      - atr_14
+      - bollinger_bands
+      - keltner_channels
+
+    volume:
+      - obv
+      - cmf
+      - vwap
+
+  candlestick_patterns:
+    - hammer
+    - shooting_star
+    - engulfing
+    - doji
+
+  dimensionality_reduction:
+    method: "pca"
+    n_components: 20
+    variance_threshold: 0.95
+
+  feature_selection:
+    method: "shap"
+    top_k_features: 30
+
+# ================================
+# MODELS
+# ================================
+models:
+  default: "xgboost"
+
+  xgboost:
+    params:
+      n_estimators: 100
+      max_depth: 5
+      learning_rate: 0.1
+      subsample: 0.8
+      colsample_bytree: 0.8
+      objective: "reg:squarederror"
+      random_state: 42
+
+  random_forest:
+    params:
+      n_estimators: 100
+      max_depth: 10
+      min_samples_split: 5
+      min_samples_leaf: 2
+      random_state: 42
+
+  lstm:
+    architecture:
+      layers:
+        - type: "lstm"
+          units: 50
+          return_sequences: true
+          dropout: 0.2
+        - type: "lstm"
+          units: 50
+          return_sequences: false
+          dropout: 0.2
+        - type: "dense"
+          units: 25
+          activation: "relu"
+        - type: "dense"
+          units: 1
+          activation: "linear"
+
+    training:
+      batch_size: 32
+      epochs: 100
+      validation_split: 0.1
+      early_stopping:
+        patience: 10
+        restore_best_weights: true
+      optimizer: "adam"
+      loss: "mse"
+
+  ensemble:
+    method: "weighted_average"
+    weights:
+      xgboost: 0.4
+      lstm: 0.4
+      random_forest: 0.2
+
+# ================================
+# TRAINING
+# ================================
+training:
+  validation:
+    method: "walk_forward"
+    n_splits: 5
+    test_size: 0.2
+
+  hyperparameter_tuning:
+    enabled: false
+    method: "optuna"
+    n_trials: 50
+
+# ================================
+# PORTFOLIO OPTIMIZATION
+# ================================
+portfolio:
+  optimization:
+    method: "max_sharpe"
+    constraints:
+      max_position: 0.15
+      min_position: 0.05
+      max_turnover: 0.3
+
+  selection:
+    method: "top_k"
+    k: 10
+    confidence_threshold: 0.7
+
+  rebalancing:
+    frequency: "weekly"
+    trigger_threshold: 0.05
+
+  risk_management:
+    max_portfolio_volatility: 0.20
+    target_sharpe_ratio: 1.5
+    stop_loss_per_trade: 0.02
+    position_sizing_method: "risk_parity"
+
+# ================================
+# BACKTESTING
+# ================================
+backtesting:
+  initial_capital: 100000
+
+  costs:
+    commission: 0.0
+    slippage: 0.001
+    bid_ask_spread: 0.0005
+
+  metrics:
+    - total_return
+    - sharpe_ratio
+    - sortino_ratio
+    - max_drawdown
+    - calmar_ratio
+    - win_rate
+
+  benchmark: "SPY"
+
+# ================================
+# DASHBOARD
+# ================================
+dashboard:
+  refresh_interval: 300
+  default_timeframe: "1D"
+  chart_height: 600
+
+  tabs:
+    - name: "Market Overview"
+      enabled: true
+    - name: "Predictions"
+      enabled: true
+    - name: "Portfolio"
+      enabled: true
+    - name: "Backtesting"
+      enabled: true
+
+# ================================
+# LOGGING
+# ================================
+logging:
+  level: "INFO"
+  format: "json"
+  handlers:
+    - console
+    - file
+
+  file:
+    rotation: "daily"
+    retention_days: 30
+    max_size_mb: 100
