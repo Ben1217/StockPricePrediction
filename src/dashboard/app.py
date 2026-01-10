@@ -1,6 +1,6 @@
 """
 Stock Prediction Dashboard
-Main Streamlit application
+Main Streamlit application with Dark Theme
 """
 
 import streamlit as st
@@ -18,6 +18,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.data.data_loader import download_stock_data
 from src.features.technical_indicators import add_all_technical_indicators
 from src.portfolio.performance_metrics import calculate_portfolio_metrics
+from src.dashboard.heatmap import render_heatmap_page
+from src.dashboard.signal_display import render_signals_page
+from src.dashboard.theme import COLORS, get_custom_css, get_fonts_css
+from src.dashboard.charts import create_candlestick_chart, add_moving_averages
 
 
 # Page configuration
@@ -28,38 +32,32 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        border-radius: 10px;
-        padding: 1rem;
-        margin: 0.5rem;
-    }
-    .stMetric {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        padding: 0.5rem;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Apply Dark Theme CSS
+st.markdown(get_fonts_css(), unsafe_allow_html=True)
+st.markdown(get_custom_css(), unsafe_allow_html=True)
 
 
 def main():
     """Main dashboard application"""
 
-    st.markdown('<h1 class="main-header">📈 Stock Prediction Dashboard</h1>', unsafe_allow_html=True)
+    # Header with dark theme styling
+    st.markdown(f'''
+    <h1 style="
+        font-size: 2rem;
+        font-weight: bold;
+        color: {COLORS['accent_orange']};
+        text-align: center;
+        margin-bottom: 1rem;
+        padding: 1rem 0;
+    ">📈 Stock Prediction Dashboard</h1>
+    ''', unsafe_allow_html=True)
 
     # Sidebar
-    st.sidebar.title("⚙️ Settings")
+    st.sidebar.markdown(f'''
+    <div style="text-align: center; padding: 10px 0; border-bottom: 1px solid {COLORS['border']}; margin-bottom: 15px;">
+        <h2 style="color: {COLORS['accent_orange']}; margin: 0;">⚙️ Settings</h2>
+    </div>
+    ''', unsafe_allow_html=True)
 
     # Stock selection
     ticker = st.sidebar.text_input("Stock Symbol", value="SPY", max_chars=10)
@@ -97,8 +95,9 @@ def main():
         ticker = st.session_state.get('ticker', 'Unknown')
 
         # Tabs
-        tab1, tab2, tab3, tab4 = st.tabs([
-            "📊 Overview", "📈 Technical Analysis", "🤖 Predictions", "💼 Portfolio"
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "📊 Overview", "📈 Technical Analysis", "🤖 Predictions", 
+            "💼 Portfolio", "🗺️ Market Heatmap", "🎯 Trading Signals"
         ])
 
         with tab1:
@@ -112,6 +111,15 @@ def main():
 
         with tab4:
             render_portfolio()
+
+        with tab5:
+            render_heatmap_page()
+
+        with tab6:
+            # Store data for signals page
+            st.session_state['stock_data'] = data
+            st.session_state['selected_symbol'] = ticker
+            render_signals_page()
 
     else:
         st.info("👈 Enter a stock symbol and click 'Load Data' to get started")
@@ -173,7 +181,11 @@ def render_overview(data: pd.DataFrame, ticker: str):
     fig.update_layout(
         height=500,
         xaxis_rangeslider_visible=False,
-        template='plotly_white'
+        template='plotly_dark',
+        paper_bgcolor=COLORS['bg_primary'],
+        plot_bgcolor=COLORS['bg_primary'],
+        xaxis=dict(gridcolor=COLORS['grid']),
+        yaxis=dict(gridcolor=COLORS['grid'], side='right')
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -183,7 +195,7 @@ def render_overview(data: pd.DataFrame, ticker: str):
     colors = ['red' if row['Close'] < row['Open'] else 'green'
               for _, row in data.iterrows()]
     fig_vol.add_trace(go.Bar(x=data.index, y=data['Volume'], marker_color=colors, name='Volume'))
-    fig_vol.update_layout(height=200, template='plotly_white')
+    fig_vol.update_layout(height=200, template='plotly_dark', paper_bgcolor=COLORS['bg_primary'], plot_bgcolor=COLORS['bg_primary'])
 
     st.plotly_chart(fig_vol, use_container_width=True)
 
@@ -233,7 +245,7 @@ def render_technical_analysis():
             fig.add_trace(go.Scatter(x=data.index, y=data['BB_Low'], name='Lower Band',
                                     line=dict(dash='dash')))
 
-    fig.update_layout(height=500, template='plotly_white')
+    fig.update_layout(height=500, template='plotly_dark', paper_bgcolor=COLORS['bg_primary'], plot_bgcolor=COLORS['bg_primary'], xaxis=dict(gridcolor=COLORS['grid']), yaxis=dict(gridcolor=COLORS['grid']))
     st.plotly_chart(fig, use_container_width=True)
 
 
