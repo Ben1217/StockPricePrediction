@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: stock_timescaledb
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=stock_data
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./timescale_data:/var/lib/postgresql/data
+    restart: always
+
+volumes:
+  timescale_data:
