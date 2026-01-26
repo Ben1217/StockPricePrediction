@@ -244,7 +244,7 @@ python scripts/download_daily_data.py
 
 ### 4. Run Dashboard
 ```bash
-streamlit run src/dashboard/app.py
+streamlit run src/dashboard/app_pro.py
 ```
 
 ---

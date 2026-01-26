@@ -51,10 +51,10 @@ train-all: ## Train all models
 # DASHBOARD
 # ================================
 run: ## Run Streamlit dashboard
-	$(STREAMLIT) run src/dashboard/app.py --server.port 8501
+	$(STREAMLIT) run src/dashboard/app_pro.py --server.port 8501
 
 run-dev: ## Run dashboard in development mode
-	$(STREAMLIT) run src/dashboard/app.py --server.port 8501 --server.runOnSave true
+	$(STREAMLIT) run src/dashboard/app_pro.py --server.port 8501 --server.runOnSave true
 
 # ================================
 # CODE QUALITY
