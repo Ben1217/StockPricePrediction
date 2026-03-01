@@ -1,6 +1,33 @@
 version: '3.8'
 
 services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: quantvision_api
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ../models:/app/models
+      - ../data:/app/data
+    depends_on:
+      - timescaledb
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    container_name: quantvision_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
   timescaledb:
     image: timescale/timescaledb:latest-pg16
     container_name: stock_timescaledb
@@ -11,7 +38,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./timescale_data:/var/lib/postgresql/data
+      - timescale_data:/var/lib/postgresql/data
     restart: always
 
 volumes:
