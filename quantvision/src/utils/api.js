@@ -23,6 +23,14 @@ export async function fetchPrices(symbol, source = "yfinance", days = 120) {
     return apiFetch(`/data/prices/${symbol}?source=${source}&days=${days}`);
 }
 
+export async function fetchLiveQuote(symbol, source = "yfinance") {
+    return apiFetch(`/data/quote/${symbol}?source=${source}`);
+}
+
+export async function fetchExtendedQuote(symbol, source = "yfinance") {
+    return apiFetch(`/data/extended-quote/${symbol}?source=${source}`);
+}
+
 export async function fetchIndicators(symbol, days = 120) {
     return apiFetch(`/data/indicators/${symbol}?days=${days}`);
 }

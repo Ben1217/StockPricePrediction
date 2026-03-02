@@ -1,12 +1,145 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
     LineChart, Line, AreaChart, Area, ComposedChart, Bar,
     XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
     ReferenceLine
 } from "recharts";
 import { C } from "../utils/data";
+import { fetchExtendedQuote } from "../utils/api";
 import { ChartTooltip, StatCard, Section, Hint } from "../components/UIComponents";
 
+// ── Session Panel ──────────────────────────────────────────────────────────────
+const SESSION_META = {
+    PRE_MARKET: { emoji: "🌅", label: "Pre-Market", color: "#60a5fa", time: "4:00–9:30 AM ET" },
+    REGULAR: { emoji: "🔔", label: "Regular Mkt", color: "#34d399", time: "9:30 AM–4:00 PM ET" },
+    POST_MARKET: { emoji: "🌙", label: "After-Hours", color: "#a78bfa", time: "4:00–8:00 PM ET" },
+    MARKET_CLOSED: { emoji: "💤", label: "Market Closed", color: "#6b7280", time: "" },
+};
+
+function SessionRow({ emoji, label, color, timeLabel, price, change, changePct, time, active, unavailable, lowVol }) {
+    const up = (change ?? 0) >= 0;
+    const chgClr = unavailable ? C.textDim : up ? C.green : C.red;
+    return (
+        <div style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+            background: active ? color + "15" : C.bg2,
+            border: `1px solid ${active ? color + "55" : C.border}`,
+            borderRadius: 8, marginBottom: 8, transition: "all .2s",
+        }}>
+            <span style={{ fontSize: 18 }}>{emoji}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ color: active ? color : C.textMid, fontWeight: 700, fontSize: 11, letterSpacing: 1 }}>
+                        {label}
+                    </span>
+                    {active && (
+                        <span style={{ background: color, color: "#000", borderRadius: 4, fontSize: 9, padding: "1px 5px", fontWeight: 800 }}>
+                            ACTIVE
+                        </span>
+                    )}
+                    {lowVol && (
+                        <span style={{ background: "#f59e0b22", color: "#f59e0b", borderRadius: 4, fontSize: 9, padding: "1px 5px" }}>
+                            ⚠ LOW VOL
+                        </span>
+                    )}
+                </div>
+                <div style={{ fontSize: 10, color: C.textDim, marginTop: 2 }}>
+                    {time ? `As of ${time}` : timeLabel}
+                </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+                {unavailable ? (
+                    <span style={{ color: C.textDim, fontSize: 11 }}>N/A — Session not started</span>
+                ) : (
+                    <>
+                        <div style={{ color: C.text, fontWeight: 800, fontSize: 14, fontFamily: "'DM Mono',monospace" }}>
+                            ${price?.toFixed(2) ?? "—"}
+                        </div>
+                        {change != null && (
+                            <div style={{ color: chgClr, fontSize: 10 }}>
+                                {up ? "▲" : "▼"} {Math.abs(change).toFixed(2)} ({changePct != null ? `${up ? "+" : ""}${changePct.toFixed(2)}%` : "—"})
+                            </div>
+                        )}
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function MarketSessionPanel({ symbol, source }) {
+    const [quote, setQuote] = useState(null);
+    const [loading, setLoad] = useState(true);
+    const [error, setError] = useState(null);
+
+    useEffect(() => {
+        setLoad(true); setError(null);
+        fetchExtendedQuote(symbol, source)
+            .then(d => { setQuote(d); setLoad(false); })
+            .catch(e => { setError(e.message); setLoad(false); });
+    }, [symbol, source]);
+
+    if (loading) return <div style={{ color: C.textDim, fontSize: 12, padding: "8px 0" }}>Loading session data…</div>;
+    if (error) return <div style={{ color: C.red, fontSize: 12, padding: "8px 0" }}>⚠ {error}</div>;
+    if (!quote) return null;
+
+    const session = quote.session;
+    const lowVol = quote.low_volume_warning;
+
+    function fmtTime(iso) {
+        if (!iso) return null;
+        try {
+            return new Date(iso).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York", timeZoneName: "short" });
+        } catch { return null; }
+    }
+
+    return (
+        <Section title="MARKET SESSIONS">
+            <SessionRow
+                {...SESSION_META.PRE_MARKET}
+                timeLabel={SESSION_META.PRE_MARKET.time}
+                price={quote.pre.price}
+                change={quote.pre.change}
+                changePct={quote.pre.change_pct}
+                time={fmtTime(quote.pre.time)}
+                active={session === "PRE_MARKET"}
+                unavailable={!quote.pre.available}
+                lowVol={session === "PRE_MARKET" && lowVol}
+            />
+            <SessionRow
+                {...SESSION_META.REGULAR}
+                timeLabel={SESSION_META.REGULAR.time}
+                price={quote.regular.price}
+                change={quote.regular.price != null && quote.regular.prev_close != null
+                    ? quote.regular.price - quote.regular.prev_close : null}
+                changePct={quote.regular.price != null && quote.regular.prev_close != null
+                    ? ((quote.regular.price - quote.regular.prev_close) / quote.regular.prev_close) * 100 : null}
+                time={null}
+                active={session === "REGULAR"}
+                unavailable={!quote.regular.price}
+                lowVol={false}
+            />
+            <SessionRow
+                {...SESSION_META.POST_MARKET}
+                timeLabel={SESSION_META.POST_MARKET.time}
+                price={quote.post.price}
+                change={quote.post.change}
+                changePct={quote.post.change_pct}
+                time={fmtTime(quote.post.time)}
+                active={session === "POST_MARKET"}
+                unavailable={!quote.post.available}
+                lowVol={session === "POST_MARKET" && lowVol}
+            />
+            {session === "MARKET_CLOSED" && (
+                <div style={{ textAlign: "center", color: C.textDim, fontSize: 11, padding: "6px 0 2px" }}>
+                    💤 Market Closed — showing latest available prices
+                </div>
+            )}
+        </Section>
+    );
+}
+
+// ── Analysis Tab ───────────────────────────────────────────────────────────────
 export default function AnalysisTab({ selectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
     const [showBB, setShowBB] = useState(true);
     const [showSMA, setShowSMA] = useState(true);
@@ -14,7 +147,6 @@ export default function AnalysisTab({ selectedTicker, priceData, indicatorData, 
     const [showVolume, setShowVolume] = useState(true);
     const [timeRange, setTimeRange] = useState(60);
 
-    // Build chart data from API response
     const chartData = useMemo(() => {
         if (!priceData?.bars || !indicatorData?.data) return [];
         const prices = priceData.bars.slice(-timeRange);
@@ -23,23 +155,12 @@ export default function AnalysisTab({ selectedTicker, priceData, indicatorData, 
         return prices.map(bar => {
             const ind = indMap[bar.date] || {};
             return {
-                date: bar.date.slice(5), // MM-DD
-                close: bar.close,
-                open: bar.open,
-                high: bar.high,
-                low: bar.low,
-                volume: bar.volume,
-                sma20: ind.SMA_20,
-                ema12: ind.EMA_12,
-                rsi: ind.RSI,
-                macd: ind.MACD,
-                macdSig: ind.MACD_Signal,
-                macdHist: ind.MACD_Histogram,
-                bbUpper: ind.BB_High,
-                bbMid: ind.BB_Mid,
-                bbLower: ind.BB_Low,
-                atr: ind.ATR,
-                obv: ind.OBV,
+                date: bar.date.slice(5),
+                close: bar.close, open: bar.open, high: bar.high, low: bar.low, volume: bar.volume,
+                sma20: ind.SMA_20, ema12: ind.EMA_12, rsi: ind.RSI,
+                macd: ind.MACD, macdSig: ind.MACD_Signal, macdHist: ind.MACD_Histogram,
+                bbUpper: ind.BB_High, bbMid: ind.BB_Mid, bbLower: ind.BB_Low,
+                atr: ind.ATR, obv: ind.OBV,
             };
         });
     }, [priceData, indicatorData, timeRange]);
@@ -60,11 +181,11 @@ export default function AnalysisTab({ selectedTicker, priceData, indicatorData, 
     const prev = chartData[chartData.length - 2] || last;
     const change = last.close - prev.close;
     const changePct = (change / prev.close) * 100;
-    const fundamentals = { pe: "—", mktCap: "—", beta: "—" };
 
     return (
         <div className="fade-up">
-            <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 8 }}>
                 <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text }}>{selectedTicker}</h1>
                 <span style={{
                     background: changePct >= 0 ? C.green + "22" : C.red + "22", color: changePct >= 0 ? C.green : C.red,
@@ -76,22 +197,15 @@ export default function AnalysisTab({ selectedTicker, priceData, indicatorData, 
                     via {dataSource.replace("_", " ")}
                 </span>
             </div>
-            <div style={{ fontSize: 11, color: C.textDim, marginBottom: 20 }}>
+            <div style={{ fontSize: 11, color: C.textDim, marginBottom: 16 }}>
                 Last close: <b style={{ color: C.text }}>${last.close.toFixed(2)}</b>
             </div>
 
-            {/* Time range buttons */}
-            <div style={{ display: "flex", gap: 6, marginBottom: 16, justifyContent: "flex-end" }}>
-                {[30, 60, 90, 120].map(d => (
-                    <button key={d} onClick={() => setTimeRange(d)} style={{
-                        background: timeRange === d ? C.amber : C.bg2, color: timeRange === d ? "#000" : C.textMid,
-                        border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11, cursor: "pointer", fontWeight: 700,
-                    }}>{d}D</button>
-                ))}
-            </div>
+            {/* Market Session Panel */}
+            <MarketSessionPanel symbol={selectedTicker} source={dataSource} />
 
             {/* Stat cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 12, marginBottom: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 12, margin: "20px 0" }}>
                 <StatCard label="PRICE" value={`$${last.close.toFixed(2)}`}
                     sub={`${change >= 0 ? "+" : ""}$${change.toFixed(2)} today`} color={change >= 0 ? C.green : C.red} />
                 <StatCard label="SMA 20" value={last.sma20 ? `$${last.sma20.toFixed(2)}` : "—"}
@@ -104,7 +218,15 @@ export default function AnalysisTab({ selectedTicker, priceData, indicatorData, 
                 <StatCard label="ATR" value={last.atr ? last.atr.toFixed(2) : "—"} sub="Volatility" color={C.purple} />
             </div>
 
-            {/* Overlay toggles */}
+            {/* Time range + overlay toggles */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 12, justifyContent: "flex-end" }}>
+                {[30, 60, 90, 120].map(d => (
+                    <button key={d} onClick={() => setTimeRange(d)} style={{
+                        background: timeRange === d ? C.amber : C.bg2, color: timeRange === d ? "#000" : C.textMid,
+                        border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11, cursor: "pointer", fontWeight: 700,
+                    }}>{d}D</button>
+                ))}
+            </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
                 {[
                     { label: "Bollinger Bands", active: showBB, set: setShowBB },

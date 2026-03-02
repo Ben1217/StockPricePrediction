@@ -4,7 +4,6 @@
 
 PYTHON := python
 PIP := pip
-STREAMLIT := streamlit
 
 help: ## Show this help message
 	@echo "Usage: make [target]"
@@ -50,11 +49,11 @@ train-all: ## Train all models
 # ================================
 # DASHBOARD
 # ================================
-run: ## Run Streamlit dashboard
-	$(STREAMLIT) run src/dashboard/app_pro.py --server.port 8501
+run: ## Run React frontend
+	cd quantvision && npm run dev
 
 run-dev: ## Run dashboard in development mode
-	$(STREAMLIT) run src/dashboard/app_pro.py --server.port 8501 --server.runOnSave true
+	cd quantvision && npm run dev
 
 # ================================
 # CODE QUALITY
