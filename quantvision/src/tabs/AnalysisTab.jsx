@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
     LineChart, Line, AreaChart, Area, ComposedChart, Bar,
     XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -140,12 +140,19 @@ function MarketSessionPanel({ symbol, source }) {
 }
 
 // ── Analysis Tab ───────────────────────────────────────────────────────────────
-export default function AnalysisTab({ selectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
+export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
     const [showBB, setShowBB] = useState(true);
     const [showSMA, setShowSMA] = useState(true);
     const [showEMA, setShowEMA] = useState(false);
     const [showVolume, setShowVolume] = useState(true);
     const [timeRange, setTimeRange] = useState(60);
+    const [searchInput, setSearchInput] = useState("");
+    const searchRef = useRef(null);
+
+    const handleQuickSearch = () => {
+        const t = searchInput.trim().toUpperCase();
+        if (t && setSelectedTicker) { setSelectedTicker(t); setSearchInput(""); }
+    };
 
     const chartData = useMemo(() => {
         if (!priceData?.bars || !indicatorData?.data) return [];
@@ -184,6 +191,39 @@ export default function AnalysisTab({ selectedTicker, priceData, indicatorData, 
 
     return (
         <div className="fade-up">
+            {/* Quick ticker search bar */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 18, alignItems: "center" }}>
+                <div style={{ position: "relative", flex: 1, maxWidth: 320 }}>
+                    <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: C.textDim, pointerEvents: "none" }}>🔍</span>
+                    <input
+                        ref={searchRef}
+                        placeholder="Search any ticker — e.g. TSM, BABA, JPM…"
+                        value={searchInput}
+                        onChange={e => setSearchInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") handleQuickSearch(); }}
+                        style={{
+                            width: "100%", background: C.bg2, border: `1px solid ${C.border}`,
+                            borderRadius: 8, color: C.text, padding: "8px 10px 8px 30px",
+                            fontSize: 11, fontFamily: "'DM Mono',monospace", outline: "none",
+                            boxSizing: "border-box",
+                        }}
+                    />
+                </div>
+                <button
+                    onClick={handleQuickSearch}
+                    disabled={!searchInput.trim()}
+                    style={{
+                        background: searchInput.trim() ? C.amber : C.bg2,
+                        color: searchInput.trim() ? "#000" : C.textDim,
+                        border: "none", borderRadius: 8, padding: "8px 16px",
+                        cursor: searchInput.trim() ? "pointer" : "not-allowed",
+                        fontWeight: 700, fontSize: 11, fontFamily: "'Syne',sans-serif",
+                        transition: "all .15s",
+                    }}
+                >Analyse</button>
+                <span style={{ fontSize: 10, color: C.textDim }}>( Loads any ticker without changing your watchlist )</span>
+            </div>
+
             {/* Header */}
             <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 8 }}>
                 <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text }}>{selectedTicker}</h1>
