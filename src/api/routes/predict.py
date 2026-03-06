@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from src.api.schemas.schemas import PredictRequest, PredictResponse, ForecastPoint
 
@@ -128,3 +128,99 @@ async def predict(req: PredictRequest):
         forecasts=forecasts,
         model_info=model_info,
     )
+
+
+from typing import List
+from src.api.schemas.schemas import HistoricalSignal
+
+@router.get("/historical-signals/{symbol}", response_model=List[HistoricalSignal])
+async def get_historical_signals(
+    symbol: str,
+    days: int = Query(90, ge=10, le=365),
+    model_type: str = Query("xgboost", enum=["xgboost", "random_forest", "lstm"])
+):
+    """
+    Returns historical ML buy/sell signals for TradingView markers.
+    """
+    import yfinance as yf
+    from src.features.feature_engineering import create_features
+    
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=days + 100)).strftime("%Y-%m-%d")
+    df = yf.download(symbol, start=start, end=end, progress=False)
+    
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    if df.empty:
+        raise HTTPException(404, f"No data for {symbol}")
+
+    model_dir = Path("models/saved_models") / model_type
+    trained_model = None
+    if model_dir.exists():
+        try:
+            from src.models.model_trainer import ModelTrainer
+            trainer = ModelTrainer()
+            model = trainer.create_model(model_type)
+            for p in model_dir.iterdir():
+                try:
+                    model.load(str(p))
+                    trained_model = model
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if trained_model is None:
+        raise HTTPException(404, f"No trained {model_type} model found")
+
+    feat_df = create_features(df).dropna()
+    feature_cols_file = Path("models/model_metadata/feature_columns.json")
+    if feature_cols_file.exists():
+        import json
+        with open(feature_cols_file) as f:
+            feature_cols = json.load(f)
+        feature_cols = [c for c in feature_cols if c in feat_df.columns]
+    else:
+        feature_cols = [c for c in feat_df.columns
+                       if c not in ["Open", "High", "Low", "Close", "Volume", "Adj Close", "Target"]]
+
+    if not feature_cols or feat_df.empty:
+        return []
+
+    # Get predictions for the last `days`
+    target_df = feat_df.tail(days)
+    if target_df.empty:
+        return []
+        
+    X = target_df[feature_cols].values
+    
+    try:
+        # LSTM predict returns predictions correctly if reshaped by the model internally
+        preds = trained_model.predict(X)
+    except Exception as e:
+        logger.error(f"Prediction failed: {e}")
+        return []
+
+    signals = []
+    for i, date_idx in enumerate(target_df.index):
+        pred_return = float(preds[i])
+        if abs(pred_return) < 0.001:
+            continue # skip neutral
+            
+        signal_type = "BUY" if pred_return > 0 else "SELL"
+        
+        # Pseudo-confidence mapping (since we don't have probabilities for regression)
+        # Using magnitude of expected return mapped to 50-98%
+        conf = min(98.0, 50.0 + abs(pred_return) * 1000)
+        
+        format_date = str(date_idx.date()) if hasattr(date_idx, "date") else str(date_idx)
+        signals.append(HistoricalSignal(
+            date=format_date,
+            type=signal_type,
+            confidence=round(conf, 1),
+            predicted_return=round(pred_return, 4)
+        ))
+
+    return signals
+

@@ -20,6 +20,7 @@ from src.api.routes.predict import router as predict_router
 from src.api.routes.backtest import router as backtest_router
 from src.api.routes.portfolio import router as portfolio_router
 from src.api.routes.export import router as export_router
+from src.api.routes.patterns import router as patterns_router
 
 
 app = FastAPI(
@@ -31,7 +32,7 @@ app = FastAPI(
 # CORS – allow React dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000", "*"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,6 +45,7 @@ app.include_router(predict_router,   prefix="/api/predict",   tags=["Predictions
 app.include_router(backtest_router,  prefix="/api/backtest",  tags=["Backtesting"])
 app.include_router(portfolio_router, prefix="/api/portfolio", tags=["Portfolio"])
 app.include_router(export_router,    prefix="/api/export",    tags=["Export"])
+app.include_router(patterns_router,  prefix="/api/patterns",  tags=["Patterns"])
 
 
 @app.get("/")

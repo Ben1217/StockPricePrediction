@@ -582,6 +582,7 @@ class MLPrediction:
     predicted_return: float
     confidence_score: float
     directional_signal: str  # 'STRONG_BUY', 'BUY', 'HOLD', 'SELL', 'STRONG_SELL'
+    uncertainty_score: float = 0.0  # 0 = certain, 1 = very uncertain
 
 
 class TradingSignalGenerator:
@@ -674,6 +675,12 @@ class TradingSignalGenerator:
         combined['technical_details'] = tech_signals
         combined['ml_details'] = ml_prediction
         
+        # Add uncertainty to combined dictionary if available
+        if ml_prediction is not None:
+            combined['uncertainty'] = ml_prediction.uncertainty_score
+        else:
+            combined['uncertainty'] = 1.0  # Technical-only is considered high uncertainty for sizing
+        
         return combined
     
     def _get_technical_signals(self, df: pd.DataFrame) -> Dict:
@@ -739,7 +746,7 @@ class TradingSignalGenerator:
         return signals
     
     def _get_ml_prediction(self, df: pd.DataFrame) -> Optional[MLPrediction]:
-        """Get ML model prediction."""
+        """Get ML model prediction, with MC Dropout uncertainty when available."""
         if self.ml_model is None:
             return None
         
@@ -747,11 +754,33 @@ class TradingSignalGenerator:
             # Prepare features (implement based on your feature engineering)
             features = df.iloc[-1:].copy()
             
-            # Get prediction
-            prediction = self.ml_model.predict(features)
-            
             current_price = df.iloc[-1]['Close']
-            predicted_price = prediction[0] if hasattr(prediction, '__iter__') else prediction
+            uncertainty = 0.0
+            
+            # Try MC Dropout prediction first (for LSTM models)
+            if hasattr(self.ml_model, 'predict_with_uncertainty'):
+                try:
+                    mean_pred, lower, upper = self.ml_model.predict_with_uncertainty(
+                        features.values.reshape(1, -1) if len(features.shape) < 3 else features.values,
+                        n_samples=50
+                    )
+                    predicted_price = float(mean_pred[0])
+                    
+                    # Normalised uncertainty: CI width / |prediction|
+                    ci_width = float(upper[0] - lower[0])
+                    if abs(predicted_price) > 0:
+                        uncertainty = min(ci_width / abs(predicted_price), 1.0)
+                    else:
+                        uncertainty = 1.0
+                except Exception as e:
+                    logger.debug(f"MC Dropout failed, falling back to point prediction: {e}")
+                    prediction = self.ml_model.predict(features)
+                    predicted_price = prediction[0] if hasattr(prediction, '__iter__') else prediction
+            else:
+                # Standard point prediction
+                prediction = self.ml_model.predict(features)
+                predicted_price = prediction[0] if hasattr(prediction, '__iter__') else prediction
+            
             predicted_return = (predicted_price - current_price) / current_price
             
             # Get confidence if available
@@ -776,7 +805,8 @@ class TradingSignalGenerator:
                 predicted_price=float(predicted_price),
                 predicted_return=float(predicted_return),
                 confidence_score=float(confidence),
-                directional_signal=direction
+                directional_signal=direction,
+                uncertainty_score=float(uncertainty),
             )
         except Exception as e:
             logger.error(f"ML prediction error: {e}")
@@ -801,7 +831,8 @@ class TradingSignalGenerator:
                 'entry_price': tech['entry_price'],
                 'stop_loss': tech['stop_loss'],
                 'target': tech['entry_price'] * (1 + ml_return) if tech['entry_price'] else None,
-                'position_multiplier': 1.0
+                'position_multiplier': 1.0,
+                'uncertainty': ml.uncertainty_score
             }
         
         # CASE 2: BUY - Technical setup + ML moderately positive

@@ -7,6 +7,7 @@ import {
 import { C } from "../utils/data";
 import { fetchExtendedQuote } from "../utils/api";
 import { ChartTooltip, StatCard, Section, Hint } from "../components/UIComponents";
+import TradingViewDetail from "../components/TradingViewDetail";
 
 // ── Session Panel ──────────────────────────────────────────────────────────────
 const SESSION_META = {
@@ -141,6 +142,7 @@ function MarketSessionPanel({ symbol, source }) {
 
 // ── Analysis Tab ───────────────────────────────────────────────────────────────
 export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
+    const [showDetails, setShowDetails] = useState(false);
     const [showBB, setShowBB] = useState(true);
     const [showSMA, setShowSMA] = useState(true);
     const [showEMA, setShowEMA] = useState(false);
@@ -189,6 +191,10 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
     const change = last.close - prev.close;
     const changePct = (change / prev.close) * 100;
 
+    if (showDetails) {
+        return <TradingViewDetail symbol={selectedTicker} mode="analysis" onClose={() => setShowDetails(false)} />;
+    }
+
     return (
         <div className="fade-up">
             {/* Quick ticker search bar */}
@@ -225,18 +231,32 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
             </div>
 
             {/* Header */}
-            <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 8 }}>
-                <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text }}>{selectedTicker}</h1>
-                <span style={{
-                    background: changePct >= 0 ? C.green + "22" : C.red + "22", color: changePct >= 0 ? C.green : C.red,
-                    padding: "4px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700
-                }}>
-                    {changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%
-                </span>
-                <span style={{ background: C.amberDim, color: C.amber, padding: "4px 10px", borderRadius: 6, fontSize: 11 }}>
-                    via {dataSource.replace("_", " ")}
-                </span>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                    <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text }}>{selectedTicker}</h1>
+                    <span style={{
+                        background: changePct >= 0 ? C.green + "22" : C.red + "22", color: changePct >= 0 ? C.green : C.red,
+                        padding: "4px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700
+                    }}>
+                        {changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%
+                    </span>
+                    <span style={{ background: C.amberDim, color: C.amber, padding: "4px 10px", borderRadius: 6, fontSize: 11 }}>
+                        via {dataSource.replace("_", " ")}
+                    </span>
+                </div>
+                <button
+                    onClick={() => setShowDetails(true)}
+                    style={{
+                        background: C.bg3, color: C.text, border: `1px solid ${C.border}`,
+                        borderRadius: 8, padding: "8px 16px", cursor: "pointer",
+                        fontWeight: 700, fontSize: 12, fontFamily: "'Syne',sans-serif",
+                        display: "flex", alignItems: "center", gap: 8, transition: "all .15s"
+                    }}
+                >
+                    <span>📈</span> Chart Details
+                </button>
             </div>
+            {/* Market Session Panel */}
             <div style={{ fontSize: 11, color: C.textDim, marginBottom: 16 }}>
                 Last close: <b style={{ color: C.text }}>${last.close.toFixed(2)}</b>
             </div>
@@ -337,6 +357,6 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                     </ResponsiveContainer>
                 </Section>
             </div>
-        </div>
+        </div >
     );
 }

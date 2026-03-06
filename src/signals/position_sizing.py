@@ -52,7 +52,8 @@ class PositionSizeCalculator:
         entry_price: float, 
         stop_loss: float,
         signal_confidence: float = 80.0,
-        current_portfolio_risk: float = 0.0
+        current_portfolio_risk: float = 0.0,
+        uncertainty: Optional[float] = None,
     ) -> Dict:
         """
         Calculate optimal position size.
@@ -94,6 +95,15 @@ class PositionSizeCalculator:
             adjusted_risk = self._adjust_for_confidence(base_risk, signal_confidence)
         else:
             adjusted_risk = base_risk
+        
+        # Step 2b: Adjust for prediction uncertainty (MC Dropout)
+        if uncertainty is not None:
+            adjusted_risk = self._adjust_for_uncertainty(adjusted_risk, uncertainty)
+            if uncertainty > 0.5:
+                warnings.append(
+                    f"⚠️ High prediction uncertainty ({uncertainty:.1%}) — "
+                    f"position size reduced"
+                )
         
         # Step 3: Calculate risk per share
         risk_per_share = abs(entry_price - stop_loss)
@@ -195,6 +205,33 @@ class PositionSizeCalculator:
             return base_risk * 0.5
         else:
             return base_risk * 0.25
+    
+    def _adjust_for_uncertainty(
+        self, base_risk: float, uncertainty: float
+    ) -> float:
+        """
+        Scale position size based on prediction uncertainty.
+        
+        uncertainty is typically the normalised width of the 95% CI
+        from MC Dropout (0 = no uncertainty, 1 = very high).
+        
+        Scaling:
+        - uncertainty < 0.2  → 100% of risk  (high conviction)
+        - 0.2 ≤ unc < 0.4   → 80%
+        - 0.4 ≤ unc < 0.6   → 60%
+        - 0.6 ≤ unc < 0.8   → 40%
+        - uncertainty ≥ 0.8  → 20%  (very low conviction)
+        """
+        if uncertainty < 0.2:
+            return base_risk * 1.0
+        elif uncertainty < 0.4:
+            return base_risk * 0.8
+        elif uncertainty < 0.6:
+            return base_risk * 0.6
+        elif uncertainty < 0.8:
+            return base_risk * 0.4
+        else:
+            return base_risk * 0.2
     
     def get_summary(self) -> Dict:
         """Get current risk profile summary."""

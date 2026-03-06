@@ -9,6 +9,8 @@ from typing import Tuple, List, Optional
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from .technical_indicators import add_all_technical_indicators
+from .candlestick_patterns import detect_candlestick_patterns
+from ..models.regime_detection import MarketRegimeDetector
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -18,6 +20,8 @@ def create_features(
     df: pd.DataFrame,
     include_technical: bool = True,
     include_lags: bool = True,
+    include_regime: bool = False,
+    include_candlesticks: bool = False,
     lag_periods: List[int] = [1, 2, 3, 5, 10]
 ) -> pd.DataFrame:
     """
@@ -66,6 +70,28 @@ def create_features(
         data['Month'] = data.index.month
         data['Quarter'] = data.index.quarter
     
+    # Market regime detection (HMM)
+    if include_regime:
+        try:
+            returns = data['Close'].pct_change().dropna()
+            if len(returns) > 30:  # need minimum data for HMM
+                detector = MarketRegimeDetector()
+                detector.fit(returns)
+                regime_df = detector.get_regime_features(returns)
+                data = data.join(regime_df)
+                logger.info(f"Added HMM regime features: {regime_df.columns.tolist()}")
+        except Exception as e:
+            logger.warning(f"Regime detection failed, skipping: {e}")
+
+    # Candlestick pattern detection
+    if include_candlesticks:
+        try:
+            cdl_df = detect_candlestick_patterns(data)
+            data = data.join(cdl_df)
+            logger.info(f"Added {len(cdl_df.columns)} candlestick pattern features")
+        except Exception as e:
+            logger.warning(f"Candlestick detection failed, skipping: {e}")
+
     logger.info(f"Created features: {len(data.columns)} total columns")
     
     return data

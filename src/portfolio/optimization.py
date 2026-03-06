@@ -7,11 +7,29 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
 import cvxpy as cp
+from scipy.optimize import minimize as scipy_minimize
 
 from ..utils.logger import get_logger
 from ..utils.config_loader import get_config_value
 
 logger = get_logger(__name__)
+
+
+def _risk_parity_objective(weights: np.ndarray, cov_matrix: np.ndarray) -> float:
+    """
+    Objective for Risk Parity: minimise variance of risk contributions.
+
+    Each asset's risk contribution = w_i * (Sigma @ w)_i.
+    We want all contributions equal → minimise sum of squared differences
+    from the mean contribution.
+    """
+    portfolio_var = weights @ cov_matrix @ weights
+    if portfolio_var <= 0:
+        return 1e10
+    marginal_contrib = cov_matrix @ weights
+    risk_contrib = weights * marginal_contrib
+    target = portfolio_var / len(weights)  # equal share
+    return float(np.sum((risk_contrib - target) ** 2))
 
 
 def optimize_portfolio(
@@ -28,7 +46,8 @@ def optimize_portfolio(
     returns : pandas.DataFrame
         Historical returns for each asset
     objective : str
-        Optimization objective: 'max_sharpe', 'min_volatility', 'max_return'
+        Optimization objective: 'max_sharpe', 'min_volatility',
+        'max_return', or 'risk_parity'
     risk_free_rate : float
         Annual risk-free rate
     constraints : dict, optional
@@ -49,6 +68,11 @@ def optimize_portfolio(
     mean_returns = returns.mean() * 252  # Annualize
     cov_matrix = returns.cov() * 252
 
+    # ---- Risk Parity (Equal Risk Contribution) ----
+    if objective == 'risk_parity':
+        return _solve_risk_parity(returns.columns.tolist(), cov_matrix.values, n_assets)
+
+    # ---- CVXPY-based objectives ----
     # Define optimization variable
     weights = cp.Variable(n_assets)
 
@@ -92,6 +116,54 @@ def optimize_portfolio(
 
     logger.info(f"Portfolio optimized with {objective} objective")
     return result
+
+
+def _solve_risk_parity(
+    asset_names: List[str],
+    cov_matrix: np.ndarray,
+    n_assets: int,
+) -> Dict[str, float]:
+    """
+    Solve the Risk Parity (Equal Risk Contribution) problem.
+
+    Uses scipy.optimize.minimize with SLSQP to find weights where
+    each asset contributes equally to total portfolio risk.
+
+    Parameters
+    ----------
+    asset_names : list of str
+    cov_matrix : np.ndarray (annualised)
+    n_assets : int
+
+    Returns
+    -------
+    dict  {asset_name: weight}
+    """
+    x0 = np.ones(n_assets) / n_assets
+
+    bounds = tuple((0.01, 1.0) for _ in range(n_assets))
+    constraints_scipy = [
+        {'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0},
+    ]
+
+    result = scipy_minimize(
+        _risk_parity_objective,
+        x0,
+        args=(cov_matrix,),
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints_scipy,
+        options={'maxiter': 1000, 'ftol': 1e-12},
+    )
+
+    if result.success:
+        weights = result.x / result.x.sum()  # renormalise
+        logger.info("Risk Parity optimization converged")
+    else:
+        logger.warning(f"Risk Parity did not converge: {result.message}. Using equal weights.")
+        weights = np.ones(n_assets) / n_assets
+
+    return {name: float(w) for name, w in zip(asset_names, weights)}
 
 
 def calculate_efficient_frontier(

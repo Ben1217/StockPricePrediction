@@ -61,6 +61,7 @@ class LSTMModel(BaseModel):
             'epochs': 100,
             'learning_rate': 0.001,
             'sequence_length': 60,
+            'patience': 15,
         }
 
         config_params = get_config_value('models.lstm.architecture', {})
@@ -125,14 +126,15 @@ class LSTMModel(BaseModel):
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.params['learning_rate'])
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
         criterion = nn.MSELoss()
 
         batch_size = self.params['batch_size']
         best_val_loss = float('inf')
         patience_counter = 0
-        patience = 10
+        patience = self.params.get('patience', 15)
+        best_epoch = 0
 
         dataset = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -176,13 +178,14 @@ class LSTMModel(BaseModel):
                 if avg_val < best_val_loss:
                     best_val_loss = avg_val
                     patience_counter = 0
+                    best_epoch = epoch + 1
                     # Save best weights
                     self._best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
                 else:
                     patience_counter += 1
 
                 if patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                    logger.info(f"Early stopping at epoch {epoch + 1}, best epoch was {best_epoch}")
                     break
 
                 if (epoch + 1) % 10 == 0:
@@ -191,12 +194,13 @@ class LSTMModel(BaseModel):
                 if (epoch + 1) % 10 == 0:
                     logger.info(f"Epoch {epoch + 1}: train_loss={avg_train:.6f}")
 
-        # Restore best weights
-        if hasattr(self, '_best_state'):
+        # Always restore best weights (whether early stopped or ran all epochs)
+        if hasattr(self, '_best_state') and self._best_state is not None:
             self.model.load_state_dict(self._best_state)
+            logger.info(f"Restored best weights from epoch {best_epoch} (val_loss={best_val_loss:.6f})")
 
         self.is_fitted = True
-        logger.info(f"LSTM fitted: {len(self.history['train_loss'])} epochs")
+        logger.info(f"LSTM fitted: {len(self.history['train_loss'])} epochs completed")
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions."""

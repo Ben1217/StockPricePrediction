@@ -137,6 +137,56 @@ class PredictResponse(BaseModel):
     model_info: Dict
 
 
+class HistoricalSignal(BaseModel):
+    date: str
+    type: str  # "BUY" | "SELL"
+    confidence: float
+    predicted_return: float
+
+
+# ── Pattern Detection Schemas ──────────────────────────────────
+class CandlestickPatternItem(BaseModel):
+    date: str
+    pattern_name: str
+    direction: str  # "bullish" | "bearish"
+    confidence: float
+
+
+class KeyLevel(BaseModel):
+    date: str
+    price: float
+
+
+class ChartPatternItem(BaseModel):
+    pattern_name: str
+    start_date: str
+    end_date: str
+    key_levels: List[KeyLevel]
+    neckline: Optional[float] = None
+    breakout_price: Optional[float] = None
+    target_price: Optional[float] = None
+    confidence: float
+    status: str  # "forming" | "confirmed" | "broken"
+
+
+class ConfluenceSignal(BaseModel):
+    rsi_signal: str
+    rsi_value: float
+    macd_signal: str
+    pattern_signal: str
+    ml_direction: str
+    ml_confidence: float
+    overall: str  # "Strong Buy" | "Buy" | "Neutral" | "Sell" | "Strong Sell"
+    strength: float
+
+
+class PatternResponse(BaseModel):
+    symbol: str
+    candlestick_patterns: List[CandlestickPatternItem]
+    chart_patterns: List[ChartPatternItem]
+    confluence: ConfluenceSignal
+
+
 # ── Backtest Schemas ───────────────────────────────────────────
 class BacktestRequest(BaseModel):
     symbol: str = Field(default="SPY")

@@ -154,12 +154,19 @@ training:
   validation:
     method: "walk_forward"
     n_splits: 5
+    gap: 5
     test_size: 0.2
 
   hyperparameter_tuning:
-    enabled: false
+    enabled: true
     method: "optuna"
     n_trials: 50
+    objective: "sharpe_ratio"
+
+  regime_detection:
+    enabled: true
+    n_states: 3
+    features: ["return", "volatility"]
 
 # ================================
 # PORTFOLIO OPTIMIZATION

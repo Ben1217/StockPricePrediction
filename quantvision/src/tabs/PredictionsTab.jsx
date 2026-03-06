@@ -7,6 +7,7 @@ import {
 import { C } from "../utils/data";
 import { fetchPredictions } from "../utils/api";
 import { ChartTooltip, StatCard, Section } from "../components/UIComponents";
+import TradingViewDetail from "../components/TradingViewDetail";
 
 // Custom Legend for Forecast Charts
 const ForecastLegend = ({ payload }) => {
@@ -33,6 +34,7 @@ const ForecastLegend = ({ payload }) => {
 };
 
 export default function PredictionsTab({ selectedTicker, apiConnected, priceData }) {
+    const [showDetails, setShowDetails] = useState(false);
     const [horizon, setHorizon] = useState(30);
     const [modelType, setModelType] = useState("xgboost");
     const [predData, setPredData] = useState(null);
@@ -108,6 +110,10 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
         });
     });
 
+    if (showDetails) {
+        return <TradingViewDetail symbol={selectedTicker} mode="prediction" predictionData={predData} onClose={() => setShowDetails(false)} />;
+    }
+
     return (
         <div className="fade-up">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
@@ -134,6 +140,18 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                             border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11, cursor: "pointer", fontWeight: 700,
                         }}>{h}D</button>
                     ))}
+
+                    <button
+                        onClick={() => setShowDetails(true)}
+                        style={{
+                            background: C.bg3, color: C.text, border: `1px solid ${C.border}`,
+                            borderRadius: 6, padding: "6px 14px", cursor: "pointer", marginLeft: 16,
+                            fontWeight: 700, fontSize: 11, fontFamily: "'Syne',sans-serif",
+                            display: "flex", alignItems: "center", gap: 6, transition: "all .15s"
+                        }}
+                    >
+                        <span>📈</span> Chart Details
+                    </button>
                 </div>
             </div>
 

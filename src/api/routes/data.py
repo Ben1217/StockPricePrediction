@@ -63,38 +63,36 @@ def _cache_set(key: str, df: pd.DataFrame) -> None:
 
 # ── Internal fetchers ─────────────────────────────────────────────────────────
 
-def _fetch_yfinance(symbol: str, start: str, end: str) -> pd.DataFrame:
+def _fetch_yfinance(symbol: str, start: str, end: str, interval: str = "1d") -> pd.DataFrame:
     """
-    Fetch OHLCV from yfinance.
+    Fetch OHLCV from yfinance with support for intraday intervals.
+    """
+    key = f"yf:{symbol}:{interval}:{start}:{end}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
 
-    - During market hours: fetches today's 1-minute bars so the last row is
-      always the most recent tick available.
-    - Outside market hours: fetches daily bars for the requested range.
-    """
-    market_open = is_market_open()
-    if market_open:
-        key = f"yf_live:{symbol}"
-        cached = _cache_get(key)
-        if cached is not None:
-            return cached
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period="1d", interval="1m")
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if not df.empty:
-            _cache_set(key, df)
-        return df
-    else:
-        key = f"yf:{symbol}:{start}:{end}"
-        cached = _cache_get(key)
-        if cached is not None:
-            return cached
-        df = yf.download(symbol, start=start, end=end, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if not df.empty:
-            _cache_set(key, df)
-        return df
+    try:
+        if interval in ("1d", "1wk"):
+            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+        else:
+            # For intraday, use period matching limits to avoid empty errors
+            period_map = {"1m": "7d", "5m": "60d", "15m": "60d", "1h": "730d", "4h": "730d"}
+            period = period_map.get(interval, "1mo")
+            df = yf.download(symbol, period=period, interval=interval, progress=False)
+    except Exception as e:
+        logger.error(f"YF fetch failed for {symbol} at {interval}: {e}")
+        return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    # Drop any severely malformed rows
+    if not df.empty:
+        df = df.dropna(subset=["Close"])
+        _cache_set(key, df)
+
+    return df
 
 
 def _fetch_alpha_vantage_history(symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -139,8 +137,10 @@ def _fetch_alpha_vantage_history(symbol: str, start: str, end: str) -> pd.DataFr
 def _df_to_bars(df: pd.DataFrame) -> list[PriceBar]:
     bars = []
     for dt, row in df.iterrows():
+        # Handle datetime index natively for timezone-aware intraday
+        format_date = str(dt.date()) if hasattr(dt, "date") and dt.time() == dt.time().replace(hour=0, minute=0, second=0) else str(dt)
         bars.append(PriceBar(
-            date=str(dt.date()) if hasattr(dt, "date") else str(dt),
+            date=format_date,
             open=round(float(row.get("Open", 0)), 4),
             high=round(float(row.get("High", 0)), 4),
             low=round(float(row.get("Low", 0)), 4),
@@ -220,6 +220,7 @@ async def get_extended_quote(
 async def get_prices(
     symbol: str,
     source: str = Query("yfinance", enum=["yfinance", "alpha_vantage"]),
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
     start: Optional[str] = None,
     end: Optional[str] = None,
     days: int = Query(120, ge=5, le=3650),
@@ -235,7 +236,7 @@ async def get_prices(
         if source == "alpha_vantage":
             df = _fetch_alpha_vantage_history(symbol, start, end)
         else:
-            df = _fetch_yfinance(symbol, start, end)
+            df = _fetch_yfinance(symbol, start, end, interval=interval)
     except HTTPException:
         raise
     except Exception as e:
@@ -265,14 +266,15 @@ async def get_prices(
 @router.get("/indicators/{symbol}", response_model=IndicatorResponse)
 async def get_indicators(
     symbol: str,
-    days: int = Query(120, ge=30, le=3650),
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
+    days: int = Query(120, ge=1, le=3650),
 ):
     """Compute technical indicators for a symbol."""
     symbol = symbol.upper()
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=days + 200)).strftime("%Y-%m-%d")  # extra for SMA200
 
-    df = _fetch_yfinance(symbol, start, end)
+    df = _fetch_yfinance(symbol, start, end, interval=interval)
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
 
@@ -286,7 +288,8 @@ async def get_indicators(
     ]
     data = []
     for dt, row in df.iterrows():
-        entry = {"date": str(dt.date()) if hasattr(dt, "date") else str(dt)}
+        format_date = str(dt.date()) if hasattr(dt, "date") and dt.time() == dt.time().replace(hour=0, minute=0, second=0) else str(dt)
+        entry = {"date": format_date}
         for c in indicator_cols:
             v = row[c]
             entry[c] = round(float(v), 4) if v is not None else None

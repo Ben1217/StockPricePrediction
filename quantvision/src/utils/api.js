@@ -19,8 +19,8 @@ async function apiFetch(path, options = {}) {
 }
 
 // ── Data ────────────────────────────────────────────────────
-export async function fetchPrices(symbol, source = "yfinance", days = 120) {
-    return apiFetch(`/data/prices/${symbol}?source=${source}&days=${days}`);
+export async function fetchPrices(symbol, source = "yfinance", days = 120, interval = "1d") {
+    return apiFetch(`/data/prices/${symbol}?source=${source}&days=${days}&interval=${interval}`);
 }
 
 export async function fetchLiveQuote(symbol, source = "yfinance") {
@@ -31,8 +31,8 @@ export async function fetchExtendedQuote(symbol, source = "yfinance") {
     return apiFetch(`/data/extended-quote/${symbol}?source=${source}`);
 }
 
-export async function fetchIndicators(symbol, days = 120) {
-    return apiFetch(`/data/indicators/${symbol}?days=${days}`);
+export async function fetchIndicators(symbol, days = 120, interval = "1d") {
+    return apiFetch(`/data/indicators/${symbol}?days=${days}&interval=${interval}`);
 }
 
 export async function fetchSP500() {
@@ -73,6 +73,14 @@ export async function fetchPredictions(symbol, modelType = "xgboost", horizon = 
         method: "POST",
         body: JSON.stringify({ symbol, model_type: modelType, horizon }),
     });
+}
+
+export async function fetchHistoricalSignals(symbol, days = 90, modelType = "xgboost") {
+    return apiFetch(`/predict/historical-signals/${symbol}?days=${days}&model_type=${modelType}`);
+}
+
+export async function fetchPatterns(symbol, interval = "1d", lookback = 120) {
+    return apiFetch(`/patterns/${symbol}?interval=${interval}&lookback=${lookback}`);
 }
 
 // ── Backtesting ─────────────────────────────────────────────
