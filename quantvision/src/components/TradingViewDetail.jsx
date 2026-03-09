@@ -5,8 +5,21 @@ import { C } from "../utils/data";
 
 function parseChartTime(dateStr) {
     if (!dateStr) return null;
-    if (dateStr.length === 10) return dateStr; // YYYY-MM-DD
-    return Math.floor(new Date(dateStr).getTime() / 1000);
+    if (typeof dateStr === 'number') {
+        return dateStr > 10000000000 ? Math.floor(dateStr / 1000) : Math.floor(dateStr);
+    }
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return null;
+    return Math.floor(d.getTime() / 1000);
+}
+
+function processChartData(data) {
+    const seen = new Set();
+    return data.filter(d => {
+        if (!d.time || seen.has(d.time)) return false;
+        seen.add(d.time);
+        return true;
+    }).sort((a, b) => a.time - b.time);
 }
 
 // ── Shared chart options ───────────────────────────────────
@@ -68,6 +81,76 @@ function ConfluencePanel({ confluence }) {
     );
 }
 
+// ── Pattern Catalogue ──────────────────────────────────────
+const PATTERN_CATALOGUE = [
+    { category: "Single-Candle", patterns: ["Doji", "Hammer", "Shooting Star"] },
+    { category: "Multi-Candle", patterns: ["Bullish Engulfing", "Bearish Engulfing", "Morning Star", "Evening Star", "Bullish Harami", "Bearish Harami"] },
+    { category: "Chart Patterns", patterns: ["Head & Shoulders", "Inverse Head & Shoulders", "Double Top", "Double Bottom", "Ascending Triangle", "Descending Triangle", "Symmetrical Triangle", "Cup & Handle"] },
+];
+const MAX_PATTERNS = 3;
+
+// ── Pattern Dropdown Component ────────────────────────────
+function PatternDropdown({ selected, onToggle, onClear, onClose }) {
+    const dropRef = useRef(null);
+
+    useEffect(() => {
+        const handler = (e) => { if (dropRef.current && !dropRef.current.contains(e.target)) onClose(); };
+        document.addEventListener("mousedown", handler);
+        return () => document.removeEventListener("mousedown", handler);
+    }, [onClose]);
+
+    const atMax = selected.size >= MAX_PATTERNS;
+
+    return (
+        <div ref={dropRef} style={{
+            position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 100,
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 10,
+            padding: "12px 14px", minWidth: 240, maxHeight: 380, overflowY: "auto",
+            backdropFilter: "blur(12px)", boxShadow: "0 8px 32px rgba(0,0,0,.55)",
+            fontFamily: "'DM Mono', monospace",
+        }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.text, letterSpacing: 1 }}>SELECT PATTERNS</span>
+                <button onClick={onClear} style={{
+                    background: "transparent", border: `1px solid ${C.border}`, borderRadius: 4,
+                    color: C.textDim, fontSize: 9, padding: "2px 8px", cursor: "pointer",
+                    transition: "color .2s",
+                }} onMouseEnter={e => e.target.style.color = C.red}
+                    onMouseLeave={e => e.target.style.color = C.textDim}>Clear All</button>
+            </div>
+            <div style={{ fontSize: 9, color: atMax ? C.amber : C.textDim, marginBottom: 10, transition: "color .3s" }}>
+                {selected.size}/{MAX_PATTERNS} selected {atMax && "— limit reached"}
+            </div>
+            {PATTERN_CATALOGUE.map(cat => (
+                <div key={cat.category} style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 9, color: C.textDim, fontWeight: 700, marginBottom: 4, textTransform: "uppercase", letterSpacing: .8 }}>{cat.category}</div>
+                    {cat.patterns.map(p => {
+                        const isSelected = selected.has(p);
+                        const disabled = atMax && !isSelected;
+                        return (
+                            <label key={p} title={disabled ? "Max 3 patterns allowed" : ""}
+                                style={{
+                                    display: "flex", alignItems: "center", gap: 8, padding: "4px 6px",
+                                    borderRadius: 5, cursor: disabled ? "not-allowed" : "pointer",
+                                    opacity: disabled ? 0.35 : 1,
+                                    background: isSelected ? C.amber + "15" : "transparent",
+                                    transition: "background .2s, opacity .2s",
+                                }}
+                                onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = isSelected ? C.amber + "22" : C.bg2; }}
+                                onMouseLeave={e => { e.currentTarget.style.background = isSelected ? C.amber + "15" : "transparent"; }}>
+                                <input type="checkbox" checked={isSelected} disabled={disabled}
+                                    onChange={() => { if (!disabled) onToggle(p); }}
+                                    style={{ accentColor: C.amber, cursor: disabled ? "not-allowed" : "pointer", width: 13, height: 13 }} />
+                                <span style={{ fontSize: 11, color: isSelected ? C.text : C.textMid }}>{p}</span>
+                            </label>
+                        );
+                    })}
+                </div>
+            ))}
+        </div>
+    );
+}
+
 // ── Sub-panel Chart Creator ────────────────────────────────
 function createSubChart(container, interval, height = 100) {
     if (!container) return null;
@@ -108,6 +191,30 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const [showMACD, setShowMACD] = useState(true);
     const [showVol, setShowVol] = useState(true);
     const [showATR, setShowATR] = useState(false);
+
+    // Pattern selection layer
+    const [selectedPatterns, setSelectedPatterns] = useState(() => {
+        try {
+            const saved = localStorage.getItem("qv_selectedPatterns");
+            return saved ? new Set(JSON.parse(saved)) : new Set();
+        } catch { return new Set(); }
+    });
+    const [patternDropdownOpen, setPatternDropdownOpen] = useState(false);
+
+    // Persist pattern selections
+    useEffect(() => {
+        localStorage.setItem("qv_selectedPatterns", JSON.stringify([...selectedPatterns]));
+    }, [selectedPatterns]);
+
+    const togglePattern = (name) => {
+        setSelectedPatterns(prev => {
+            const next = new Set(prev);
+            if (next.has(name)) next.delete(name);
+            else if (next.size < MAX_PATTERNS) next.add(name);
+            return next;
+        });
+    };
+    const clearPatterns = () => setSelectedPatterns(new Set());
 
     const stateData = useRef({ ohlc: [], indicators: [], signals: [], patterns: null });
 
@@ -187,10 +294,10 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             seriesRefs.current.candle = candleSeries;
 
             const { ohlc, indicators, signals, patterns } = stateData.current;
-            const ohlcData = ohlc.map(b => ({
+            const ohlcData = processChartData(ohlc.map(b => ({
                 time: parseChartTime(b.date),
                 open: b.open, high: b.high, low: b.low, close: b.close
-            })).filter(b => b.time);
+            })));
             candleSeries.setData(ohlcData);
 
             // ── Indicator Map ──────────────────────────────
@@ -242,18 +349,20 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 });
             }
 
-            // Candlestick patterns
-            if (patterns?.candlestick_patterns) {
-                patterns.candlestick_patterns.forEach(p => {
-                    const isBullish = p.direction === "bullish";
-                    allMarkers.push({
-                        time: parseChartTime(p.date),
-                        position: isBullish ? 'belowBar' : 'aboveBar',
-                        color: isBullish ? "#22d3ee" : "#fb923c",
-                        shape: isBullish ? 'arrowUp' : 'arrowDown',
-                        text: `${p.pattern_name} (${(p.confidence * 100).toFixed(0)}%)`
+            // Candlestick patterns — only render selected patterns
+            if (patterns?.candlestick_patterns && selectedPatterns.size > 0) {
+                patterns.candlestick_patterns
+                    .filter(p => selectedPatterns.has(p.pattern_name))
+                    .forEach(p => {
+                        const isBullish = p.direction === "bullish";
+                        allMarkers.push({
+                            time: parseChartTime(p.date),
+                            position: isBullish ? 'belowBar' : 'aboveBar',
+                            color: isBullish ? "#22d3ee" : "#fb923c",
+                            shape: isBullish ? 'arrowUp' : 'arrowDown',
+                            text: `${p.pattern_name} (${(p.confidence * 100).toFixed(0)}%)`
+                        });
                     });
-                });
             }
 
             // Filter markers to only those matching chart data, deduplicate by time+position, sort
@@ -273,9 +382,9 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 createSeriesMarkers(candleSeries, uniqueMarkers);
             }
 
-            // ── Chart Pattern Trendlines ───────────────────
-            if (patterns?.chart_patterns) {
-                patterns.chart_patterns.forEach(cp => {
+            // ── Chart Pattern Trendlines (filtered) ────────
+            if (patterns?.chart_patterns && selectedPatterns.size > 0) {
+                patterns.chart_patterns.filter(cp => selectedPatterns.has(cp.pattern_name)).forEach(cp => {
                     if (cp.key_levels && cp.key_levels.length >= 2) {
                         const isBullish = cp.pattern_name.includes("Bottom") || cp.pattern_name.includes("Inverse") ||
                             cp.pattern_name.includes("Bull") || cp.pattern_name.includes("Ascending") ||
@@ -287,9 +396,9 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                             color: lineColor, lineWidth: 2, lineStyle: 2,
                             lastValueVisible: false, priceLineVisible: false,
                         });
-                        const points = cp.key_levels.map(kl => ({
+                        const points = processChartData(cp.key_levels.map(kl => ({
                             time: parseChartTime(kl.date), value: kl.price
-                        })).filter(p => p.time);
+                        })));
                         if (points.length >= 2) trendSeries.setData(points);
 
                         // Neckline
@@ -351,7 +460,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 if (lastH) {
                     [dP, dU95, dL95, dU68, dL68].forEach(arr => arr.unshift({ time: lastH.time, value: lastH.close }));
                 }
-                predSeries.setData(dP); u95.setData(dU95); l95.setData(dL95); u68.setData(dU68); l68.setData(dL68);
+                predSeries.setData(processChartData(dP)); u95.setData(processChartData(dU95)); l95.setData(processChartData(dL95)); u68.setData(processChartData(dU68)); l68.setData(processChartData(dL68));
             }
 
             chart.timeScale().fitContent();
@@ -361,7 +470,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             const { ohlc, indicators } = stateData.current;
             const indMap = {};
             indicators.forEach(i => indMap[parseChartTime(i.date)] = i);
-            const ohlcData = ohlc.map(b => ({ time: parseChartTime(b.date), close: b.close, open: b.open, volume: b.volume })).filter(b => b.time);
+            const ohlcData = processChartData(ohlc.map(b => ({ time: parseChartTime(b.date), close: b.close, open: b.open, volume: b.volume })));
 
             // ── RSI Sub-panel ──────────────────────────────
             if (showRSI && rsiContainerRef.current) {
@@ -438,7 +547,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             window.removeEventListener("resize", handleResize);
             cleanup();
         };
-    }, [symbol, interval, showSMA, showEMA, showBB, showVWAP, showRSI, showMACD, showVol, showATR, mode, predictionData]);
+    }, [symbol, interval, showSMA, showEMA, showBB, showVWAP, showRSI, showMACD, showVol, showATR, mode, predictionData, selectedPatterns]);
 
     const isIntraday = interval.includes("m") || interval === "1h" || interval === "4h";
 
@@ -493,6 +602,33 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                         }}>{ind.label}</button>
                     ))}
                     <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
+                    {/* Pattern selector */}
+                    <div style={{ position: "relative" }}>
+                        <button onClick={() => setPatternDropdownOpen(v => !v)} style={{
+                            background: patternDropdownOpen ? C.amber + '33' : (selectedPatterns.size > 0 ? C.bg3 : "transparent"),
+                            color: selectedPatterns.size > 0 ? C.amber : C.textDim,
+                            border: `1px solid ${selectedPatterns.size > 0 ? C.amber + '55' : C.border}`,
+                            borderRadius: 3, padding: "3px 10px", fontSize: 10, cursor: "pointer",
+                            fontWeight: 700, display: "flex", alignItems: "center", gap: 5,
+                            transition: "all .2s",
+                        }}>
+                            <span>Patterns</span>
+                            <span style={{
+                                background: selectedPatterns.size > 0 ? C.amber : C.textDim,
+                                color: C.bg0, borderRadius: 8, padding: "0 5px", fontSize: 9, fontWeight: 800,
+                                minWidth: 18, textAlign: "center",
+                            }}>{selectedPatterns.size}/{MAX_PATTERNS}</span>
+                        </button>
+                        {patternDropdownOpen && (
+                            <PatternDropdown
+                                selected={selectedPatterns}
+                                onToggle={togglePattern}
+                                onClear={clearPatterns}
+                                onClose={() => setPatternDropdownOpen(false)}
+                            />
+                        )}
+                    </div>
+                    <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
                     <button onClick={onClose} style={{
                         background: "transparent", border: "none", color: C.textDim, cursor: "pointer",
                         fontSize: 20, lineHeight: "20px", padding: "0 4px"
@@ -540,7 +676,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             <div style={{ marginTop: 8, display: "flex", gap: 12, fontSize: 9, color: C.textDim, justifyContent: "center", flexWrap: "wrap" }}>
                 <span><b style={{ color: C.green }}>↑</b> BUY Signal</span>
                 <span><b style={{ color: C.red }}>↓</b> SELL Signal</span>
-                <span style={{ color: "#22d3ee" }}>◆ Candlestick Pattern</span>
+                {selectedPatterns.size > 0 && <span style={{ color: "#22d3ee" }}>◆ Candlestick Pattern ({[...selectedPatterns].join(", ")})</span>}
                 {mode === "prediction" && (
                     <>
                         <span style={{ color: C.amber }}>— Predicted Path</span>
