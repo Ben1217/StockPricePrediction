@@ -254,6 +254,10 @@ async def get_prices(
         stale_warning = str(e)
         logger.warning(stale_warning)
 
+    # Deduplicate index — yfinance can return duplicate timestamps
+    df = df[~df.index.duplicated(keep='last')]
+    df = df.sort_index()
+
     bars = _df_to_bars(df)
     return PriceResponse(
         symbol=symbol,
@@ -279,6 +283,8 @@ async def get_indicators(
         raise HTTPException(404, f"No data for {symbol}")
 
     df = add_all_technical_indicators(df)
+    df = df[~df.index.duplicated(keep='last')]
+    df = df.sort_index()
     df = df.tail(days)
     df = df.replace({float("nan"): None, float("inf"): None, float("-inf"): None})
 
