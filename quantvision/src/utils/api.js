@@ -83,6 +83,10 @@ export async function fetchPatterns(symbol, interval = "1d", lookback = 120) {
     return apiFetch(`/patterns/${symbol}?interval=${interval}&lookback=${lookback}`);
 }
 
+export async function fetchSupportResistance(symbol, interval = "1d", lookback = 180) {
+    return apiFetch(`/patterns/support-resistance/${symbol}?interval=${interval}&lookback=${lookback}`);
+}
+
 // ── Backtesting ─────────────────────────────────────────────
 export async function runBacktest(params) {
     return apiFetch("/backtest/run", {

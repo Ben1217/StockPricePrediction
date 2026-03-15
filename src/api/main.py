@@ -21,6 +21,7 @@ from src.api.routes.backtest import router as backtest_router
 from src.api.routes.portfolio import router as portfolio_router
 from src.api.routes.export import router as export_router
 from src.api.routes.patterns import router as patterns_router
+from src.api.routes.agent import router as agent_router
 
 
 app = FastAPI(
@@ -46,6 +47,7 @@ app.include_router(backtest_router,  prefix="/api/backtest",  tags=["Backtesting
 app.include_router(portfolio_router, prefix="/api/portfolio", tags=["Portfolio"])
 app.include_router(export_router,    prefix="/api/export",    tags=["Export"])
 app.include_router(patterns_router,  prefix="/api/patterns",  tags=["Patterns"])
+app.include_router(agent_router,     prefix="/api/agent",     tags=["Agents"])
 
 
 @app.get("/")
@@ -57,6 +59,7 @@ async def root():
         "endpoints": [
             "/api/data", "/api/training", "/api/predict",
             "/api/backtest", "/api/portfolio", "/api/export",
+            "/api/patterns", "/api/agent",
         ],
     }
 

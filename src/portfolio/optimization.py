@@ -261,3 +261,69 @@ def get_optimal_weights(
             k: 0.5 * hist_weights.get(k, 0) + 0.5 * pred_weights.get(k, 0)
             for k in set(hist_weights) | set(pred_weights)
         }
+
+
+def calculate_rebalancing_trades(
+    current_holdings: Dict[str, float],
+    target_weights: Dict[str, float],
+    total_portfolio_value: float,
+    transaction_cost_bps: float = 10.0,
+) -> Dict:
+    """
+    Compute exact BUY/SELL trades needed to move from current holdings
+    to target weights.
+
+    Parameters
+    ----------
+    current_holdings : dict
+        {ticker: current_dollar_value}
+    target_weights : dict
+        {ticker: target_weight} — must sum to 1.0
+    total_portfolio_value : float
+        Total portfolio value in dollars
+    transaction_cost_bps : float
+        Transaction cost in basis points (10 bps = 0.10% per trade)
+
+    Returns
+    -------
+    dict
+        trades per ticker, total_transaction_cost, portfolio_turnover_pct,
+        net_portfolio_value_after_costs
+    """
+    trades = {}
+    total_transaction_cost = 0.0
+    total_turnover = 0.0
+
+    for ticker, target_w in target_weights.items():
+        target_value = target_w * total_portfolio_value
+        current_value = current_holdings.get(ticker, 0.0)
+        delta = target_value - current_value
+        cost = abs(delta) * (transaction_cost_bps / 10000)
+        total_transaction_cost += cost
+        total_turnover += abs(delta)
+
+        trades[ticker] = {
+            "action": "BUY" if delta > 0 else "SELL" if delta < 0 else "HOLD",
+            "current_value": round(current_value, 2),
+            "target_value": round(target_value, 2),
+            "delta_dollars": round(abs(delta), 2),
+            "current_weight": round(
+                current_value / total_portfolio_value if total_portfolio_value > 0 else 0, 4
+            ),
+            "target_weight": round(target_w, 4),
+            "weight_drift": round(
+                target_w - (current_value / total_portfolio_value if total_portfolio_value > 0 else 0), 4
+            ),
+            "transaction_cost": round(cost, 2),
+        }
+
+    return {
+        "trades": trades,
+        "total_transaction_cost": round(total_transaction_cost, 2),
+        "portfolio_turnover_pct": round(
+            total_turnover / total_portfolio_value * 100 if total_portfolio_value > 0 else 0, 2
+        ),
+        "net_portfolio_value_after_costs": round(
+            total_portfolio_value - total_transaction_cost, 2
+        ),
+    }

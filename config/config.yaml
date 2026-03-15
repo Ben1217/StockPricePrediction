@@ -247,3 +247,23 @@ logging:
     rotation: "daily"
     retention_days: 30
     max_size_mb: 100
+
+# ================================
+# AI AGENTS (CrewAI)
+# ================================
+agents:
+  llm:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    api_key_env: ANTHROPIC_API_KEY
+  market_monitor:
+    poll_interval_seconds: 300
+    price_change_threshold: 0.02
+    volume_spike_multiplier: 3.0
+    rsi_overbought: 80
+    rsi_oversold: 20
+  backtest_validator:
+    min_sharpe: 0.8
+    max_drawdown: 0.20
+    min_win_rate: 0.45
+    lookback_months: 6

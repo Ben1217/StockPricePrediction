@@ -180,6 +180,24 @@ class ConfluenceSignal(BaseModel):
     strength: float
 
 
+class SRLevel(BaseModel):
+    price: float
+    type: str  # "support" | "resistance"
+    strength: str  # "strong" | "normal"
+    confirmations: int
+    sources: List[str]
+    zone_low: float
+    zone_high: float
+
+
+class SupportResistanceResponse(BaseModel):
+    symbol: str
+    current_price: float
+    levels: List[SRLevel]
+    trendlines: List[Dict]
+    dynamic_levels: List[Dict]
+
+
 class PatternResponse(BaseModel):
     symbol: str
     candlestick_patterns: List[CandlestickPatternItem]

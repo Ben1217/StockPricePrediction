@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries, createSeriesMarkers } from "lightweight-charts";
-import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns } from "../utils/api";
+import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns, fetchSupportResistance } from "../utils/api";
 import { C } from "../utils/data";
 
 function parseChartTime(dateStr) {
@@ -35,9 +35,9 @@ const baseChartOpts = (interval) => ({
 });
 
 // ── Confluence Panel ───────────────────────────────────────
-function ConfluencePanel({ confluence }) {
-    if (!confluence) return null;
-    const { rsi_signal, rsi_value, macd_signal, pattern_signal, ml_direction, ml_confidence, overall, strength } = confluence;
+function ConfluencePanel({ confluence, srSummary }) {
+    if (!confluence && !srSummary) return null;
+    const { rsi_signal, rsi_value, macd_signal, pattern_signal, ml_direction, ml_confidence, overall, strength } = confluence || {};
 
     const overallColor = overall.includes("Buy") ? C.green : overall.includes("Sell") ? C.red : C.amber;
     const signalIcon = (sig) => {
@@ -46,12 +46,12 @@ function ConfluencePanel({ confluence }) {
         return { icon: "●", color: C.textDim };
     };
 
-    const rows = [
+    const rows = confluence ? [
         { label: "Pattern", signal: pattern_signal },
         { label: "RSI", signal: rsi_signal, extra: `${rsi_value}` },
         { label: "MACD", signal: macd_signal },
-        { label: "ML Model", signal: ml_direction, extra: `${ml_confidence.toFixed(0)}%` },
-    ];
+        { label: "ML Model", signal: ml_direction, extra: `${ml_confidence?.toFixed(0)}%` },
+    ] : [];
 
     return (
         <div style={{
@@ -60,12 +60,16 @@ function ConfluencePanel({ confluence }) {
             padding: "10px 14px", minWidth: 180, backdropFilter: "blur(8px)",
             fontFamily: "'DM Mono', monospace", fontSize: 10,
         }}>
-            <div style={{ fontWeight: 800, color: overallColor, fontSize: 13, marginBottom: 6, textAlign: "center", letterSpacing: 1 }}>
-                {overall.toUpperCase()}
-            </div>
-            <div style={{ width: "100%", height: 3, borderRadius: 2, background: C.border, marginBottom: 8 }}>
-                <div style={{ width: `${Math.min(100, strength * 100)}%`, height: "100%", borderRadius: 2, background: overallColor, transition: "width 0.3s" }} />
-            </div>
+            {confluence && (
+                <>
+                    <div style={{ fontWeight: 800, color: overallColor, fontSize: 13, marginBottom: 6, textAlign: "center", letterSpacing: 1 }}>
+                        {overall?.toUpperCase()}
+                    </div>
+                    <div style={{ width: "100%", height: 3, borderRadius: 2, background: C.border, marginBottom: 8 }}>
+                        <div style={{ width: `${Math.min(100, strength * 100)}%`, height: "100%", borderRadius: 2, background: overallColor, transition: "width 0.3s" }} />
+                    </div>
+                </>
+            )}
             {rows.map(r => {
                 const s = signalIcon(r.signal);
                 return (
@@ -77,6 +81,20 @@ function ConfluencePanel({ confluence }) {
                     </div>
                 );
             })}
+            
+            {srSummary && (
+                <>
+                    {confluence && <div style={{ height: 1, background: C.border, margin: "6px 0" }} />}
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", marginTop: confluence ? 0 : 4 }}>
+                        <span style={{ color: C.textDim }}>Key Resistance</span>
+                        <span style={{ color: C.red, fontWeight: 700 }}>${srSummary.resistance}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
+                        <span style={{ color: C.textDim }}>Key Support</span>
+                        <span style={{ color: C.cyan, fontWeight: 700 }}>${srSummary.support}</span>
+                    </div>
+                </>
+            )}
         </div>
     );
 }
@@ -176,11 +194,13 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [confluence, setConfluence] = useState(null);
+    const [srSummary, setSrSummary] = useState(null);
 
     const [interval, setInterval] = useState("1d");
     const intervals = ["1m", "5m", "15m", "1h", "4h", "1d", "1wk"];
 
     // Indicator toggles — on-chart
+    const [showSR, setShowSR] = useState(true);
     const [showSMA, setShowSMA] = useState(true);
     const [showEMA, setShowEMA] = useState(true);
     const [showBB, setShowBB] = useState(true);
@@ -216,7 +236,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     };
     const clearPatterns = () => setSelectedPatterns(new Set());
 
-    const stateData = useRef({ ohlc: [], indicators: [], signals: [], patterns: null });
+    const stateData = useRef({ ohlc: [], indicators: [], signals: [], patterns: null, srData: null });
 
     useEffect(() => {
         let cancelled = false;
@@ -227,10 +247,11 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 let days = interval.includes("m") ? 5 : (interval === "1h" ? 20 : (interval === "4h" ? 60 : 120));
                 const lookback = Math.max(days, 60);
 
-                const [priceRes, indRes, patRes] = await Promise.all([
+                const [priceRes, indRes, patRes, srRes] = await Promise.all([
                     fetchPrices(symbol, "yfinance", days, interval),
                     fetchIndicators(symbol, days, interval),
                     fetchPatterns(symbol, interval, lookback),
+                    showSR ? fetchSupportResistance(symbol, interval, lookback) : Promise.resolve(null)
                 ].map(p => p.catch(e => null)));
 
                 if (cancelled) return;
@@ -247,9 +268,23 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     indicators: indRes?.data || [],
                     signals: sigRes || [],
                     patterns: patRes || null,
+                    srData: srRes || null,
                 };
 
                 if (patRes?.confluence) setConfluence(patRes.confluence);
+                
+                // Formulate text summary
+                if (srRes?.levels) {
+                    const sup = srRes.levels.filter(l => l.type === "support").sort((a,b)=>b.price - a.price);
+                    const res = srRes.levels.filter(l => l.type === "resistance").sort((a,b)=>a.price - b.price);
+                    setSrSummary({ 
+                         support: sup[0] ? sup[0].price.toFixed(2) : "N/A", 
+                         resistance: res[0] ? res[0].price.toFixed(2) : "N/A" 
+                    });
+                } else {
+                    setSrSummary(null);
+                }
+                
                 renderAll();
             } catch (err) {
                 if (!cancelled) setError(err.message);
@@ -293,7 +328,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             });
             seriesRefs.current.candle = candleSeries;
 
-            const { ohlc, indicators, signals, patterns } = stateData.current;
+            const { ohlc, indicators, signals, patterns, srData } = stateData.current;
             const ohlcData = processChartData(ohlc.map(b => ({
                 time: parseChartTime(b.date),
                 open: b.open, high: b.high, low: b.low, close: b.close
@@ -363,6 +398,27 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                             text: `${p.pattern_name} (${(p.confidence * 100).toFixed(0)}%)`
                         });
                     });
+            }
+
+            // Support & Resistance Dynamic MA Markers
+            if (showSR && srData?.dynamic_levels) {
+                srData.dynamic_levels.forEach(dl => {
+                    if (dl.bounces && dl.bounces.length > 0) {
+                        dl.bounces.forEach(bounce => {
+                            const isBullish = dl.type === "support";
+                            const bounceTime = ohlcData[Math.min(bounce.index, ohlcData.length - 1)]?.time;
+                            if (bounceTime) {
+                                allMarkers.push({
+                                    time: bounceTime,
+                                    position: isBullish ? 'belowBar' : 'aboveBar',
+                                    color: isBullish ? C.cyan : C.red,
+                                    shape: isBullish ? 'arrowUp' : 'arrowDown',
+                                    text: `${dl.name} Bounce`
+                                });
+                            }
+                        });
+                    }
+                });
             }
 
             // Filter markers to only those matching chart data, deduplicate by time+position, sort
@@ -435,6 +491,61 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                         }
                     }
                 });
+            }
+
+            // ── Generated Support & Resistance Overlays ────
+            if (showSR && srData) {
+                // S&R Horizontal Lines
+                if (srData.levels) {
+                    srData.levels.forEach(sr => {
+                        const isSupp = sr.type === "support";
+                        const isStrong = sr.strength === "strong";
+                        const labelText = `${isSupp ? "Support" : "Resistance"} ~$${sr.price.toFixed(2)}`;
+                        
+                        candleSeries.createPriceLine({
+                            price: sr.price,
+                            color: isSupp ? C.cyan : C.red,
+                            lineWidth: isStrong ? 3 : 2, // thicker if strong
+                            lineStyle: isStrong ? 0 : 2, // solid if strong, dashed if normal
+                            axisLabelVisible: true,
+                            title: labelText,
+                        });
+                        
+                        // Render zone bounds as very thin dashed lines if substantial
+                        if (Math.abs(sr.zone_high - sr.zone_low) > 0.1) {
+                            candleSeries.createPriceLine({
+                                price: sr.zone_high, color: (isSupp ? C.cyan : C.red) + '44', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: ""
+                            });
+                            candleSeries.createPriceLine({
+                                price: sr.zone_low, color: (isSupp ? C.cyan : C.red) + '44', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: ""
+                            });
+                        }
+                    });
+                }
+                
+                // S&R Trendlines
+                if (srData.trendlines) {
+                    srData.trendlines.forEach(tl => {
+                        const isSupp = tl.type === "support";
+                        const tlSeries = chart.addSeries(LineSeries, {
+                            color: isSupp ? C.cyan + "AA" : C.red + "AA",
+                            lineWidth: 2,
+                            lineStyle: 1, // dotted
+                            lastValueVisible: false,
+                            priceLineVisible: false,
+                        });
+                        
+                        const tStart = ohlcData[Math.min(tl.start_idx, ohlcData.length - 1)]?.time;
+                        const tEnd = ohlcData[Math.min(tl.end_idx, ohlcData.length - 1)]?.time;
+                        
+                        if (tStart && tEnd) {
+                            tlSeries.setData([
+                                { time: tStart, value: tl.start_price },
+                                { time: tEnd, value: tl.end_price }
+                            ]);
+                        }
+                    });
+                }
             }
 
             // ── Prediction Overlays ────────────────────────
@@ -553,6 +664,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
     // ── Toolbar toggle definitions ─────────────────────────
     const onChartToggles = [
+        { label: "S&R", active: showSR, set: setShowSR },
         { label: "SMA", active: showSMA, set: setShowSMA },
         { label: "EMA", active: showEMA, set: setShowEMA },
         { label: "BB", active: showBB, set: setShowBB },
@@ -648,7 +760,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                         <div style={{ color: C.red, fontSize: 13, background: C.red + '22', padding: "8px 16px", borderRadius: 8 }}>⚠ Error: {error}</div>
                     </div>
                 )}
-                <ConfluencePanel confluence={confluence} />
+                <ConfluencePanel confluence={confluence} srSummary={showSR ? srSummary : null} />
                 <div ref={chartContainerRef} style={{ width: "100%", height: "100%", background: C.bg1 }} />
             </div>
 
@@ -677,6 +789,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 <span><b style={{ color: C.green }}>↑</b> BUY Signal</span>
                 <span><b style={{ color: C.red }}>↓</b> SELL Signal</span>
                 {selectedPatterns.size > 0 && <span style={{ color: "#22d3ee" }}>◆ Candlestick Pattern ({[...selectedPatterns].join(", ")})</span>}
+                {showSR && <span style={{ color: C.cyan }}>— Support</span>}
+                {showSR && <span style={{ color: C.red }}>— Resistance</span>}
                 {mode === "prediction" && (
                     <>
                         <span style={{ color: C.amber }}>— Predicted Path</span>

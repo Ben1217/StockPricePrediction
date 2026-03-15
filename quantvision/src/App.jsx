@@ -268,6 +268,262 @@ function StockSearchModal({ watchlist, onAdd, onClose }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   CHAT WIDGET — Draggable AI Agent Interface
+   Drag the header (open) or the 🤖 button (closed) to reposition.
+═══════════════════════════════════════════════════════════════ */
+function ChatWidget({ apiConnected }) {
+    const PANEL_W = 400, PANEL_H = 520, BTN_SIZE = 56;
+
+    const [open, setOpen] = useState(false);
+    const [messages, setMessages] = useState([
+        { role: "assistant", text: "Hi! I'm QuantVision AI. Ask me anything about stocks, predictions, or your portfolio." },
+    ]);
+    const [input, setInput] = useState("");
+    const [loading, setLoading] = useState(false);
+    const messagesEndRef = useRef(null);
+
+    // ── Drag state ──────────────────────────────────────────────
+    const [pos, setPos] = useState({ x: window.innerWidth - BTN_SIZE - 24, y: window.innerHeight - BTN_SIZE - 24 });
+    const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0, moved: false });
+
+    const clamp = (x, y, w, h) => ({
+        x: Math.max(0, Math.min(x, window.innerWidth - w)),
+        y: Math.max(0, Math.min(y, window.innerHeight - h)),
+    });
+
+    const onDragStart = (e) => {
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        dragRef.current = { dragging: true, startX: clientX, startY: clientY, origX: pos.x, origY: pos.y, moved: false };
+        e.preventDefault();
+    };
+
+    useEffect(() => {
+        const onMove = (e) => {
+            const d = dragRef.current;
+            if (!d.dragging) return;
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const dx = clientX - d.startX, dy = clientY - d.startY;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) d.moved = true;
+            const w = open ? PANEL_W : BTN_SIZE, h = open ? PANEL_H : BTN_SIZE;
+            setPos(clamp(d.origX + dx, d.origY + dy, w, h));
+        };
+        const onEnd = () => { dragRef.current.dragging = false; };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onEnd);
+        window.addEventListener("touchmove", onMove, { passive: false });
+        window.addEventListener("touchend", onEnd);
+        return () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onEnd);
+            window.removeEventListener("touchmove", onMove);
+            window.removeEventListener("touchend", onEnd);
+        };
+    }, [open, pos]);
+
+    // Re-clamp on window resize
+    useEffect(() => {
+        const onResize = () => {
+            const w = open ? PANEL_W : BTN_SIZE, h = open ? PANEL_H : BTN_SIZE;
+            setPos(prev => clamp(prev.x, prev.y, w, h));
+        };
+        window.addEventListener("resize", onResize);
+        return () => window.removeEventListener("resize", onResize);
+    }, [open]);
+
+    // ── Auto-scroll messages ────────────────────────────────────
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages]);
+
+    // ── Send message ────────────────────────────────────────────
+    const sendMessage = async () => {
+        const q = input.trim();
+        if (!q || loading) return;
+        setMessages(prev => [...prev, { role: "user", text: q }]);
+        setInput("");
+        setLoading(true);
+        try {
+            const res = await fetch("http://localhost:8000/api/agent/query", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ question: q }),
+            });
+            const data = await res.json();
+            setMessages(prev => [...prev, { role: "assistant", text: data.answer || data.detail || "No response received." }]);
+        } catch (e) {
+            setMessages(prev => [...prev, { role: "assistant", text: `⚠ Error: ${e.message}. Make sure the backend is running.` }]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // ── Closed state: draggable floating button ─────────────────
+    if (!open) {
+        return (
+            <button
+                id="chat-widget-toggle"
+                onMouseDown={onDragStart}
+                onTouchStart={onDragStart}
+                onClick={() => { if (!dragRef.current.moved) setOpen(true); }}
+                style={{
+                    position: "fixed", left: pos.x, top: pos.y, zIndex: 900,
+                    width: BTN_SIZE, height: BTN_SIZE, borderRadius: "50%",
+                    background: `linear-gradient(135deg, ${C.amber}, #f97316)`,
+                    border: "none", cursor: "grab",
+                    boxShadow: "0 4px 24px rgba(251,191,36,.4)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 24, color: "#000", fontWeight: 800,
+                    transition: "box-shadow .2s",
+                    userSelect: "none", touchAction: "none",
+                }}
+                onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 6px 32px rgba(251,191,36,.6)"; }}
+                onMouseLeave={e => { e.currentTarget.style.boxShadow = "0 4px 24px rgba(251,191,36,.4)"; }}
+                title="Ask QuantVision AI — drag to reposition"
+            >🤖</button>
+        );
+    }
+
+    // ── Open state: draggable panel ─────────────────────────────
+    return (
+        <div style={{
+            position: "fixed", left: pos.x, top: pos.y, zIndex: 900,
+            width: PANEL_W, maxWidth: "calc(100vw - 16px)", height: PANEL_H, maxHeight: "calc(100vh - 16px)",
+            background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 16,
+            display: "flex", flexDirection: "column",
+            boxShadow: "0 16px 64px rgba(0,0,0,.6)",
+            fontFamily: "'DM Mono',monospace",
+            userSelect: "none",
+        }}>
+            {/* Header — drag handle */}
+            <div
+                onMouseDown={onDragStart}
+                onTouchStart={onDragStart}
+                style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "14px 16px", borderBottom: `1px solid ${C.border}`,
+                    background: `linear-gradient(135deg, ${C.bg1}, ${C.bg2})`,
+                    borderRadius: "16px 16px 0 0",
+                    cursor: "grab", touchAction: "none",
+                }}
+            >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, pointerEvents: "none" }}>
+                    <div style={{
+                        background: `linear-gradient(135deg, ${C.amber}, #f97316)`,
+                        borderRadius: 8, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 14, fontWeight: 800, color: "#000",
+                    }}>AI</div>
+                    <div>
+                        <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "'Syne',sans-serif", color: C.amber, lineHeight: 1 }}>QuantVision AI</div>
+                        <div style={{ fontSize: 9, color: apiConnected ? C.green : C.red, letterSpacing: 1 }}>
+                            {apiConnected ? "● ONLINE" : "● OFFLINE"}
+                        </div>
+                    </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 9, color: C.textDim, pointerEvents: "none" }}>⠿ drag</span>
+                    <button
+                        onClick={() => setOpen(false)}
+                        style={{ background: "none", border: "none", color: C.textDim, cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 4, pointerEvents: "auto" }}
+                    >✕</button>
+                </div>
+            </div>
+
+            {/* Messages */}
+            <div style={{
+                flex: 1, overflowY: "auto", padding: "12px 14px",
+                display: "flex", flexDirection: "column", gap: 10,
+                userSelect: "text",
+            }}>
+                {messages.map((m, i) => (
+                    <div key={i} style={{
+                        alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                        maxWidth: "85%",
+                        padding: "10px 14px",
+                        borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+                        background: m.role === "user"
+                            ? `linear-gradient(135deg, ${C.amber}22, ${C.amber}11)`
+                            : C.bg2,
+                        border: `1px solid ${m.role === "user" ? C.amber + "33" : C.border}`,
+                        color: C.text, fontSize: 12, lineHeight: 1.6,
+                        whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    }}>
+                        {m.text}
+                    </div>
+                ))}
+                {loading && (
+                    <div style={{
+                        alignSelf: "flex-start", padding: "10px 14px",
+                        borderRadius: "14px 14px 14px 4px",
+                        background: C.bg2, border: `1px solid ${C.border}`,
+                        color: C.amber, fontSize: 12,
+                    }}>
+                        <span style={{ animation: "pulse 1s ease-in-out infinite" }}>Thinking…</span>
+                    </div>
+                )}
+                <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input */}
+            <div style={{
+                padding: "10px 14px", borderTop: `1px solid ${C.border}`,
+                display: "flex", gap: 8, userSelect: "text",
+            }}>
+                <input
+                    id="chat-widget-input"
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                    placeholder="Ask about stocks, signals, portfolio…"
+                    disabled={loading}
+                    style={{
+                        flex: 1, background: C.bg0, border: `1px solid ${C.border}`,
+                        borderRadius: 10, color: C.text, padding: "10px 14px",
+                        fontSize: 12, fontFamily: "'DM Mono',monospace", outline: "none",
+                        opacity: loading ? 0.6 : 1,
+                    }}
+                />
+                <button
+                    id="chat-widget-send"
+                    onClick={sendMessage}
+                    disabled={loading || !input.trim()}
+                    style={{
+                        background: `linear-gradient(135deg, ${C.amber}, #f97316)`,
+                        border: "none", borderRadius: 10, padding: "10px 16px",
+                        cursor: loading || !input.trim() ? "not-allowed" : "pointer",
+                        color: "#000", fontWeight: 700, fontSize: 12,
+                        fontFamily: "'Syne',sans-serif",
+                        opacity: loading || !input.trim() ? 0.5 : 1,
+                        transition: "opacity .15s",
+                    }}
+                >Send</button>
+            </div>
+
+            {/* Quick prompts */}
+            <div style={{
+                padding: "6px 14px 12px", display: "flex", gap: 4, flexWrap: "wrap",
+            }}>
+                {["Strongest buy signal?", "Predict AAPL", "Rebalance portfolio?"].map(q => (
+                    <button
+                        key={q}
+                        onClick={() => { setInput(q); }}
+                        style={{
+                            background: C.bg2, border: `1px solid ${C.border}`,
+                            borderRadius: 20, color: C.textDim, padding: "3px 10px",
+                            cursor: "pointer", fontSize: 9, fontFamily: "'DM Mono',monospace",
+                            transition: "border-color .15s, color .15s",
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = C.amber; e.currentTarget.style.color = C.amber; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.textDim; }}
+                    >{q}</button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════
    APP
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
@@ -563,6 +819,9 @@ export default function App() {
                 </div>
                 <div style={{ color: C.amber }}>QuantVision v3.0.0</div>
             </div>
+
+            {/* AI Chat Widget */}
+            <ChatWidget apiConnected={apiConnected} />
         </div>
     );
 }

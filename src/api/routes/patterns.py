@@ -152,3 +152,35 @@ async def get_patterns(
         chart_patterns=chart_patterns,
         confluence=ConfluenceSignal(**confluence),
     )
+
+
+@router.get("/support-resistance/{symbol}", response_model=None)  # Avoiding strict Pydantic parsing for complex dicts if needed
+async def get_support_resistance(
+    symbol: str,
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
+    lookback: int = Query(180, ge=60, le=500),
+):
+    """Detect dynamic Support and Resistance levels based on patterns, MAs, and pivots."""
+    from src.features.support_resistance import detect_support_resistance
+    
+    symbol = symbol.upper()
+    df = _fetch_ohlcv(symbol, interval, lookback)
+    
+    if df.empty:
+        raise HTTPException(404, f"No data for {symbol}")
+
+    current_price = float(df["Close"].iloc[-1])
+    
+    try:
+        sr_data = detect_support_resistance(df, current_price)
+    except Exception as e:
+        logger.error(f"S&R detection failed for {symbol}: {e}")
+        raise HTTPException(500, f"Algorithm error: {e}")
+
+    return {
+        "symbol": symbol,
+        "current_price": current_price,
+        "levels": sr_data["levels"],
+        "trendlines": sr_data["trendlines"],
+        "dynamic_levels": sr_data["dynamic_levels"],
+    }
