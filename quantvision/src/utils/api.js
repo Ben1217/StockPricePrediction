@@ -87,6 +87,10 @@ export async function fetchSupportResistance(symbol, interval = "1d", lookback =
     return apiFetch(`/patterns/support-resistance/${symbol}?interval=${interval}&lookback=${lookback}`);
 }
 
+export async function fetchSentiment(symbol, days = 120) {
+    return apiFetch(`/sentiment/${symbol}?days=${days}`);
+}
+
 // ── Backtesting ─────────────────────────────────────────────
 export async function runBacktest(params) {
     return apiFetch("/backtest/run", {

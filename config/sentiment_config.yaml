@@ -1,0 +1,68 @@
+# ============================================================
+# TECHNICAL SENTIMENT SIGNAL CONFIGURATION
+# ============================================================
+# All values can be updated without a code deploy.
+# After editing, call signal_processor.reload_config() to apply.
+
+# ----------------------------------------------------------
+# Processing pipeline defaults
+# ----------------------------------------------------------
+processing:
+  z_score_window: 60          # default rolling lookback for z-score
+  ema_span: 5                 # default EMA smoothing span
+  normalise_clip: 3.0         # tanh denominator for [-1,+1] mapping
+
+# ----------------------------------------------------------
+# Regime classification thresholds
+# ----------------------------------------------------------
+regime:
+  backwardation_threshold: 0.95   # VIX term slope < this → risk_off
+  contango_threshold: 1.05        # VIX term slope > this → risk_on
+
+# ----------------------------------------------------------
+# Staleness thresholds (max bars without fresh data)
+# ----------------------------------------------------------
+staleness:
+  default: 5                  # general default
+  micro.ofi: 2                # intraday: stale quickly
+  vol.term_slope: 3
+  positioning.cot_z: 10       # weekly data, more lenient
+
+# ----------------------------------------------------------
+# Per-signal lookback overrides
+# ----------------------------------------------------------
+lookbacks:
+  micro.ofi: 100
+  volume.vwap_z: 60
+  volume.cmf_20: 20
+  volume.obv_divergence: 60
+  vol.iv_rank: 252            # 52-week range
+  vol.term_slope: 60
+  vol.rv_iv_spread: 60
+  vol.skew_25d: 60
+  options.pcr_5d: 60
+  options.gex_total: 60
+  options.delta_flow: 60
+  breadth.mcclellan: 60
+  breadth.ad_line: 60
+  breadth.nh_nl_ratio: 60
+  positioning.cot_z: 52       # 52 weeks
+  positioning.commercial_ratio: 52
+  momentum.rsi_divergence: 60
+  momentum.macd_exhaust: 60
+  momentum.roc_z: 60
+
+# ----------------------------------------------------------
+# Composite score weights (must sum to ~1.0)
+# ----------------------------------------------------------
+composite:
+  weights:
+    micro.ofi: 0.20           # highest alpha intraday
+    vol.iv_rank: 0.15         # regime + fear
+    vol.term_slope: 0.15      # primary regime gate
+    options.pcr_5d: 0.10      # contrarian
+    volume.vwap_z: 0.10       # intraday reversion
+    volume.cmf_20: 0.10       # accumulation / distribution
+    breadth.mcclellan: 0.08   # market-wide regime
+    momentum.rsi_divergence: 0.07  # trend warning
+    positioning.cot_z: 0.05   # macro contrarian

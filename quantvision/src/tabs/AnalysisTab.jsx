@@ -5,7 +5,7 @@ import {
     ReferenceLine
 } from "recharts";
 import { C } from "../utils/data";
-import { fetchExtendedQuote } from "../utils/api";
+import { fetchExtendedQuote, fetchSentiment } from "../utils/api";
 import { ChartTooltip, StatCard, Section, Hint } from "../components/UIComponents";
 import TradingViewDetail from "../components/TradingViewDetail";
 
@@ -140,6 +140,236 @@ function MarketSessionPanel({ symbol, source }) {
     );
 }
 
+// ── Sentiment Panel ────────────────────────────────────────────────────────────
+const SIGNAL_LABELS = {
+    "volume.vwap_z": { label: "VWAP Deviation", icon: "📊", category: "Volume" },
+    "volume.cmf_20": { label: "Chaikin Money Flow", icon: "💰", category: "Volume" },
+    "volume.obv_divergence": { label: "OBV Divergence", icon: "📉", category: "Volume" },
+    "momentum.rsi_divergence": { label: "RSI Divergence", icon: "⚡", category: "Momentum" },
+    "momentum.macd_exhaust": { label: "MACD Exhaustion", icon: "🔄", category: "Momentum" },
+    "momentum.roc_z": { label: "ROC Z-Score", icon: "🚀", category: "Momentum" },
+    "micro.ofi": { label: "Order Flow Imbalance", icon: "🔬", category: "Microstructure" },
+    "vol.iv_rank": { label: "IV Rank", icon: "😱", category: "Volatility" },
+    "vol.term_slope": { label: "VIX Term Structure", icon: "📐", category: "Volatility" },
+    "options.pcr_5d": { label: "Put/Call Ratio", icon: "⚖️", category: "Options" },
+    "breadth.mcclellan": { label: "McClellan Osc.", icon: "📡", category: "Breadth" },
+    "positioning.cot_z": { label: "COT Net Position", icon: "🏛️", category: "Positioning" },
+};
+
+function scoreColor(score) {
+    if (score > 0.3) return C.green;
+    if (score > 0.1) return "#4ade80";
+    if (score < -0.3) return C.red;
+    if (score < -0.1) return "#fb923c";
+    return C.amber;
+}
+
+function regimeBadge(regime) {
+    const map = {
+        risk_on: { bg: C.green + "22", color: C.green, label: "🟢 Risk-On (Contango)" },
+        risk_off: { bg: C.red + "22", color: C.red, label: "🔴 Risk-Off (Backwardation)" },
+        neutral: { bg: C.amber + "22", color: C.amber, label: "🟡 Neutral" },
+    };
+    const m = map[regime] || map.neutral;
+    return (
+        <span style={{
+            background: m.bg, color: m.color, borderRadius: 6,
+            padding: "4px 10px", fontSize: 10, fontWeight: 700,
+            border: `1px solid ${m.color}33`,
+        }}>{m.label}</span>
+    );
+}
+
+function SentimentPanel({ data, loading, error }) {
+    if (loading) return (
+        <Section style={{ marginTop: 24 }}>
+            <div style={{ color: C.textDim, fontSize: 12, padding: "20px 0", textAlign: "center" }}>
+                ⏳ Computing sentiment signals…
+            </div>
+        </Section>
+    );
+    if (error) return (
+        <Section style={{ marginTop: 24 }}>
+            <div style={{ color: C.red, fontSize: 12, padding: "16px 0", textAlign: "center" }}>
+                ⚠ Sentiment unavailable — {error}
+            </div>
+        </Section>
+    );
+    if (!data) return null;
+
+    const sc = data.composite_score || 0;
+    const clr = scoreColor(sc);
+    const pct = ((sc + 1) / 2) * 100; // map [-1,+1] to [0,100] for the bar
+    const activeSignals = (data.signals || []).filter(s => !s.is_stale);
+    const staleSignals = (data.signals || []).filter(s => s.is_stale);
+
+    return (
+        <div className="fade-up" style={{ marginTop: 24 }}>
+            {/* Header */}
+            <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                marginBottom: 12,
+            }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 20 }}>🧠</span>
+                    <span style={{
+                        fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 14,
+                        color: C.text, letterSpacing: 1, textTransform: "uppercase",
+                    }}>Technical Sentiment</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {regimeBadge(data.regime)}
+                    <span style={{
+                        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 6,
+                        padding: "4px 10px", fontSize: 10, color: C.textMid,
+                    }}>
+                        {data.active_signals}/{data.total_signals} signals active
+                    </span>
+                </div>
+            </div>
+
+            {/* Composite Score Card */}
+            <div style={{
+                background: `linear-gradient(135deg, ${C.bg2}, ${C.bg3})`,
+                border: `1px solid ${clr}33`,
+                borderRadius: 12, padding: "20px 24px", marginBottom: 16,
+            }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                        <div style={{ color: C.textDim, fontSize: 10, letterSpacing: 1.5, marginBottom: 6, fontFamily: "'Syne',sans-serif" }}>
+                            COMPOSITE SCORE
+                        </div>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+                            <span style={{
+                                color: clr, fontSize: 36, fontWeight: 800,
+                                fontFamily: "'DM Mono',monospace", lineHeight: 1,
+                            }}>
+                                {sc >= 0 ? "+" : ""}{sc.toFixed(3)}
+                            </span>
+                            <span style={{
+                                background: clr + "22", color: clr, borderRadius: 6,
+                                padding: "4px 12px", fontSize: 12, fontWeight: 700,
+                            }}>
+                                {data.interpretation}
+                            </span>
+                        </div>
+                    </div>
+                    {/* Mini gauge bar */}
+                    <div style={{ width: 180 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim, marginBottom: 4 }}>
+                            <span>Bearish</span><span>Neutral</span><span>Bullish</span>
+                        </div>
+                        <div style={{
+                            background: C.bg1, borderRadius: 6, height: 8, position: "relative",
+                            overflow: "hidden", border: `1px solid ${C.border}`,
+                        }}>
+                            {/* gradient background */}
+                            <div style={{
+                                position: "absolute", inset: 0,
+                                background: `linear-gradient(90deg, ${C.red}55, ${C.amber}55, ${C.green}55)`,
+                                borderRadius: 6,
+                            }} />
+                            {/* needle */}
+                            <div style={{
+                                position: "absolute", top: -2, width: 4, height: 12,
+                                background: clr, borderRadius: 2,
+                                left: `calc(${pct}% - 2px)`,
+                                boxShadow: `0 0 6px ${clr}`,
+                                transition: "left .5s ease",
+                            }} />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Active Signals Grid */}
+            {activeSignals.length > 0 && (
+                <div style={{
+                    display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10,
+                    marginBottom: 16,
+                }}>
+                    {activeSignals.map(s => {
+                        const meta = SIGNAL_LABELS[s.name] || { label: s.name, icon: "📌", category: "Other" };
+                        const norm = s.normalised;
+                        const barClr = norm > 0.1 ? C.green : norm < -0.1 ? C.red : C.amber;
+                        const barW = Math.abs(norm) * 100;
+                        return (
+                            <div key={s.name} style={{
+                                background: C.bg2, border: `1px solid ${C.border}`,
+                                borderRadius: 10, padding: "12px 14px",
+                                transition: "border-color .2s",
+                            }}>
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                        <span style={{ fontSize: 14 }}>{meta.icon}</span>
+                                        <span style={{ color: C.text, fontSize: 11, fontWeight: 700 }}>{meta.label}</span>
+                                    </div>
+                                    <span style={{
+                                        color: C.textDim, fontSize: 9, background: C.bg3,
+                                        borderRadius: 4, padding: "2px 6px",
+                                    }}>{meta.category}</span>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                                    <span style={{
+                                        color: barClr, fontSize: 16, fontWeight: 800,
+                                        fontFamily: "'DM Mono',monospace", minWidth: 50,
+                                    }}>
+                                        {norm >= 0 ? "+" : ""}{norm.toFixed(3)}
+                                    </span>
+                                    <div style={{
+                                        flex: 1, height: 5, background: C.bg1, borderRadius: 3,
+                                        overflow: "hidden", position: "relative",
+                                    }}>
+                                        <div style={{
+                                            position: "absolute",
+                                            left: norm >= 0 ? "50%" : `${50 - barW / 2}%`,
+                                            width: `${barW / 2}%`,
+                                            height: "100%", background: barClr, borderRadius: 3,
+                                            transition: "all .4s ease",
+                                        }} />
+                                    </div>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim }}>
+                                    <span>z: {s.z_score.toFixed(2)}</span>
+                                    <span>raw: {s.value.toFixed(4)}</span>
+                                    <span>conf: {(s.confidence * 100).toFixed(0)}%</span>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
+            {/* Stale / Pending Signals */}
+            {staleSignals.length > 0 && (
+                <div style={{
+                    background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 10,
+                    padding: "12px 16px",
+                }}>
+                    <div style={{ color: C.textDim, fontSize: 10, letterSpacing: 1, marginBottom: 8, fontFamily: "'Syne',sans-serif" }}>
+                        PENDING DATA FEEDS ({staleSignals.length})
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {staleSignals.map(s => {
+                            const meta = SIGNAL_LABELS[s.name] || { label: s.name, icon: "📌" };
+                            return (
+                                <span key={s.name} style={{
+                                    background: C.bg3, border: `1px solid ${C.border}`,
+                                    borderRadius: 6, padding: "4px 10px", fontSize: 10,
+                                    color: C.textDim, display: "flex", alignItems: "center", gap: 4,
+                                }}>
+                                    <span>{meta.icon}</span> {meta.label}
+                                    <span style={{ color: C.amber, fontSize: 9 }}>⏳</span>
+                                </span>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ── Analysis Tab ───────────────────────────────────────────────────────────────
 export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
     const [showDetails, setShowDetails] = useState(false);
@@ -150,6 +380,20 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
     const [timeRange, setTimeRange] = useState(60);
     const [searchInput, setSearchInput] = useState("");
     const searchRef = useRef(null);
+
+    // Sentiment state
+    const [sentiment, setSentiment] = useState(null);
+    const [sentimentLoading, setSentimentLoading] = useState(false);
+    const [sentimentError, setSentimentError] = useState(null);
+
+    useEffect(() => {
+        if (!apiConnected || !selectedTicker) return;
+        setSentimentLoading(true);
+        setSentimentError(null);
+        fetchSentiment(selectedTicker)
+            .then(d => { setSentiment(d); setSentimentLoading(false); })
+            .catch(e => { setSentimentError(e.message); setSentimentLoading(false); });
+    }, [selectedTicker, apiConnected]);
 
     const handleQuickSearch = () => {
         const t = searchInput.trim().toUpperCase();
@@ -354,9 +598,12 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                             <Line type="monotone" dataKey="macd" stroke={C.amber} strokeWidth={1.5} dot={false} />
                             <Line type="monotone" dataKey="macdSig" stroke={C.red} strokeWidth={1} dot={false} />
                         </ComposedChart>
-                    </ResponsiveContainer>
-                </Section>
+                </ResponsiveContainer>
+            </Section>
             </div>
+
+            {/* ── Technical Sentiment Signal Panel ──────────────────── */}
+            <SentimentPanel data={sentiment} loading={sentimentLoading} error={sentimentError} />
         </div >
     );
 }

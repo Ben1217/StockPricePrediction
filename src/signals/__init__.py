@@ -13,6 +13,9 @@ from .signal_generator import (
 )
 from .position_sizing import PositionSizeCalculator, RiskProfile
 
+# Technical Sentiment Signal sub-module
+from . import sentiment
+
 __all__ = [
     'TradingSignalGenerator',
     'detect_base_breakout',
@@ -22,5 +25,6 @@ __all__ = [
     'check_uptrend',
     'check_downtrend',
     'PositionSizeCalculator',
-    'RiskProfile'
+    'RiskProfile',
+    'sentiment',
 ]
