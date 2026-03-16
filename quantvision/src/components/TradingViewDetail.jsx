@@ -495,55 +495,24 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
             // ── Generated Support & Resistance Overlays ────
             if (showSR && srData) {
-                // S&R Horizontal Lines
-                if (srData.levels) {
-                    srData.levels.forEach(sr => {
+                // S&R Horizontal Lines — only render 1 key support + 1 key resistance
+                if (srData.levels && srData.levels.length > 0) {
+                    const supports = srData.levels.filter(l => l.type === "support").sort((a, b) => b.price - a.price);
+                    const resistances = srData.levels.filter(l => l.type === "resistance").sort((a, b) => a.price - b.price);
+                    const keyLevels = [...supports.slice(0, 1), ...resistances.slice(0, 1)];
+                    
+                    keyLevels.forEach(sr => {
                         const isSupp = sr.type === "support";
-                        const isStrong = sr.strength === "strong";
-                        const labelText = `${isSupp ? "Support" : "Resistance"} ~$${sr.price.toFixed(2)}`;
+                        const labelText = `${isSupp ? "Key Support" : "Key Resistance"} — $${sr.price.toFixed(2)}`;
                         
                         candleSeries.createPriceLine({
                             price: sr.price,
                             color: isSupp ? C.cyan : C.red,
-                            lineWidth: isStrong ? 3 : 2, // thicker if strong
-                            lineStyle: isStrong ? 0 : 2, // solid if strong, dashed if normal
+                            lineWidth: 2,
+                            lineStyle: 0, // solid line for clarity
                             axisLabelVisible: true,
                             title: labelText,
                         });
-                        
-                        // Render zone bounds as very thin dashed lines if substantial
-                        if (Math.abs(sr.zone_high - sr.zone_low) > 0.1) {
-                            candleSeries.createPriceLine({
-                                price: sr.zone_high, color: (isSupp ? C.cyan : C.red) + '44', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: ""
-                            });
-                            candleSeries.createPriceLine({
-                                price: sr.zone_low, color: (isSupp ? C.cyan : C.red) + '44', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: ""
-                            });
-                        }
-                    });
-                }
-                
-                // S&R Trendlines
-                if (srData.trendlines) {
-                    srData.trendlines.forEach(tl => {
-                        const isSupp = tl.type === "support";
-                        const tlSeries = chart.addSeries(LineSeries, {
-                            color: isSupp ? C.cyan + "AA" : C.red + "AA",
-                            lineWidth: 2,
-                            lineStyle: 1, // dotted
-                            lastValueVisible: false,
-                            priceLineVisible: false,
-                        });
-                        
-                        const tStart = ohlcData[Math.min(tl.start_idx, ohlcData.length - 1)]?.time;
-                        const tEnd = ohlcData[Math.min(tl.end_idx, ohlcData.length - 1)]?.time;
-                        
-                        if (tStart && tEnd) {
-                            tlSeries.setData([
-                                { time: tStart, value: tl.start_price },
-                                { time: tEnd, value: tl.end_price }
-                            ]);
-                        }
                     });
                 }
             }

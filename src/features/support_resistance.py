@@ -188,7 +188,7 @@ def detect_support_resistance(df: pd.DataFrame, current_price: float) -> Dict[st
         trendlines.append(resist_tl)
 
     # Process and Merge Levels (Method 2B: Multiple touches = zones)
-    merged_levels = _merge_levels(raw_levels, tolerance_pct=0.007) # 0.7% zone tolerance
+    merged_levels = _merge_levels(raw_levels, tolerance_pct=0.015) # 1.5% zone tolerance (aggressive merge)
     
     # Dynamic re-labeling: if a "resistance" level is now BELOW current price, it flips to support.
     # If a "support" level is now ABOVE current price, it flips to resistance.
@@ -246,7 +246,7 @@ def detect_support_resistance(df: pd.DataFrame, current_price: float) -> Dict[st
     resistances = sorted([l for l in merged_levels if l["type"] == "resistance"], key=lambda x: x["price"])
     
     return {
-        "levels": supports[:5] + resistances[:5],  # top 5 closest in each direction
+        "levels": supports[:1] + resistances[:1],  # 1 key support + 1 key resistance
         "trendlines": trendlines,
         "dynamic_levels": dynamic_levels
     }
