@@ -140,232 +140,260 @@ function MarketSessionPanel({ symbol, source }) {
     );
 }
 
-// ── Sentiment Panel ────────────────────────────────────────────────────────────
-const SIGNAL_LABELS = {
-    "volume.vwap_z": { label: "VWAP Deviation", icon: "📊", category: "Volume" },
-    "volume.cmf_20": { label: "Chaikin Money Flow", icon: "💰", category: "Volume" },
-    "volume.obv_divergence": { label: "OBV Divergence", icon: "📉", category: "Volume" },
-    "momentum.rsi_divergence": { label: "RSI Divergence", icon: "⚡", category: "Momentum" },
-    "momentum.macd_exhaust": { label: "MACD Exhaustion", icon: "🔄", category: "Momentum" },
-    "momentum.roc_z": { label: "ROC Z-Score", icon: "🚀", category: "Momentum" },
-    "micro.ofi": { label: "Order Flow Imbalance", icon: "🔬", category: "Microstructure" },
-    "vol.iv_rank": { label: "IV Rank", icon: "😱", category: "Volatility" },
-    "vol.term_slope": { label: "VIX Term Structure", icon: "📐", category: "Volatility" },
-    "options.pcr_5d": { label: "Put/Call Ratio", icon: "⚖️", category: "Options" },
-    "breadth.mcclellan": { label: "McClellan Osc.", icon: "📡", category: "Breadth" },
-    "positioning.cot_z": { label: "COT Net Position", icon: "🏛️", category: "Positioning" },
+// ── Indicator Sentiment Panel ────────────────────────────────────────────────
+const INDICATOR_META = {
+    trend: { label: "200 MA (Trend)", icon: "📈", descriptions: { bullish: "Price above 200 MA", bearish: "Price below 200 MA", neutral: "Insufficient data" } },
+    rsi: { label: "RSI 14 (Momentum)", icon: "⚡", descriptions: { bullish: "RSI crossed above 30", bearish: "RSI crossed below 70", neutral: "RSI in neutral zone" } },
+    volume: { label: "Volume (Confirmation)", icon: "📊", descriptions: { bullish: "High volume bullish candle", bearish: "High volume bearish candle", neutral: "Volume below average" } },
 };
 
-function scoreColor(score) {
-    if (score > 0.3) return C.green;
-    if (score > 0.1) return "#4ade80";
-    if (score < -0.3) return C.red;
-    if (score < -0.1) return "#fb923c";
+function sentimentColor(score) {
+    if (score >= 3) return C.green;
+    if (score >= 2) return "#4ade80";
+    if (score >= 1) return "#86efac";
+    if (score <= -3) return C.red;
+    if (score <= -2) return "#fb7185";
+    if (score <= -1) return "#fb923c";
     return C.amber;
 }
 
-function regimeBadge(regime) {
+function entryBadge(entry) {
     const map = {
-        risk_on: { bg: C.green + "22", color: C.green, label: "🟢 Risk-On (Contango)" },
-        risk_off: { bg: C.red + "22", color: C.red, label: "🔴 Risk-Off (Backwardation)" },
-        neutral: { bg: C.amber + "22", color: C.amber, label: "🟡 Neutral" },
+        BULLISH: { bg: C.green, emoji: "🟢", glow: C.green },
+        BEARISH: { bg: C.red, emoji: "🔴", glow: C.red },
+        WAIT: { bg: C.amber, emoji: "🟡", glow: C.amber },
     };
-    const m = map[regime] || map.neutral;
+    const m = map[entry] || map.WAIT;
     return (
         <span style={{
-            background: m.bg, color: m.color, borderRadius: 6,
-            padding: "4px 10px", fontSize: 10, fontWeight: 700,
-            border: `1px solid ${m.color}33`,
-        }}>{m.label}</span>
+            background: m.bg + "22", color: m.bg, borderRadius: 8,
+            padding: "6px 16px", fontSize: 13, fontWeight: 800,
+            border: `1px solid ${m.bg}55`, letterSpacing: 1,
+            display: "inline-flex", alignItems: "center", gap: 6,
+            boxShadow: `0 0 12px ${m.glow}22`,
+        }}>
+            <span>{m.emoji}</span> {entry}
+        </span>
     );
 }
 
-function SentimentPanel({ data, loading, error }) {
-    if (loading) return (
-        <Section style={{ marginTop: 24 }}>
-            <div style={{ color: C.textDim, fontSize: 12, padding: "20px 0", textAlign: "center" }}>
-                ⏳ Computing sentiment signals…
+function SignalCard({ name, signal, score, detail1Label, detail1Value, detail2Label, detail2Value }) {
+    const meta = INDICATOR_META[name];
+    const clr = score > 0 ? C.green : score < 0 ? C.red : C.amber;
+    const desc = meta.descriptions[signal] || "—";
+    return (
+        <div style={{
+            background: C.bg2, border: `1px solid ${clr}33`,
+            borderRadius: 12, padding: "16px 18px", transition: "all .25s",
+            position: "relative", overflow: "hidden",
+        }}>
+            {/* Glow accent */}
+            <div style={{
+                position: "absolute", top: 0, left: 0, right: 0, height: 3,
+                background: `linear-gradient(90deg, transparent, ${clr}, transparent)`,
+                opacity: 0.6,
+            }} />
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 18 }}>{meta.icon}</span>
+                    <span style={{ color: C.text, fontSize: 12, fontWeight: 700, fontFamily: "'Syne',sans-serif" }}>{meta.label}</span>
+                </div>
+                <span style={{
+                    background: clr + "22", color: clr, borderRadius: 6,
+                    padding: "3px 10px", fontSize: 11, fontWeight: 800,
+                    fontFamily: "'DM Mono',monospace",
+                    border: `1px solid ${clr}44`,
+                }}>
+                    {score > 0 ? "+1" : score < 0 ? "-1" : "0"}
+                </span>
             </div>
-        </Section>
+            {/* Signal label */}
+            <div style={{
+                color: clr, fontSize: 15, fontWeight: 800, textTransform: "uppercase",
+                letterSpacing: 1.2, marginBottom: 6,
+            }}>
+                {signal}
+            </div>
+            <div style={{ color: C.textMid, fontSize: 11, marginBottom: 10 }}>{desc}</div>
+            {/* Detail values */}
+            <div style={{ display: "flex", gap: 16, fontSize: 10, color: C.textDim }}>
+                {detail1Label && (
+                    <span>
+                        <span style={{ color: C.textMid, fontWeight: 600 }}>{detail1Label}:</span>{" "}
+                        <span style={{ color: C.text, fontFamily: "'DM Mono',monospace" }}>{detail1Value}</span>
+                    </span>
+                )}
+                {detail2Label && (
+                    <span>
+                        <span style={{ color: C.textMid, fontWeight: 600 }}>{detail2Label}:</span>{" "}
+                        <span style={{ color: C.text, fontFamily: "'DM Mono',monospace" }}>{detail2Value}</span>
+                    </span>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function IndicatorSentimentPanel({ data, loading, error }) {
+    if (loading) return (
+        <div className="fade-up" style={{ marginTop: 24 }}>
+            <div style={{
+                background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 12,
+                padding: "28px 0", textAlign: "center",
+            }}>
+                <div style={{ fontSize: 24, marginBottom: 8, animation: "pulse 1.5s infinite" }}>🧠</div>
+                <div style={{ color: C.textDim, fontSize: 12 }}>Computing sentiment signals…</div>
+            </div>
+        </div>
     );
     if (error) return (
-        <Section style={{ marginTop: 24 }}>
-            <div style={{ color: C.red, fontSize: 12, padding: "16px 0", textAlign: "center" }}>
-                ⚠ Sentiment unavailable — {error}
+        <div className="fade-up" style={{ marginTop: 24 }}>
+            <div style={{
+                background: C.bg2, border: `1px solid ${C.red}33`, borderRadius: 12,
+                padding: "20px 24px", textAlign: "center",
+            }}>
+                <div style={{ color: C.red, fontSize: 12 }}>⚠ Sentiment unavailable — {error}</div>
             </div>
-        </Section>
+        </div>
     );
     if (!data) return null;
 
-    const sc = data.composite_score || 0;
-    const clr = scoreColor(sc);
-    const pct = ((sc + 1) / 2) * 100; // map [-1,+1] to [0,100] for the bar
-    const activeSignals = (data.signals || []).filter(s => !s.is_stale);
-    const staleSignals = (data.signals || []).filter(s => s.is_stale);
+    const score = data.score ?? 0;
+    const clr = sentimentColor(score);
+    // Map score [-3,+3] to [0,100] for gauge
+    const gaugePct = ((score + 3) / 6) * 100;
+    const det = data.details || {};
 
     return (
         <div className="fade-up" style={{ marginTop: 24 }}>
             {/* Header */}
             <div style={{
                 display: "flex", alignItems: "center", justifyContent: "space-between",
-                marginBottom: 12,
+                marginBottom: 14,
             }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontSize: 20 }}>🧠</span>
+                    <span style={{ fontSize: 22 }}>🧠</span>
                     <span style={{
-                        fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 14,
+                        fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 15,
                         color: C.text, letterSpacing: 1, textTransform: "uppercase",
-                    }}>Technical Sentiment</span>
+                    }}>Indicator Sentiment</span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {regimeBadge(data.regime)}
-                    <span style={{
-                        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 6,
-                        padding: "4px 10px", fontSize: 10, color: C.textMid,
-                    }}>
-                        {data.active_signals}/{data.total_signals} signals active
-                    </span>
-                </div>
+                {entryBadge(data.entry_signal)}
             </div>
 
-            {/* Composite Score Card */}
+            {/* Score Card */}
             <div style={{
                 background: `linear-gradient(135deg, ${C.bg2}, ${C.bg3})`,
                 border: `1px solid ${clr}33`,
-                borderRadius: 12, padding: "20px 24px", marginBottom: 16,
+                borderRadius: 14, padding: "22px 28px", marginBottom: 16,
+                position: "relative", overflow: "hidden",
             }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                {/* Background glow */}
+                <div style={{
+                    position: "absolute", top: -40, right: -40, width: 120, height: 120,
+                    background: `radial-gradient(circle, ${clr}15, transparent)`,
+                    borderRadius: "50%",
+                }} />
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", position: "relative" }}>
                     <div>
-                        <div style={{ color: C.textDim, fontSize: 10, letterSpacing: 1.5, marginBottom: 6, fontFamily: "'Syne',sans-serif" }}>
-                            COMPOSITE SCORE
+                        <div style={{
+                            color: C.textDim, fontSize: 10, letterSpacing: 1.5, marginBottom: 8,
+                            fontFamily: "'Syne',sans-serif",
+                        }}>
+                            SENTIMENT SCORE
                         </div>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
                             <span style={{
-                                color: clr, fontSize: 36, fontWeight: 800,
+                                color: clr, fontSize: 42, fontWeight: 800,
                                 fontFamily: "'DM Mono',monospace", lineHeight: 1,
                             }}>
-                                {sc >= 0 ? "+" : ""}{sc.toFixed(3)}
+                                {score >= 0 ? "+" : ""}{score}
                             </span>
                             <span style={{
-                                background: clr + "22", color: clr, borderRadius: 6,
-                                padding: "4px 12px", fontSize: 12, fontWeight: 700,
+                                background: clr + "22", color: clr, borderRadius: 8,
+                                padding: "5px 14px", fontSize: 13, fontWeight: 700,
+                                border: `1px solid ${clr}44`,
                             }}>
-                                {data.interpretation}
+                                {data.sentiment}
                             </span>
                         </div>
                     </div>
-                    {/* Mini gauge bar */}
-                    <div style={{ width: 180 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim, marginBottom: 4 }}>
-                            <span>Bearish</span><span>Neutral</span><span>Bullish</span>
+                    {/* Gauge */}
+                    <div style={{ width: 200 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim, marginBottom: 5 }}>
+                            <span>-3 Bearish</span><span>0</span><span>+3 Bullish</span>
                         </div>
                         <div style={{
-                            background: C.bg1, borderRadius: 6, height: 8, position: "relative",
+                            background: C.bg1, borderRadius: 8, height: 10, position: "relative",
                             overflow: "hidden", border: `1px solid ${C.border}`,
                         }}>
-                            {/* gradient background */}
                             <div style={{
                                 position: "absolute", inset: 0,
-                                background: `linear-gradient(90deg, ${C.red}55, ${C.amber}55, ${C.green}55)`,
-                                borderRadius: 6,
+                                background: `linear-gradient(90deg, ${C.red}55, ${C.red}33, ${C.amber}33, ${C.green}33, ${C.green}55)`,
+                                borderRadius: 8,
                             }} />
-                            {/* needle */}
+                            {/* Center line */}
                             <div style={{
-                                position: "absolute", top: -2, width: 4, height: 12,
-                                background: clr, borderRadius: 2,
-                                left: `calc(${pct}% - 2px)`,
-                                boxShadow: `0 0 6px ${clr}`,
-                                transition: "left .5s ease",
+                                position: "absolute", left: "50%", top: 0, bottom: 0,
+                                width: 1, background: C.textDim + "66",
                             }} />
+                            {/* Needle */}
+                            <div style={{
+                                position: "absolute", top: -3, width: 6, height: 16,
+                                background: clr, borderRadius: 3,
+                                left: `calc(${gaugePct}% - 3px)`,
+                                boxShadow: `0 0 8px ${clr}`,
+                                transition: "left .6s ease",
+                            }} />
+                        </div>
+                        {/* Tick marks */}
+                        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, padding: "0 2px" }}>
+                            {[-3, -2, -1, 0, 1, 2, 3].map(v => (
+                                <div key={v} style={{
+                                    width: 1, height: 4,
+                                    background: v === score ? clr : C.textDim + "44",
+                                }} />
+                            ))}
                         </div>
                     </div>
                 </div>
             </div>
 
-            {/* Active Signals Grid */}
-            {activeSignals.length > 0 && (
-                <div style={{
-                    display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10,
-                    marginBottom: 16,
-                }}>
-                    {activeSignals.map(s => {
-                        const meta = SIGNAL_LABELS[s.name] || { label: s.name, icon: "📌", category: "Other" };
-                        const norm = s.normalised;
-                        const barClr = norm > 0.1 ? C.green : norm < -0.1 ? C.red : C.amber;
-                        const barW = Math.abs(norm) * 100;
-                        return (
-                            <div key={s.name} style={{
-                                background: C.bg2, border: `1px solid ${C.border}`,
-                                borderRadius: 10, padding: "12px 14px",
-                                transition: "border-color .2s",
-                            }}>
-                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                        <span style={{ fontSize: 14 }}>{meta.icon}</span>
-                                        <span style={{ color: C.text, fontSize: 11, fontWeight: 700 }}>{meta.label}</span>
-                                    </div>
-                                    <span style={{
-                                        color: C.textDim, fontSize: 9, background: C.bg3,
-                                        borderRadius: 4, padding: "2px 6px",
-                                    }}>{meta.category}</span>
-                                </div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                                    <span style={{
-                                        color: barClr, fontSize: 16, fontWeight: 800,
-                                        fontFamily: "'DM Mono',monospace", minWidth: 50,
-                                    }}>
-                                        {norm >= 0 ? "+" : ""}{norm.toFixed(3)}
-                                    </span>
-                                    <div style={{
-                                        flex: 1, height: 5, background: C.bg1, borderRadius: 3,
-                                        overflow: "hidden", position: "relative",
-                                    }}>
-                                        <div style={{
-                                            position: "absolute",
-                                            left: norm >= 0 ? "50%" : `${50 - barW / 2}%`,
-                                            width: `${barW / 2}%`,
-                                            height: "100%", background: barClr, borderRadius: 3,
-                                            transition: "all .4s ease",
-                                        }} />
-                                    </div>
-                                </div>
-                                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim }}>
-                                    <span>z: {s.z_score.toFixed(2)}</span>
-                                    <span>raw: {s.value.toFixed(4)}</span>
-                                    <span>conf: {(s.confidence * 100).toFixed(0)}%</span>
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
+            {/* 3 Indicator Cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 16 }}>
+                <SignalCard
+                    name="trend"
+                    signal={data.trend}
+                    score={data.trend_score}
+                    detail1Label="Close" detail1Value={det.close != null ? `$${det.close.toFixed(2)}` : "—"}
+                    detail2Label="200 MA" detail2Value={det.sma_200 != null ? `$${det.sma_200.toFixed(2)}` : "—"}
+                />
+                <SignalCard
+                    name="rsi"
+                    signal={data.rsi_signal}
+                    score={data.rsi_score}
+                    detail1Label="RSI" detail1Value={det.rsi != null ? det.rsi.toFixed(1) : "—"}
+                    detail2Label="Prev RSI" detail2Value={det.rsi_prev != null ? det.rsi_prev.toFixed(1) : "—"}
+                />
+                <SignalCard
+                    name="volume"
+                    signal={data.volume_signal}
+                    score={data.volume_score}
+                    detail1Label="Volume" detail1Value={det.volume != null ? (det.volume / 1e6).toFixed(1) + "M" : "—"}
+                    detail2Label="Avg 20d" detail2Value={det.avg_volume_20 != null ? (det.avg_volume_20 / 1e6).toFixed(1) + "M" : "—"}
+                />
+            </div>
 
-            {/* Stale / Pending Signals */}
-            {staleSignals.length > 0 && (
-                <div style={{
-                    background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 10,
-                    padding: "12px 16px",
-                }}>
-                    <div style={{ color: C.textDim, fontSize: 10, letterSpacing: 1, marginBottom: 8, fontFamily: "'Syne',sans-serif" }}>
-                        PENDING DATA FEEDS ({staleSignals.length})
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {staleSignals.map(s => {
-                            const meta = SIGNAL_LABELS[s.name] || { label: s.name, icon: "📌" };
-                            return (
-                                <span key={s.name} style={{
-                                    background: C.bg3, border: `1px solid ${C.border}`,
-                                    borderRadius: 6, padding: "4px 10px", fontSize: 10,
-                                    color: C.textDim, display: "flex", alignItems: "center", gap: 4,
-                                }}>
-                                    <span>{meta.icon}</span> {meta.label}
-                                    <span style={{ color: C.amber, fontSize: 9 }}>⏳</span>
-                                </span>
-                            );
-                        })}
-                    </div>
-                </div>
-            )}
+            {/* Disclaimer */}
+            <div style={{
+                background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 8,
+                padding: "10px 16px", fontSize: 10, color: C.textDim, lineHeight: 1.5,
+                display: "flex", alignItems: "center", gap: 8,
+            }}>
+                <span style={{ fontSize: 14 }}>ℹ️</span>
+                <span>Probability-based system using daily timeframe. Not predictive. Signals update on each trading day close.</span>
+            </div>
         </div>
     );
 }
@@ -373,7 +401,6 @@ function SentimentPanel({ data, loading, error }) {
 // ── Analysis Tab ───────────────────────────────────────────────────────────────
 export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
     const [showDetails, setShowDetails] = useState(false);
-    const [showBB, setShowBB] = useState(true);
     const [showSMA, setShowSMA] = useState(true);
     const [showEMA, setShowEMA] = useState(false);
     const [showVolume, setShowVolume] = useState(true);
@@ -471,7 +498,7 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                         transition: "all .15s",
                     }}
                 >Analyse</button>
-                <span style={{ fontSize: 10, color: C.textDim }}>( Loads any ticker without changing your watchlist )</span>
+                <span style={{ fontSize: 10, color: C.textDim }}>( Loads any ticker without changing your watchlist )</span>
             </div>
 
             {/* Header */}
@@ -500,7 +527,7 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                     <span>📈</span> Chart Details
                 </button>
             </div>
-            {/* Market Session Panel */}
+            {/* Last close */}
             <div style={{ fontSize: 11, color: C.textDim, marginBottom: 16 }}>
                 Last close: <b style={{ color: C.text }}>${last.close.toFixed(2)}</b>
             </div>
@@ -509,7 +536,7 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
             <MarketSessionPanel symbol={selectedTicker} source={dataSource} />
 
             {/* Stat cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 12, margin: "20px 0" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12, margin: "20px 0" }}>
                 <StatCard label="PRICE" value={`$${last.close.toFixed(2)}`}
                     sub={`${change >= 0 ? "+" : ""}$${change.toFixed(2)} today`} color={change >= 0 ? C.green : C.red} />
                 <StatCard label="SMA 20" value={last.sma20 ? `$${last.sma20.toFixed(2)}` : "—"}
@@ -517,9 +544,11 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                 <StatCard label="RSI (14)" value={last.rsi ? last.rsi.toFixed(1) : "—"}
                     sub={last.rsi > 70 ? "Overbought" : last.rsi < 30 ? "Oversold" : "Neutral"}
                     color={last.rsi > 70 ? C.red : last.rsi < 30 ? C.green : C.amber} />
-                <StatCard label="MACD" value={last.macd ? last.macd.toFixed(2) : "—"}
-                    sub={last.macd > 0 ? "Bullish" : "Bearish"} color={last.macd > 0 ? C.green : C.red} />
+                <StatCard label="EMA 12" value={last.ema12 ? `$${last.ema12.toFixed(2)}` : "—"}
+                    sub={last.close > (last.ema12 || 0) ? "↑ Above EMA" : "↓ Below EMA"} color={C.green} />
                 <StatCard label="ATR" value={last.atr ? last.atr.toFixed(2) : "—"} sub="Volatility" color={C.purple} />
+                <StatCard label="VOLUME" value={last.volume ? (last.volume >= 1e6 ? (last.volume / 1e6).toFixed(2) + "M" : last.volume.toLocaleString()) : "—"}
+                    sub="Shares Traded" color={C.amber} />
             </div>
 
             {/* Time range + overlay toggles */}
@@ -533,7 +562,6 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
                 {[
-                    { label: "Bollinger Bands", active: showBB, set: setShowBB },
                     { label: "SMA 20", active: showSMA, set: setShowSMA },
                     { label: "EMA 12", active: showEMA, set: setShowEMA },
                     { label: "Volume", active: showVolume, set: setShowVolume },
@@ -556,10 +584,6 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                         <YAxis tick={{ fill: C.textDim, fontSize: 10 }} domain={["auto", "auto"]}
                             tickFormatter={v => `$${v}`} />
                         <Tooltip content={<ChartTooltip />} />
-                        {showBB && <Area type="monotone" dataKey="bbUpper" stroke="none" fill={C.purple + "15"} />}
-                        {showBB && <Area type="monotone" dataKey="bbLower" stroke="none" fill={C.bg1} />}
-                        {showBB && <Line type="monotone" dataKey="bbUpper" stroke={C.purple} strokeWidth={1} dot={false} strokeDasharray="4 4" />}
-                        {showBB && <Line type="monotone" dataKey="bbLower" stroke={C.purple} strokeWidth={1} dot={false} strokeDasharray="4 4" />}
                         {showSMA && <Line type="monotone" dataKey="sma20" stroke={C.cyan} strokeWidth={1.5} dot={false} strokeDasharray="6 3" />}
                         {showEMA && <Line type="monotone" dataKey="ema12" stroke={C.green} strokeWidth={1.5} dot={false} />}
                         <Line type="monotone" dataKey="close" stroke={C.amber} strokeWidth={2} dot={false} />
@@ -569,7 +593,7 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                 </ResponsiveContainer>
             </Section>
 
-            {/* RSI & MACD */}
+            {/* RSI & EMA 12 */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
                 <Section title="RSI (14)">
                     <ResponsiveContainer width="100%" height={160}>
@@ -583,27 +607,32 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
                         </LineChart>
                     </ResponsiveContainer>
                 </Section>
-                <Section title="MACD">
+                <Section title="EMA 12 vs Price">
                     <ResponsiveContainer width="100%" height={160}>
                         <ComposedChart data={chartData}>
                             <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
                             <XAxis dataKey="date" tick={{ fill: C.textDim, fontSize: 9 }} />
-                            <YAxis tick={{ fill: C.textDim, fontSize: 9 }} />
-                            <ReferenceLine y={0} stroke={C.border} />
-                            <Bar dataKey="macdHist" fill={C.amber + "55"}>
-                                {chartData.map((d, i) => (
-                                    <rect key={i} fill={(d.macdHist || 0) >= 0 ? C.green + "88" : C.red + "88"} />
-                                ))}
-                            </Bar>
-                            <Line type="monotone" dataKey="macd" stroke={C.amber} strokeWidth={1.5} dot={false} />
-                            <Line type="monotone" dataKey="macdSig" stroke={C.red} strokeWidth={1} dot={false} />
+                            <YAxis tick={{ fill: C.textDim, fontSize: 9 }} domain={["auto", "auto"]} tickFormatter={v => `$${v}`} />
+                            <Line type="monotone" dataKey="close" stroke={C.amber} strokeWidth={1} dot={false} strokeOpacity={0.4} />
+                            <Line type="monotone" dataKey="ema12" stroke={C.green} strokeWidth={1.5} dot={false} />
                         </ComposedChart>
-                </ResponsiveContainer>
-            </Section>
+                    </ResponsiveContainer>
+                </Section>
             </div>
 
-            {/* ── Technical Sentiment Signal Panel ──────────────────── */}
-            <SentimentPanel data={sentiment} loading={sentimentLoading} error={sentimentError} />
-        </div >
+            {/* Chart Usage Guide */}
+            <div style={{
+                background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 8,
+                padding: "12px 16px", fontSize: 11, color: C.textDim, lineHeight: 1.5,
+                marginTop: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16,
+            }}>
+                <div><strong style={{color: C.text}}>📉 Price Chart:</strong> Tracks overall trend. SMA indicates direction; volume confirms price moves.</div>
+                <div><strong style={{color: C.text}}>⚡ RSI (14):</strong> Measures momentum. &gt;70 means Overbought (due to drop), &lt;30 means Oversold (due to bounce).</div>
+                <div><strong style={{color: C.text}}>🎯 EMA 12 vs Price:</strong> Fast trend gauge. Price bouncing above the green line signals a strong short-term uptrend.</div>
+            </div>
+
+            {/* ── Indicator Sentiment Panel ────────────────────── */}
+            <IndicatorSentimentPanel data={sentiment} loading={sentimentLoading} error={sentimentError} />
+        </div>
     );
 }
