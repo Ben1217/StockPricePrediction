@@ -1,21 +1,16 @@
 """
-Chart Structure Pattern Detection Module.
+Chart Pattern Detection Module (Multi-Timeframe Spec)
 
-Detects multi-bar chart patterns using pivot-point analysis:
-  - Double Top / Double Bottom
-  - Head & Shoulders / Inverse Head & Shoulders
-  - Ascending / Descending / Symmetrical Triangle
-  - Bull Flag / Bear Flag
-  - Rising / Falling Wedge
-  - Cup & Handle
-
-Each detection returns: pattern_name, start_date, end_date,
-key_levels, neckline, breakout_price, target_price, confidence, status.
+Detects 4 specific patterns with strict coordinate and targets logic:
+  - Head & Shoulders (Bearish)
+  - Double Bottom (Bullish)
+  - Bull Flag (Bullish)
+  - Symmetrical Triangle (Neutral / Breakout)
 """
 
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,11 +18,10 @@ logger = get_logger(__name__)
 
 # ── Pivot Detection ─────────────────────────────────────────────
 
-def _find_pivots(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
+def _find_pivots(df: pd.DataFrame, window: int = 5) -> tuple:
     """Find local high/low pivot points using rolling window."""
     highs = df["High"].values.astype(float)
     lows = df["Low"].values.astype(float)
-    closes = df["Close"].values.astype(float)
     n = len(df)
 
     pivot_highs = []
@@ -59,112 +53,8 @@ def _make_key_level(df, idx, price=None):
 
 # ── Pattern Matchers ────────────────────────────────────────────
 
-def _detect_double_top(df, pivot_highs, tolerance=0.02):
-    """Detect double top pattern from pivot highs."""
-    patterns = []
-    highs = df["High"].values.astype(float)
-    closes = df["Close"].values.astype(float)
-    lows = df["Low"].values.astype(float)
-
-    for i in range(len(pivot_highs) - 1):
-        p1, p2 = pivot_highs[i], pivot_highs[i + 1]
-        if p2 - p1 < 10:
-            continue
-
-        h1, h2 = highs[p1], highs[p2]
-        if abs(h1 - h2) / max(h1, h2) > tolerance:
-            continue
-
-        # Find trough between peaks
-        trough_idx = p1 + np.argmin(lows[p1:p2])
-        neckline = float(lows[trough_idx])
-        peak_avg = (h1 + h2) / 2
-        target = neckline - (peak_avg - neckline)
-
-        # Status
-        last_close = closes[min(p2 + 5, len(df) - 1)]
-        if last_close < neckline:
-            status = "confirmed"
-        elif p2 >= len(df) - 10:
-            status = "forming"
-        else:
-            status = "broken"
-            continue
-
-        confidence = min(0.9, 0.5 + 0.2 * (1 - abs(h1 - h2) / max(h1, h2) / tolerance))
-
-        patterns.append({
-            "pattern_name": "Double Top",
-            "start_date": _date_str(df, p1),
-            "end_date": _date_str(df, p2),
-            "key_levels": [
-                _make_key_level(df, p1, h1),
-                _make_key_level(df, trough_idx, neckline),
-                _make_key_level(df, p2, h2),
-            ],
-            "neckline": round(neckline, 2),
-            "breakout_price": round(neckline, 2),
-            "target_price": round(target, 2),
-            "confidence": round(confidence, 2),
-            "status": status,
-        })
-
-    return patterns
-
-
-def _detect_double_bottom(df, pivot_lows, tolerance=0.02):
-    """Detect double bottom pattern from pivot lows."""
-    patterns = []
-    lows = df["Low"].values.astype(float)
-    closes = df["Close"].values.astype(float)
-    highs = df["High"].values.astype(float)
-
-    for i in range(len(pivot_lows) - 1):
-        p1, p2 = pivot_lows[i], pivot_lows[i + 1]
-        if p2 - p1 < 10:
-            continue
-
-        l1, l2 = lows[p1], lows[p2]
-        if abs(l1 - l2) / max(l1, l2) > tolerance:
-            continue
-
-        peak_idx = p1 + np.argmax(highs[p1:p2])
-        neckline = float(highs[peak_idx])
-        trough_avg = (l1 + l2) / 2
-        target = neckline + (neckline - trough_avg)
-
-        last_close = closes[min(p2 + 5, len(df) - 1)]
-        if last_close > neckline:
-            status = "confirmed"
-        elif p2 >= len(df) - 10:
-            status = "forming"
-        else:
-            status = "broken"
-            continue
-
-        confidence = min(0.9, 0.5 + 0.2 * (1 - abs(l1 - l2) / max(l1, l2) / tolerance))
-
-        patterns.append({
-            "pattern_name": "Double Bottom",
-            "start_date": _date_str(df, p1),
-            "end_date": _date_str(df, p2),
-            "key_levels": [
-                _make_key_level(df, p1, l1),
-                _make_key_level(df, peak_idx, neckline),
-                _make_key_level(df, p2, l2),
-            ],
-            "neckline": round(neckline, 2),
-            "breakout_price": round(neckline, 2),
-            "target_price": round(target, 2),
-            "confidence": round(confidence, 2),
-            "status": status,
-        })
-
-    return patterns
-
-
 def _detect_head_shoulders(df, pivot_highs, tolerance=0.03):
-    """Detect Head & Shoulders pattern."""
+    """Detect Head & Shoulders pattern (Bearish)."""
     patterns = []
     highs = df["High"].values.astype(float)
     lows = df["Low"].values.astype(float)
@@ -185,18 +75,21 @@ def _detect_head_shoulders(df, pivot_highs, tolerance=0.03):
         t1_idx = ls + np.argmin(lows[ls:hd])
         t2_idx = hd + np.argmin(lows[hd:rs])
         neckline = (float(lows[t1_idx]) + float(lows[t2_idx])) / 2
+        
         target = neckline - (h_hd - neckline)
+        stop_loss = h_rs
 
         last_close = closes[min(rs + 5, len(df) - 1)]
+        status = "forming"
+        breakout_price = None
+        
         if last_close < neckline:
             status = "confirmed"
-        elif rs >= len(df) - 10:
-            status = "forming"
-        else:
-            continue
+            breakout_price = neckline
 
         patterns.append({
             "pattern_name": "Head & Shoulders",
+            "direction": "bearish",
             "start_date": _date_str(df, ls),
             "end_date": _date_str(df, rs),
             "key_levels": [
@@ -207,150 +100,69 @@ def _detect_head_shoulders(df, pivot_highs, tolerance=0.03):
                 _make_key_level(df, rs, h_rs),
             ],
             "neckline": round(neckline, 2),
-            "breakout_price": round(neckline, 2),
+            "breakout_price": round(breakout_price, 2) if breakout_price else None,
             "target_price": round(target, 2),
-            "confidence": round(min(0.85, 0.55 + 0.15 * (h_hd - max(h_ls, h_rs)) / h_hd), 2),
+            "stop_loss": round(stop_loss, 2),
             "status": status,
         })
 
     return patterns
 
 
-def _detect_inverse_head_shoulders(df, pivot_lows, tolerance=0.03):
-    """Detect Inverse Head & Shoulders pattern."""
+def _detect_double_bottom(df, pivot_lows, tolerance=0.02):
+    """Detect Double Bottom pattern (Bullish)."""
     patterns = []
     lows = df["Low"].values.astype(float)
-    highs = df["High"].values.astype(float)
     closes = df["Close"].values.astype(float)
+    highs = df["High"].values.astype(float)
 
-    for i in range(len(pivot_lows) - 2):
-        ls, hd, rs = pivot_lows[i], pivot_lows[i + 1], pivot_lows[i + 2]
-        l_ls, l_hd, l_rs = lows[ls], lows[hd], lows[rs]
-
-        if l_hd >= l_ls or l_hd >= l_rs:
-            continue
-        if abs(l_ls - l_rs) / max(l_ls, l_rs) > tolerance:
+    for i in range(len(pivot_lows) - 1):
+        p1, p2 = pivot_lows[i], pivot_lows[i + 1]
+        if p2 - p1 < 5:
             continue
 
-        t1_idx = ls + np.argmax(highs[ls:hd])
-        t2_idx = hd + np.argmax(highs[hd:rs])
-        neckline = (float(highs[t1_idx]) + float(highs[t2_idx])) / 2
-        target = neckline + (neckline - l_hd)
+        l1, l2 = lows[p1], lows[p2]
+        if abs(l1 - l2) / max(l1, l2) > tolerance:
+            continue
 
-        last_close = closes[min(rs + 5, len(df) - 1)]
-        if last_close > neckline:
+        peak_idx = p1 + np.argmax(highs[p1:p2])
+        resistance = float(highs[peak_idx])
+        trough_avg = (l1 + l2) / 2
+        height = resistance - trough_avg
+        
+        target = resistance + height
+        stop_loss = trough_avg * 0.995 # lightly below
+
+        last_close = closes[min(p2 + 5, len(df) - 1)]
+        status = "forming"
+        breakout_price = None
+
+        if last_close > resistance:
             status = "confirmed"
-        elif rs >= len(df) - 10:
-            status = "forming"
-        else:
-            continue
+            breakout_price = resistance
 
         patterns.append({
-            "pattern_name": "Inverse Head & Shoulders",
-            "start_date": _date_str(df, ls),
-            "end_date": _date_str(df, rs),
+            "pattern_name": "Double Bottom",
+            "direction": "bullish",
+            "start_date": _date_str(df, p1),
+            "end_date": _date_str(df, p2),
             "key_levels": [
-                _make_key_level(df, ls, l_ls),
-                _make_key_level(df, t1_idx, float(highs[t1_idx])),
-                _make_key_level(df, hd, l_hd),
-                _make_key_level(df, t2_idx, float(highs[t2_idx])),
-                _make_key_level(df, rs, l_rs),
+                _make_key_level(df, p1, l1),
+                _make_key_level(df, peak_idx, resistance),
+                _make_key_level(df, p2, l2),
             ],
-            "neckline": round(neckline, 2),
-            "breakout_price": round(neckline, 2),
+            "neckline": round(resistance, 2),
+            "breakout_price": round(breakout_price, 2) if breakout_price else None,
             "target_price": round(target, 2),
-            "confidence": round(min(0.85, 0.55 + 0.15 * (min(l_ls, l_rs) - l_hd) / abs(l_hd)), 2),
+            "stop_loss": round(stop_loss, 2),
             "status": status,
         })
 
     return patterns
 
 
-def _detect_triangles(df, pivot_highs, pivot_lows, min_points=4):
-    """Detect ascending, descending, and symmetrical triangles."""
-    patterns = []
-    highs = df["High"].values.astype(float)
-    lows = df["Low"].values.astype(float)
-    closes = df["Close"].values.astype(float)
-    n = len(df)
-
-    # Need at least 2 highs and 2 lows in a window
-    for start_idx in range(0, n - 20, 10):
-        end_idx = min(start_idx + 60, n)
-        window_highs = [p for p in pivot_highs if start_idx <= p < end_idx]
-        window_lows = [p for p in pivot_lows if start_idx <= p < end_idx]
-
-        if len(window_highs) < 2 or len(window_lows) < 2:
-            continue
-
-        # Fit linear regression to pivots
-        wh = np.array(window_highs)
-        wl = np.array(window_lows)
-        h_vals = highs[wh]
-        l_vals = lows[wl]
-
-        if len(wh) >= 2:
-            h_slope = np.polyfit(wh, h_vals, 1)[0]
-        else:
-            continue
-        if len(wl) >= 2:
-            l_slope = np.polyfit(wl, l_vals, 1)[0]
-        else:
-            continue
-
-        # Classify triangle type
-        pattern_name = None
-        direction = None
-
-        if abs(h_slope) < 0.05 and l_slope > 0.05:
-            pattern_name = "Ascending Triangle"
-            direction = "bullish"
-        elif h_slope < -0.05 and abs(l_slope) < 0.05:
-            pattern_name = "Descending Triangle"
-            direction = "bearish"
-        elif h_slope < -0.03 and l_slope > 0.03:
-            pattern_name = "Symmetrical Triangle"
-            direction = "neutral"
-        else:
-            continue
-
-        # Key levels
-        key_levels = []
-        for idx in sorted(list(wh) + list(wl)):
-            key_levels.append(_make_key_level(df, idx, float(closes[idx])))
-
-        apex_price = (h_vals[-1] + l_vals[-1]) / 2
-        height = h_vals[0] - l_vals[0]
-        if direction == "bullish":
-            breakout = float(h_vals[-1])
-            target = breakout + height * 0.618
-        elif direction == "bearish":
-            breakout = float(l_vals[-1])
-            target = breakout - height * 0.618
-        else:
-            breakout = float(apex_price)
-            target = breakout + height * 0.5
-
-        last_idx = max(max(wh), max(wl))
-        status = "forming" if last_idx >= n - 10 else "confirmed"
-
-        patterns.append({
-            "pattern_name": pattern_name,
-            "start_date": _date_str(df, min(min(wh), min(wl))),
-            "end_date": _date_str(df, last_idx),
-            "key_levels": key_levels[:8],
-            "neckline": round(apex_price, 2),
-            "breakout_price": round(breakout, 2),
-            "target_price": round(target, 2),
-            "confidence": round(min(0.8, 0.4 + 0.1 * (len(wh) + len(wl))), 2),
-            "status": status,
-        })
-
-    return patterns
-
-
-def _detect_flags(df, pivot_highs, pivot_lows):
-    """Detect bull and bear flag patterns."""
+def _detect_bull_flag(df, pivot_highs, pivot_lows):
+    """Detect Bull Flag pattern (Bullish)."""
     patterns = []
     closes = df["Close"].values.astype(float)
     highs = df["High"].values.astype(float)
@@ -358,85 +170,164 @@ def _detect_flags(df, pivot_highs, pivot_lows):
     n = len(df)
 
     for i in range(20, n - 5):
-        # Check for a strong prior move (flagpole)
+        # Look for a sharp bullish move (flagpole)
         lookback = 15
         start = max(0, i - lookback)
         move = (closes[i] - closes[start]) / closes[start]
 
-        if abs(move) < 0.05:
+        if move < 0.05: # Need > 5% move for pole
             continue
 
-        # Check for consolidation after the move (flag)
+        pole_length = highs[start:i].max() - lows[start:i].min()
+
+        # Check for consolidation channel
         flag_end = min(i + 15, n)
-        flag_range = highs[i:flag_end].max() - lows[i:flag_end].min()
-        flagpole_range = abs(highs[start:i].max() - lows[start:i].min())
+        
+        # Fit trendlines for the flag
+        flag_highs = highs[i:flag_end]
+        flag_lows = lows[i:flag_end]
+        
+        if len(flag_highs) < 5: continue
+        
+        upper_channel = np.polyfit(np.arange(len(flag_highs)), flag_highs, 1)[0]
+        lower_channel = np.polyfit(np.arange(len(flag_lows)), flag_lows, 1)[0]
+        
+        # Upper and lower should be sloping down or flat
+        if upper_channel > 0.01 or lower_channel > 0.01:
+             continue
+             
+        breakout = float(flag_highs.max())
+        flag_bottom = float(flag_lows.min())
 
-        if flag_range > flagpole_range * 0.5:
-            continue
+        target = breakout + pole_length
+        stop_loss = flag_bottom
 
-        is_bull = move > 0
-        pattern_name = "Bull Flag" if is_bull else "Bear Flag"
-        breakout = float(highs[i:flag_end].max()) if is_bull else float(lows[i:flag_end].min())
-        target = breakout + flagpole_range * 0.618 if is_bull else breakout - flagpole_range * 0.618
+        status = "forming"
+        breakout_p = None
+        if closes[flag_end - 1] > breakout:
+            status = "confirmed"
+            breakout_p = breakout
 
         patterns.append({
-            "pattern_name": pattern_name,
+            "pattern_name": "Bull Flag",
+            "direction": "bullish",
             "start_date": _date_str(df, start),
             "end_date": _date_str(df, min(flag_end - 1, n - 1)),
             "key_levels": [
                 _make_key_level(df, start, closes[start]),
-                _make_key_level(df, i, closes[i]),
-                _make_key_level(df, min(flag_end - 1, n - 1)),
+                _make_key_level(df, i, highs[i]),
+                _make_key_level(df, min(flag_end - 1, n - 1), closes[flag_end - 1]),
             ],
-            "neckline": round(breakout, 2),
-            "breakout_price": round(breakout, 2),
+            "trendlines": [
+                [_make_key_level(df, i, highs[i]), _make_key_level(df, flag_end - 1, flag_highs[-1])],
+                [_make_key_level(df, i, lows[i]), _make_key_level(df, flag_end - 1, flag_lows[-1])]
+            ],
+            "neckline": None,
+            "breakout_price": round(breakout_p, 2) if breakout_p else None,
             "target_price": round(target, 2),
-            "confidence": round(min(0.75, 0.4 + abs(move) * 3), 2),
-            "status": "forming" if flag_end >= n - 5 else "confirmed",
+            "stop_loss": round(stop_loss, 2),
+            "status": status,
         })
-        break  # Only report the most recent flag
+        break # Only report the most recent
+
+    return patterns
+
+
+def _detect_symmetrical_triangle(df, pivot_highs, pivot_lows):
+    """Detect Symmetrical Triangle (Neutral until breakout)."""
+    patterns = []
+    highs = df["High"].values.astype(float)
+    lows = df["Low"].values.astype(float)
+    closes = df["Close"].values.astype(float)
+    n = len(df)
+
+    for start_idx in range(0, n - 20, 10):
+        end_idx = min(start_idx + 60, n)
+        
+        # Get pivots strictly within timeline window
+        wh = [p for p in pivot_highs if start_idx <= p < end_idx]
+        wl = [p for p in pivot_lows if start_idx <= p < end_idx]
+
+        if len(wh) < 2 or len(wl) < 2:
+            continue
+
+        h_vals = highs[wh]
+        l_vals = lows[wl]
+
+        h_slope = np.polyfit(wh, h_vals, 1)[0]
+        l_slope = np.polyfit(wl, l_vals, 1)[0]
+
+        # Both must converge: Upper trendline falls, lower rises
+        if not (h_slope < -0.01 and l_slope > 0.01):
+            continue
+
+        height = h_vals[0] - l_vals[0]
+        
+        last_idx = max(max(wh), max(wl))
+        last_close = closes[min(n - 1, last_idx + 5)]
+        
+        # Check breakout
+        # Project lines
+        proj_h = np.polyval(np.polyfit(wh, h_vals, 1), min(n-1, last_idx + 5))
+        proj_l = np.polyval(np.polyfit(wl, l_vals, 1), min(n-1, last_idx + 5))
+        
+        status = "forming"
+        direction = "neutral"
+        target = None
+        stop_loss = None
+        breakout_price = None
+        
+        if last_close > proj_h:
+            status = "confirmed"
+            direction = "bullish"
+            breakout_price = proj_h
+            target = breakout_price + height
+            stop_loss = proj_l # inside triangle
+        elif last_close < proj_l:
+            status = "confirmed"
+            direction = "bearish"
+            breakout_price = proj_l
+            target = breakout_price - height
+            stop_loss = proj_h # inside triangle
+
+        key_levels = []
+        for idx in sorted(list(wh) + list(wl)):
+            key_levels.append(_make_key_level(df, idx, float(closes[idx])))
+
+        trendlines = [
+            [_make_key_level(df, wh[0], h_vals[0]), _make_key_level(df, wh[-1], h_vals[-1])],
+            [_make_key_level(df, wl[0], l_vals[0]), _make_key_level(df, wl[-1], l_vals[-1])]
+        ]
+
+        patterns.append({
+            "pattern_name": "Symmetrical Triangle",
+            "direction": direction,
+            "start_date": _date_str(df, min(min(wh), min(wl))),
+            "end_date": _date_str(df, last_idx),
+            "key_levels": key_levels[:8],
+            "trendlines": trendlines,
+            "neckline": None,
+            "breakout_price": round(breakout_price, 2) if breakout_price else None,
+            "target_price": round(target, 2) if target else None,
+            "stop_loss": round(stop_loss, 2) if stop_loss else None,
+            "status": status,
+        })
 
     return patterns
 
 
 # ── Main Entry Point ────────────────────────────────────────────
 
-def detect_chart_patterns(df: pd.DataFrame, lookback: int = 120) -> List[Dict[str, Any]]:
+def detect_chart_patterns(df: pd.DataFrame, lookback: int = 120, timeframe: str = "1d", weight: int = 1) -> List[Dict[str, Any]]:
     """
-    Detect chart structure patterns from OHLCV data.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        OHLCV data with DatetimeIndex.
-    lookback : int
-        Number of bars to analyze from the end.
-
-    Returns
-    -------
-    list of dict
-        Each dict contains pattern_name, start_date, end_date,
-        key_levels, neckline, breakout_price, target_price,
-        confidence, status.
+    Detect exactly 4 chart patterns.
     """
     data = df.tail(lookback).copy()
     if len(data) < 30:
-        logger.warning("Insufficient data for pattern detection")
         return []
 
     pivot_highs, pivot_lows = _find_pivots(data, window=5)
-
     all_patterns = []
-
-    try:
-        all_patterns.extend(_detect_double_top(data, pivot_highs))
-    except Exception as e:
-        logger.warning(f"Double top detection failed: {e}")
-
-    try:
-        all_patterns.extend(_detect_double_bottom(data, pivot_lows))
-    except Exception as e:
-        logger.warning(f"Double bottom detection failed: {e}")
 
     try:
         all_patterns.extend(_detect_head_shoulders(data, pivot_highs))
@@ -444,28 +335,31 @@ def detect_chart_patterns(df: pd.DataFrame, lookback: int = 120) -> List[Dict[st
         logger.warning(f"H&S detection failed: {e}")
 
     try:
-        all_patterns.extend(_detect_inverse_head_shoulders(data, pivot_lows))
+        all_patterns.extend(_detect_double_bottom(data, pivot_lows))
     except Exception as e:
-        logger.warning(f"Inverse H&S detection failed: {e}")
+        logger.warning(f"Double bottom detection failed: {e}")
 
     try:
-        all_patterns.extend(_detect_triangles(data, pivot_highs, pivot_lows))
-    except Exception as e:
-        logger.warning(f"Triangle detection failed: {e}")
-
-    try:
-        all_patterns.extend(_detect_flags(data, pivot_highs, pivot_lows))
+        all_patterns.extend(_detect_bull_flag(data, pivot_highs, pivot_lows))
     except Exception as e:
         logger.warning(f"Flag detection failed: {e}")
+        
+    try:
+        all_patterns.extend(_detect_symmetrical_triangle(data, pivot_highs, pivot_lows))
+    except Exception as e:
+        logger.warning(f"Symmetrical triangle failed: {e}")
 
-    # Deduplicate overlapping patterns by keeping highest confidence
+    # Deduplicate overlapping patterns
     seen = set()
     unique = []
-    for p in sorted(all_patterns, key=lambda x: -x["confidence"]):
+    
+    # Enrich with weight and timeframe
+    for p in all_patterns:
         key = (p["pattern_name"], p["start_date"])
         if key not in seen:
             seen.add(key)
+            p['timeframe'] = timeframe
+            p['weight'] = weight
             unique.append(p)
 
-    logger.info(f"Detected {len(unique)} chart patterns")
     return unique

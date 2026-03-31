@@ -130,123 +130,42 @@ def _fit_trendline(indices: List[int], prices: np.ndarray, n: int, is_support: b
 
 def detect_support_resistance(df: pd.DataFrame, current_price: float) -> Dict[str, Any]:
     """
-    Detect all support and resistance features.
+    Detect clean Support and Resistance features based ONLY on key swing highs/lows 
+    with multiple touches (>= 2) over the recent price action (approx 100 candles), 
+    filtering out noise and returning at most 1 key support and 1 key resistance.
     """
-    raw_levels = []
-    trendlines = []
-    n = len(df)
+    # Use last 100 candles
+    df_recent = df.iloc[-100:] if len(df) > 100 else df
     
-    # Method 1: Candlestick Patterns
-    cdl_df = detect_candlestick_patterns(df)
+    # Pivot window of 5 implies 11-candle formation (5 before, 5 after)
+    # Good for major swings, ignores minor noise
+    pivot_highs, pivot_lows = _find_pivots(df_recent, window=5)
     
-    bullish_cols = ["cdl_hammer", "cdl_bullish_engulfing", "cdl_morning_star", "cdl_bullish_harami"]
-    bearish_cols = ["cdl_shooting_star", "cdl_bearish_engulfing", "cdl_evening_star", "cdl_bearish_harami"]
+    raw_highs = [{"price": float(df_recent["High"].iloc[idx]), "type": "resistance", "source": "peak"} for idx in pivot_highs]
+    raw_lows = [{"price": float(df_recent["Low"].iloc[idx]), "type": "support", "source": "trough"} for idx in pivot_lows]
     
-    for i in range(n):
-        # Bullish patterns -> Support at the low
-        if any(cdl_df.iloc[i].get(col, 0) == 1 for col in bullish_cols):
-            raw_levels.append({
-                "price": df["Low"].iloc[i],
-                "type": "support",
-                "source": "pattern_bullish"
-            })
-            
-        # Bearish patterns -> Resistance at the high
-        if any(cdl_df.iloc[i].get(col, 0) == 1 for col in bearish_cols):
-            raw_levels.append({
-                "price": df["High"].iloc[i],
-                "type": "resistance",
-                "source": "pattern_bearish"
-            })
-
-    # Method 2: Peaks & Troughs
-    pivot_highs, pivot_lows = _find_pivots(df, window=7)
+    # Group levels that are within 1.5% of each other into zones
+    merged_highs = _merge_levels(raw_highs, tolerance_pct=0.015)
+    merged_lows = _merge_levels(raw_lows, tolerance_pct=0.015)
     
-    for idx in pivot_highs:
-        raw_levels.append({
-            "price": df["High"].iloc[idx],
-            "type": "resistance",
-            "source": "peak"
-        })
-        
-    for idx in pivot_lows:
-        raw_levels.append({
-            "price": df["Low"].iloc[idx],
-            "type": "support",
-            "source": "trough"
-        })
-        
-    # Method 3: Trendlines
-    # Try finding support trendline from lows
-    support_tl = _fit_trendline(pivot_lows[-10:], df["Low"].values, n, is_support=True)
-    if support_tl:
-        trendlines.append(support_tl)
-        
-    # Try finding resistance trendline from highs
-    resist_tl = _fit_trendline(pivot_highs[-10:], df["High"].values, n, is_support=False)
-    if resist_tl:
-        trendlines.append(resist_tl)
-
-    # Process and Merge Levels (Method 2B: Multiple touches = zones)
-    merged_levels = _merge_levels(raw_levels, tolerance_pct=0.015) # 1.5% zone tolerance (aggressive merge)
+    # Filter for valid resistances: >= 2 touches AND strictly above current price
+    valid_resistances = [
+        l for l in merged_highs 
+        if l["price"] > current_price and l["confirmations"] >= 2
+    ]
+    # Sort to find the CLOSEST resistance above price
+    valid_resistances = sorted(valid_resistances, key=lambda x: x["price"])
     
-    # Dynamic re-labeling: if a "resistance" level is now BELOW current price, it flips to support.
-    # If a "support" level is now ABOVE current price, it flips to resistance.
-    for level in merged_levels:
-        if level["price"] < current_price:
-            level["type"] = "support"
-        else:
-            level["type"] = "resistance"
-
-    # Method 4: Dynamic Moving Averages
-    dynamic_levels = []
-    
-    df_ind = add_all_technical_indicators(df)
-    latest_ma200 = df_ind["SMA_200"].iloc[-1] if "SMA_200" in df_ind.columns else None
-    latest_ma50  = df_ind["SMA_50"].iloc[-1] if "SMA_50" in df_ind.columns else None
-    
-    if pd.notna(latest_ma200):
-        # Check bounces in last 10 days
-        recent_lows = df["Low"].iloc[-10:]
-        recent_highs = df["High"].iloc[-10:]
-        bounces = []
-        
-        # If price is above MA200, it's support
-        if current_price > latest_ma200:
-            for i in range(len(recent_lows)):
-                # If low touched or dipped slightly below MA but closed above
-                ma_val = df_ind["SMA_200"].iloc[-10+i]
-                if recent_lows.iloc[i] <= ma_val * 1.005 and df["Close"].iloc[-10+i] > ma_val:
-                    # Record the local index for drawing coordinates
-                    bounces.append({"index": n - 10 + i, "price": recent_lows.iloc[i], "type": "support"})
-                    
-            dynamic_levels.append({
-                "type": "support",
-                "name": "MA(200)",
-                "price": round(float(latest_ma200), 2),
-                "bounces": bounces
-            })
-            
-        # If price is below MA200, it's resistance
-        else:
-            for i in range(len(recent_highs)):
-                ma_val = df_ind["SMA_200"].iloc[-10+i]
-                if recent_highs.iloc[i] >= ma_val * 0.995 and df["Close"].iloc[-10+i] < ma_val:
-                    bounces.append({"index": n - 10 + i, "price": recent_highs.iloc[i], "type": "resistance"})
-
-            dynamic_levels.append({
-                "type": "resistance",
-                "name": "MA(200)",
-                "price": round(float(latest_ma200), 2),
-                "bounces": bounces # Used to draw arrows in the UI
-            })
-
-    # Return only the relevant merged levels (e.g. 3 closest above, 3 closest below)
-    supports = sorted([l for l in merged_levels if l["type"] == "support"], key=lambda x: x["price"], reverse=True)
-    resistances = sorted([l for l in merged_levels if l["type"] == "resistance"], key=lambda x: x["price"])
+    # Filter for valid supports: >= 2 touches AND strictly below current price
+    valid_supports = [
+        l for l in merged_lows 
+        if l["price"] < current_price and l["confirmations"] >= 2
+    ]
+    # Sort to find the CLOSEST support below price (descending order)
+    valid_supports = sorted(valid_supports, key=lambda x: x["price"], reverse=True)
     
     return {
-        "levels": supports[:1] + resistances[:1],  # 1 key support + 1 key resistance
-        "trendlines": trendlines,
-        "dynamic_levels": dynamic_levels
+        "levels": valid_supports[:1] + valid_resistances[:1],  # 1 key support + 1 key resistance
+        "trendlines": [],
+        "dynamic_levels": []
     }

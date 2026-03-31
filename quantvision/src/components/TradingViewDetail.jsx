@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries, createSeriesMarkers } from "lightweight-charts";
-import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns, fetchSupportResistance, fetchSentiment } from "../utils/api";
+import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns, fetchSupportResistance, fetchSentiment, fetchConfluence } from "../utils/api";
 import { C } from "../utils/data";
 
 function parseChartTime(dateStr) {
@@ -127,13 +127,23 @@ function DecisionPanel({ sentiment, srSummary, loading }) {
             {srSummary && (
                 <>
                     <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", alignItems: "center" }}>
                         <span style={{ color: C.textDim }}>Resistance</span>
-                        <span style={{ color: C.red, fontWeight: 700 }}>${srSummary.resistance}</span>
+                        <div style={{ textAlign: "right" }}>
+                            <div style={{ color: C.red, fontWeight: 700 }}>${srSummary.resistance}</div>
+                            {sentiment?.details?.dist_resistance !== undefined && srSummary.resistance !== "N/A" && (
+                                <div style={{ fontSize: 8, color: C.textDim, marginTop: 2 }}>{sentiment.details.dist_resistance}% away</div>
+                            )}
+                        </div>
                     </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", alignItems: "center" }}>
                         <span style={{ color: C.textDim }}>Support</span>
-                        <span style={{ color: C.cyan, fontWeight: 700 }}>${srSummary.support}</span>
+                        <div style={{ textAlign: "right" }}>
+                            <div style={{ color: C.cyan, fontWeight: 700 }}>${srSummary.support}</div>
+                            {sentiment?.details?.dist_support !== undefined && srSummary.support !== "N/A" && (
+                                <div style={{ fontSize: 8, color: C.textDim, marginTop: 2 }}>{sentiment.details.dist_support}% away</div>
+                            )}
+                        </div>
                     </div>
                 </>
             )}
@@ -144,12 +154,11 @@ function DecisionPanel({ sentiment, srSummary, loading }) {
 // ── Pattern Catalogue (simplified for Pattern Mode) ────────
 const PATTERN_CATALOGUE = [
     { category: "Chart Patterns", patterns: [
-        "Double Top", "Double Bottom",
-        "Head & Shoulders", "Inverse Head & Shoulders",
-        "Ascending Triangle", "Descending Triangle",
+        "Head & Shoulders", "Double Bottom",
+        "Bull Flag", "Symmetrical Triangle",
     ]},
 ];
-const MAX_PATTERNS = 2;
+const MAX_PATTERNS = 4;
 
 // ── Pattern Dropdown Component ────────────────────────────
 function PatternDropdown({ selected, onToggle, onClear, onClose }) {
@@ -260,7 +269,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const [sentimentLoading, setSentimentLoading] = useState(false);
 
     const [interval, setInterval] = useState("1d");
-    const intervals = ["1m", "5m", "15m", "1h", "4h", "1d", "1wk"];
+    const intervals = ["1m", "1h", "1d", "1wk", "1mo"];
 
     // ── View Mode ──────────────────────────────────────────
     const [viewMode, setViewMode] = useState("indicator"); // "indicator" | "pattern" | "advanced"
@@ -314,11 +323,23 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
     const stateData = useRef({ ohlc: [], indicators: [], signals: [], patterns: null, srData: null });
 
+    // Fetch confluence independent of main timeframe API
+    const [confluence, setConfluence] = useState([]);
+    useEffect(() => {
+        let active = true;
+        fetchConfluence(symbol).then(d => {
+            if (active && d?.confluence_signals) setConfluence(d.confluence_signals);
+        }).catch(() => {});
+        return () => { active = false; };
+    }, [symbol]);
+
     // ── Fetch sentiment for DecisionPanel ──────────────────
     useEffect(() => {
         setSentimentLoading(true);
-        fetchSentiment(symbol).then(d => { setSentiment(d); setSentimentLoading(false); })
-            .catch(() => { setSentiment(null); setSentimentLoading(false); });
+        import("../utils/api").then(api => {
+            api.fetchSentiment(symbol).then(d => { setSentiment(d); setSentimentLoading(false); })
+               .catch(() => { setSentiment(null); setSentimentLoading(false); });
+        });
     }, [symbol]);
 
     useEffect(() => {
@@ -333,8 +354,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 const [priceRes, indRes, patRes, srRes] = await Promise.all([
                     fetchPrices(symbol, "yfinance", days, interval),
                     fetchIndicators(symbol, days, interval),
-                    fetchPatterns(symbol, interval, lookback),
-                    showSR ? fetchSupportResistance(symbol, interval, lookback) : Promise.resolve(null)
+                    fetchPatterns(symbol, interval),
+                    showSR ? fetchSupportResistance(symbol, interval, lookback) : Promise.resolve(null),
                 ].map(p => p.catch(e => null)));
 
                 if (cancelled) return;
@@ -350,7 +371,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     ohlc: priceRes.bars,
                     indicators: indRes?.data || [],
                     signals: sigRes || [],
-                    patterns: patRes || null,
+                    patterns: patRes?.patterns || null,
                     srData: srRes || null,
                 };
 
@@ -474,42 +495,26 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 });
             }
 
-            // Chart patterns (Pattern + Advanced)
-            if (showPatterns && patterns?.candlestick_patterns && selectedPatterns.size > 0) {
-                patterns.candlestick_patterns
-                    .filter(p => selectedPatterns.has(p.pattern_name))
-                    .forEach(p => {
-                        const isBullish = p.direction === "bullish";
-                        allMarkers.push({
-                            time: parseChartTime(p.date),
-                            position: isBullish ? 'belowBar' : 'aboveBar',
-                            color: isBullish ? "#22d3ee" : "#fb923c",
-                            shape: isBullish ? 'arrowUp' : 'arrowDown',
-                            text: `${p.pattern_name} (${(p.confidence * 100).toFixed(0)}%)`
-                        });
-                    });
-            }
+            // Chart patterns (Markers)
+            if (showPatterns && patterns && selectedPatterns.size > 0) {
+                patterns.filter(p => selectedPatterns.has(p.pattern_name)).forEach(p => {
+                    const isBullish = p.direction === "bullish";
+                    const isNeutral = p.direction === "neutral";
+                    
+                    // Check if highly confluent
+                    const isConfluent = confluence.some(c => c.pattern_name === p.pattern_name && c.direction === p.direction);
 
-            // S&R MA Markers
-            if (showSR && srData?.dynamic_levels) {
-                srData.dynamic_levels.forEach(dl => {
-                    if (dl.bounces && dl.bounces.length > 0) {
-                        dl.bounces.forEach(bounce => {
-                            const isBullish = dl.type === "support";
-                            const bounceTime = ohlcData[Math.min(bounce.index, ohlcData.length - 1)]?.time;
-                            if (bounceTime) {
-                                allMarkers.push({
-                                    time: bounceTime,
-                                    position: isBullish ? 'belowBar' : 'aboveBar',
-                                    color: isBullish ? C.cyan : C.red,
-                                    shape: isBullish ? 'arrowUp' : 'arrowDown',
-                                    text: `${dl.name} Bounce`
-                                });
-                            }
-                        });
-                    }
+                    allMarkers.push({
+                        time: parseChartTime(p.end_date),
+                        position: isNeutral ? 'aboveBar' : isBullish ? 'belowBar' : 'aboveBar',
+                        color: isNeutral ? C.textDim : isBullish ? "#22d3ee" : "#fb923c",
+                        shape: isNeutral ? 'circle' : isBullish ? 'arrowUp' : 'arrowDown',
+                        text: `${isConfluent ? "🔥 " : ""}[${p.timeframe}-${p.weight}] ${p.pattern_name}`
+                    });
                 });
             }
+
+            // S&R dynamic MA layers removed
 
             // Filter, deduplicate, sort markers
             const validTimes = new Set(ohlcData.map(d => d.time));
@@ -528,46 +533,81 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 createSeriesMarkers(candleSeries, uniqueMarkers);
             }
 
-            // ── Chart Pattern Trendlines ────────────────────
-            if (showPatterns && patterns?.chart_patterns && selectedPatterns.size > 0) {
-                patterns.chart_patterns.filter(cp => selectedPatterns.has(cp.pattern_name)).forEach(cp => {
-                    if (cp.key_levels && cp.key_levels.length >= 2) {
-                        const isBullish = cp.pattern_name.includes("Bottom") || cp.pattern_name.includes("Inverse") ||
-                            cp.pattern_name.includes("Bull") || cp.pattern_name.includes("Ascending") ||
-                            cp.pattern_name.includes("Cup");
+            // ── Chart Pattern Trendlines & Draw ────────────────────
+            if (showPatterns && patterns && selectedPatterns.size > 0) {
+                patterns.filter(cp => selectedPatterns.has(cp.pattern_name)).forEach(cp => {
+                    const isBullish = cp.direction === "bullish";
+                    
+                    // Draw continuous key_levels if it's head & shoulders or double bottom
+                    if (["Head & Shoulders", "Double Bottom"].includes(cp.pattern_name) && cp.key_levels?.length >= 2) {
                         const lineColor = isBullish ? C.green + 'AA' : C.red + 'AA';
-
                         const trendSeries = chart.addSeries(LineSeries, {
-                            color: lineColor, lineWidth: 2, lineStyle: 2,
+                            color: lineColor, lineWidth: 2, lineStyle: 0,
                             lastValueVisible: false, priceLineVisible: false,
                         });
                         const points = processChartData(cp.key_levels.map(kl => ({
                             time: parseChartTime(kl.date), value: kl.price
                         })));
-                        if (points.length >= 2) trendSeries.setData(points);
+                        trendSeries.setData(points);
+                    }
+                    
+                    // Draw trendlines channels if they exist
+                    if (cp.trendlines && cp.trendlines.length > 0) {
+                        cp.trendlines.forEach(tl => {
+                            if (tl.length >= 2) {
+                                const tlSeries = chart.addSeries(LineSeries, {
+                                    color: C.textMid + '88', lineWidth: 1, lineStyle: 2,
+                                    lastValueVisible: false, priceLineVisible: false,
+                                });
+                                const points = processChartData(tl.map(kl => ({
+                                    time: parseChartTime(kl.date), value: kl.price
+                                })));
+                                tlSeries.setData(points);
+                            }
+                        });
+                    }
 
+                    // Only draw action levels if the pattern is confirmed, OR if it's not a symmetrical triangle
+                    if (cp.status === "confirmed" || cp.pattern_name !== "Symmetrical Triangle") {
                         if (cp.neckline) {
                             candleSeries.createPriceLine({
                                 price: cp.neckline, color: C.amber + '88', lineWidth: 1, lineStyle: 2,
-                                axisLabelVisible: true, title: cp.pattern_name,
+                                axisLabelVisible: true, title: cp.pattern_name + " Neckline",
                             });
                         }
 
-                        if (cp.breakout_price && cp.status !== "broken") {
+                        if (cp.breakout_price) {
                             candleSeries.createPriceLine({
                                 price: cp.breakout_price, color: "#fbbf24", lineWidth: 1, lineStyle: 3,
-                                axisLabelVisible: true, title: "Breakout Zone",
+                                axisLabelVisible: true, title: "Entry / Breakout",
                             });
                         }
 
-                        if (cp.target_price && cp.status === "confirmed") {
+                        if (cp.target_price) {
                             candleSeries.createPriceLine({
                                 price: cp.target_price,
-                                color: isBullish ? C.green + 'CC' : C.red + 'CC',
+                                color: C.green + 'CC',
                                 lineWidth: 1, lineStyle: 4, axisLabelVisible: true,
                                 title: `Target: $${cp.target_price.toFixed(2)}`,
                             });
                         }
+
+                        if (cp.stop_loss !== null && cp.stop_loss !== undefined) {
+                            candleSeries.createPriceLine({
+                                price: cp.stop_loss,
+                                color: C.red + 'CC',
+                                lineWidth: 1, lineStyle: 4, axisLabelVisible: true,
+                                title: `Stop: $${cp.stop_loss.toFixed(2)}`,
+                            });
+                        }
+                    } else if (cp.pattern_name === "Symmetrical Triangle" && cp.status !== "confirmed") {
+                        // Unconfirmed Symmetrical triangle label (the trendlines are drawn above already)
+                        // Awaiting breakout - no target/stop/entry
+                        const labelSeries = chart.addSeries(LineSeries, { lastValueVisible: false, priceLineVisible: false });
+                        labelSeries.setMarkers([{
+                            time: parseChartTime(cp.end_date), position: 'inBar', color: C.textDim,
+                            shape: 'circle', text: "Symmetrical Triangle — Awaiting Breakout"
+                        }]);
                     }
                 });
             }
@@ -583,7 +623,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     candleSeries.createPriceLine({
                         price: sr.price,
                         color: isSupp ? C.cyan : C.red,
-                        lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
+                        lineWidth: 2, lineStyle: 0, axisLabelVisible: false,
                         title: `${isSupp ? "Key Support" : "Key Resistance"} — $${sr.price.toFixed(2)}`,
                     });
                 });

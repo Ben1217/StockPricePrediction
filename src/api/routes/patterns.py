@@ -1,42 +1,48 @@
 """
-Pattern Detection API routes — candlestick patterns, chart structure
-patterns, and ML signal confluence.
+Pattern Detection API routes — multi-timeframe chart patterns.
 """
 
 import logging
+import asyncio
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List
 
 import pandas as pd
 import yfinance as yf
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, BackgroundTasks
 
 from src.api.schemas.schemas import (
-    PatternResponse, CandlestickPatternItem, ChartPatternItem,
-    KeyLevel, ConfluenceSignal,
+    PatternResponse, MultiTFPatternItem, ConfluenceResponse, ConfluenceSignal
 )
-from src.features.candlestick_patterns import detect_candlestick_patterns
 from src.features.pattern_detector import detect_chart_patterns
-from src.features.technical_indicators import add_all_technical_indicators
-from src.features.confluence import compute_confluence
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Simple in-memory cache for confluence signals
+_confluence_store: Dict[str, List[Dict]] = {}
+# Simple cache to prevent spamming background tasks
+_confluence_last_update: Dict[str, datetime] = {}
 
-def _fetch_ohlcv(symbol: str, interval: str, lookback: int) -> pd.DataFrame:
-    """Fetch OHLCV data from yfinance."""
+TF_CONFIG = {
+    "1m": {"yf_interval": "1m", "weight": 1, "lookback_mult": 1, "period": "7d"},
+    "1h": {"yf_interval": "1h", "weight": 2, "lookback_mult": 1, "period": "730d"},
+    "1d": {"yf_interval": "1d", "weight": 3, "lookback_mult": 1, "period": "max"},
+    "1wk": {"yf_interval": "1wk", "weight": 4, "lookback_mult": 5, "period": "max"},
+    "1mo": {"yf_interval": "1mo", "weight": 5, "lookback_mult": 20, "period": "max"},
+}
+
+
+def _fetch_yf_data(symbol: str, interval: str, period: str, days_lookback: int) -> pd.DataFrame:
     try:
-        if interval in ("1d", "1wk"):
+        if interval in ("1d", "1wk", "1mo") and period == "max":
             end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=lookback + 200)).strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=days_lookback)).strftime("%Y-%m-%d")
             df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
         else:
-            period_map = {"1m": "7d", "5m": "60d", "15m": "60d", "1h": "730d", "4h": "730d"}
-            period = period_map.get(interval, "60d")
             df = yf.download(symbol, period=period, interval=interval, progress=False)
     except Exception as e:
-        logger.error(f"YF fetch failed: {e}")
+        logger.error(f"YF fetch failed for {symbol} at {interval}: {e}")
         return pd.DataFrame()
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -46,115 +52,70 @@ def _fetch_ohlcv(symbol: str, interval: str, lookback: int) -> pd.DataFrame:
     return df
 
 
-@router.get("/{symbol}", response_model=PatternResponse)
-async def get_patterns(
-    symbol: str,
-    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
-    lookback: int = Query(120, ge=30, le=500),
-):
-    """Detect candlestick patterns, chart structure patterns, and compute confluence."""
+def _compute_confluence_bg(symbol: str):
+    """Background task to compute multi-timeframe confluence for a symbol."""
+    logger.info(f"Starting background confluence calculation for {symbol}")
+    all_patterns = []
+    
+    # Fetch all 5 timeframes
+    for tf, cfg in TF_CONFIG.items():
+        df = _fetch_yf_data(symbol, cfg["yf_interval"], cfg["period"], 365*2)
+        if df.empty: continue
+        
+        # We need about 120 bars minimum for good detection
+        pats = detect_chart_patterns(df, lookback=200, timeframe=tf, weight=cfg["weight"])
+        all_patterns.extend(pats)
+        
+    # Group patterns by name and direction to find overlapping confidences
+    confluence_map = {}
+    for p in all_patterns:
+        if p["status"] == "broken": continue
+        
+        key = f"{p['pattern_name']}_{p['direction']}"
+        if key not in confluence_map:
+            confluence_map[key] = {
+                "pattern_name": p["pattern_name"],
+                "direction": p["direction"],
+                "timeframes": set(),
+                "total_weight": 0
+            }
+        
+        # Only add weight if the timeframe hasn't contributed yet for this pattern
+        if p["timeframe"] not in confluence_map[key]["timeframes"]:
+            confluence_map[key]["timeframes"].add(p["timeframe"])
+            confluence_map[key]["total_weight"] += p["weight"]
+            
+    # Filter for signals that exist on multiple timeframes
+    conf_signals = []
+    for k, v in confluence_map.items():
+        if len(v["timeframes"]) >= 2:
+            conf_signals.append({
+                "pattern_name": v["pattern_name"],
+                "direction": v["direction"],
+                "timeframes": list(v["timeframes"]),
+                "total_weight": v["total_weight"]
+            })
+            
+    _confluence_store[symbol] = conf_signals
+    _confluence_last_update[symbol] = datetime.now()
+    logger.info(f"Background confluence finished for {symbol}: found {len(conf_signals)} signals")
+
+
+@router.get("/confluence/{symbol}", response_model=ConfluenceResponse)
+async def get_confluence(symbol: str):
+    """Retrieve pre-computed multi-timeframe confluence signals. This relies on background task."""
     symbol = symbol.upper()
-
-    df = _fetch_ohlcv(symbol, interval, lookback)
-    if df.empty:
-        raise HTTPException(404, f"No data for {symbol}")
-
-    # ── Candlestick Patterns ──────────────────────────────
-    cdl_result = detect_candlestick_patterns(df)
-    cdl_patterns = []
-
-    # Map pattern column names to display names and directions
-    cdl_map = {
-        "cdl_doji": ("Doji", "neutral"),
-        "cdl_hammer": ("Hammer", "bullish"),
-        "cdl_shooting_star": ("Shooting Star", "bearish"),
-        "cdl_bullish_engulfing": ("Bullish Engulfing", "bullish"),
-        "cdl_bearish_engulfing": ("Bearish Engulfing", "bearish"),
-        "cdl_morning_star": ("Morning Star", "bullish"),
-        "cdl_evening_star": ("Evening Star", "bearish"),
-        "cdl_bullish_harami": ("Bullish Harami", "bullish"),
-        "cdl_bearish_harami": ("Bearish Harami", "bearish"),
-    }
-
-    for col, (name, direction) in cdl_map.items():
-        if col not in cdl_result.columns:
-            continue
-        hits = cdl_result[cdl_result[col] == 1].index
-        for dt in hits:
-            date_str = str(dt.date()) if hasattr(dt, "date") else str(dt)
-            # Confidence based on pattern type (multi-bar patterns are more reliable)
-            base_conf = 0.7 if "engulfing" in col or "star" in col else 0.55
-            cdl_patterns.append(CandlestickPatternItem(
-                date=date_str,
-                pattern_name=name,
-                direction=direction if direction != "neutral" else "bullish",
-                confidence=round(base_conf, 2),
-            ))
-
-    # Only keep patterns from the lookback window
-    cdl_patterns = cdl_patterns[-50:]  # Cap to avoid huge payloads
-
-    # ── Chart Structure Patterns ──────────────────────────
-    chart_pats_raw = detect_chart_patterns(df, lookback=lookback)
-    chart_patterns = []
-    for p in chart_pats_raw:
-        chart_patterns.append(ChartPatternItem(
-            pattern_name=p["pattern_name"],
-            start_date=p["start_date"],
-            end_date=p["end_date"],
-            key_levels=[KeyLevel(date=kl["date"], price=kl["price"]) for kl in p["key_levels"]],
-            neckline=p.get("neckline"),
-            breakout_price=p.get("breakout_price"),
-            target_price=p.get("target_price"),
-            confidence=p["confidence"],
-            status=p["status"],
-        ))
-
-    # ── Confluence ────────────────────────────────────────
-    df_ind = add_all_technical_indicators(df)
-    latest = df_ind.iloc[-1] if not df_ind.empty else {}
-
-    indicators = {}
-    for key in ["RSI", "MACD", "MACD_Signal", "MACD_Histogram", "ATR"]:
-        val = latest.get(key)
-        if val is not None and pd.notna(val):
-            indicators[key] = float(val)
-
-    # Determine dominant pattern direction
-    bullish_count = sum(1 for p in cdl_patterns if p.direction == "bullish")
-    bearish_count = sum(1 for p in cdl_patterns if p.direction == "bearish")
-    for cp in chart_patterns:
-        if "Bottom" in cp.pattern_name or "Inverse" in cp.pattern_name or "Bull" in cp.pattern_name or "Ascending" in cp.pattern_name:
-            bullish_count += 2
-        elif "Top" in cp.pattern_name or "Head & Shoulders" == cp.pattern_name or "Bear" in cp.pattern_name or "Descending" in cp.pattern_name:
-            bearish_count += 2
-
-    if bullish_count > bearish_count:
-        pattern_dir = "bullish"
-    elif bearish_count > bullish_count:
-        pattern_dir = "bearish"
-    else:
-        pattern_dir = None
-
-    # Simple ML direction from recent returns
-    ml_dir = None
-    ml_conf = 0.0
-    if len(df) > 5:
-        recent_return = float((df["Close"].iloc[-1] - df["Close"].iloc[-5]) / df["Close"].iloc[-5])
-        ml_dir = "up" if recent_return > 0 else "down"
-        ml_conf = min(95, abs(recent_return) * 500)
-
-    confluence = compute_confluence(indicators, pattern_dir, ml_dir, ml_conf)
-
-    return PatternResponse(
-        symbol=symbol,
-        candlestick_patterns=cdl_patterns,
-        chart_patterns=chart_patterns,
-        confluence=ConfluenceSignal(**confluence),
-    )
+    signals = _confluence_store.get(symbol, [])
+    
+    # Format to response model
+    out = []
+    for s in signals:
+        out.append(ConfluenceSignal(**s))
+        
+    return ConfluenceResponse(symbol=symbol, confluence_signals=out)
 
 
-@router.get("/support-resistance/{symbol}", response_model=None)  # Avoiding strict Pydantic parsing for complex dicts if needed
+@router.get("/support-resistance/{symbol}", response_model=None)
 async def get_support_resistance(
     symbol: str,
     interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
@@ -164,7 +125,23 @@ async def get_support_resistance(
     from src.features.support_resistance import detect_support_resistance
     
     symbol = symbol.upper()
-    df = _fetch_ohlcv(symbol, interval, lookback)
+    
+    try:
+        if interval in ("1d", "1wk"):
+            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=lookback + 200)).strftime("%Y-%m-%d")
+            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+        else:
+            period_map = {"1m": "7d", "5m": "60d", "15m": "60d", "1h": "730d", "4h": "730d"}
+            period = period_map.get(interval, "60d")
+            df = yf.download(symbol, period=period, interval=interval, progress=False)
+            
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.dropna(subset=["Close"])
+    except Exception as e:
+        logger.error(f"YF fetch failed: {e}")
+        raise HTTPException(500, "Fetch failed")
     
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
@@ -184,3 +161,44 @@ async def get_support_resistance(
         "trendlines": sr_data["trendlines"],
         "dynamic_levels": sr_data["dynamic_levels"],
     }
+
+
+@router.get("/{symbol}", response_model=PatternResponse)
+async def get_patterns(
+    symbol: str, 
+    background_tasks: BackgroundTasks,
+    tf: str = Query("1d", enum=["1m", "1h", "1d", "1wk", "1mo"])
+):
+    """Detect chart patterns for a specific timeframe."""
+    symbol = symbol.upper()
+
+    if tf not in TF_CONFIG:
+         raise HTTPException(400, "Invalid timeframe selection")
+         
+    # Trigger background confluence refresh if stale (> 30 min)
+    last_update = _confluence_last_update.get(symbol)
+    if not last_update or (datetime.now() - last_update).total_seconds() > 1800:
+         background_tasks.add_task(_compute_confluence_bg, symbol)
+
+    cfg = TF_CONFIG[tf]
+    df = _fetch_yf_data(symbol, cfg["yf_interval"], cfg["period"], 500)
+    
+    if df.empty:
+        raise HTTPException(404, f"No data for {symbol} at {tf}")
+
+    patterns_raw = detect_chart_patterns(
+        df, 
+        lookback=300, 
+        timeframe=tf, 
+        weight=cfg["weight"]
+    )
+    
+    patterns = []
+    for p in patterns_raw:
+        patterns.append(MultiTFPatternItem(**p))
+
+    return PatternResponse(
+        symbol=symbol,
+        timeframe=tf,
+        patterns=patterns
+    )

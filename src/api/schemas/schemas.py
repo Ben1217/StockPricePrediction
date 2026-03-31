@@ -145,39 +145,41 @@ class HistoricalSignal(BaseModel):
 
 
 # ── Pattern Detection Schemas ──────────────────────────────────
-class CandlestickPatternItem(BaseModel):
-    date: str
-    pattern_name: str
-    direction: str  # "bullish" | "bearish"
-    confidence: float
-
-
 class KeyLevel(BaseModel):
     date: str
     price: float
 
 
-class ChartPatternItem(BaseModel):
+class MultiTFPatternItem(BaseModel):
     pattern_name: str
+    direction: str  # "bullish" | "bearish" | "neutral"
+    status: str     # "forming" | "confirmed" | "broken"
     start_date: str
     end_date: str
+    timeframe: str
+    weight: int
+    
+    # Path & levels
     key_levels: List[KeyLevel]
+    trendlines: Optional[List[List[KeyLevel]]] = None
+    
+    # Actionable levels
     neckline: Optional[float] = None
     breakout_price: Optional[float] = None
     target_price: Optional[float] = None
-    confidence: float
-    status: str  # "forming" | "confirmed" | "broken"
+    stop_loss: Optional[float] = None
 
 
 class ConfluenceSignal(BaseModel):
-    rsi_signal: str
-    rsi_value: float
-    macd_signal: str
-    pattern_signal: str
-    ml_direction: str
-    ml_confidence: float
-    overall: str  # "Strong Buy" | "Buy" | "Neutral" | "Sell" | "Strong Sell"
-    strength: float
+    pattern_name: str
+    direction: str
+    timeframes: List[str]
+    total_weight: int
+
+
+class ConfluenceResponse(BaseModel):
+    symbol: str
+    confluence_signals: List[ConfluenceSignal]
 
 
 class SRLevel(BaseModel):
@@ -200,9 +202,8 @@ class SupportResistanceResponse(BaseModel):
 
 class PatternResponse(BaseModel):
     symbol: str
-    candlestick_patterns: List[CandlestickPatternItem]
-    chart_patterns: List[ChartPatternItem]
-    confluence: ConfluenceSignal
+    timeframe: str
+    patterns: List[MultiTFPatternItem]
 
 
 # ── Backtest Schemas ───────────────────────────────────────────

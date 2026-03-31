@@ -79,8 +79,12 @@ export async function fetchHistoricalSignals(symbol, days = 90, modelType = "xgb
     return apiFetch(`/predict/historical-signals/${symbol}?days=${days}&model_type=${modelType}`);
 }
 
-export async function fetchPatterns(symbol, interval = "1d", lookback = 120) {
-    return apiFetch(`/patterns/${symbol}?interval=${interval}&lookback=${lookback}`);
+export async function fetchPatterns(symbol, tf = "1d") {
+    return apiFetch(`/patterns/${symbol}?tf=${tf}`);
+}
+
+export async function fetchConfluence(symbol) {
+    return apiFetch(`/patterns/confluence/${symbol}`);
 }
 
 export async function fetchSupportResistance(symbol, interval = "1d", lookback = 180) {

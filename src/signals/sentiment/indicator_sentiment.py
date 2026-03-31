@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ── Score → label mapping ──────────────────────────────────────────────────
 _SENTIMENT_MAP = {
+    4: "Extreme Bullish",
     3: "Strong Bullish",
     2: "Bullish",
     1: "Slightly Bullish",
@@ -28,6 +29,7 @@ _SENTIMENT_MAP = {
     -1: "Slightly Bearish",
     -2: "Bearish",
     -3: "Strong Bearish",
+    -4: "Extreme Bearish",
 }
 
 
@@ -36,13 +38,13 @@ def _sentiment_label(score: int) -> str:
 
 
 # ── Score → confidence % (signal strength, NOT prediction probability) ─────
-_CONFIDENCE_MAP = {3: 90, 2: 70, 1: 50, 0: 25, -1: 50, -2: 70, -3: 90}
+_CONFIDENCE_MAP = {4: 95, 3: 85, 2: 70, 1: 50, 0: 25, -1: 50, -2: 70, -3: 85, -4: 95}
 
 # ── Score → strength label ─────────────────────────────────────────────────
 _CONFIDENCE_LABEL_MAP = {
-    3: "Strong Bullish", 2: "Bullish", 1: "Weak Bullish",
+    4: "Extreme Bullish", 3: "Strong Bullish", 2: "Bullish", 1: "Weak Bullish",
     0: "Neutral",
-    -1: "Weak Bearish", -2: "Bearish", -3: "Strong Bearish",
+    -1: "Weak Bearish", -2: "Bearish", -3: "Strong Bearish", -4: "Extreme Bearish",
 }
 
 
@@ -107,6 +109,43 @@ def compute_volume_signal(
     return 0
 
 
+def compute_sr_signal(close: float, df: pd.DataFrame) -> tuple[int, dict]:
+    """
+    Support & Resistance proximity signal.
+
+    - Near support (<= 5% distance) → +1 (bullish)
+    - Near resistance (<= 5% distance) → -1 (bearish)
+    """
+    from src.features.support_resistance import detect_support_resistance
+    
+    sr_data = detect_support_resistance(df, close)
+    levels = sr_data.get("levels", [])
+    
+    support = next((l["price"] for l in levels if l["type"] == "support"), None)
+    resistance = next((l["price"] for l in levels if l["type"] == "resistance"), None)
+    
+    dist_support = None
+    dist_resistance = None
+    sr_sig = 0
+    
+    if support is not None:
+        dist_support = round(((close - support) / support) * 100, 2)
+        if 0 <= dist_support <= 5.0:
+            sr_sig = 1
+            
+    if resistance is not None:
+        dist_resistance = round(((resistance - close) / close) * 100, 2)
+        if 0 <= dist_resistance <= 5.0:
+            sr_sig = -1
+            
+    return sr_sig, {
+        "support": support,
+        "resistance": resistance,
+        "dist_support": dist_support,
+        "dist_resistance": dist_resistance
+    }
+
+
 # ── Main computation ───────────────────────────────────────────────────────
 
 def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
@@ -167,8 +206,9 @@ def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
     ma_sig = compute_ma_signal(close, sma_200) if sma_200 is not None else 0
     rsi_sig = compute_rsi_signal(rsi_current, rsi_previous)
     vol_sig = compute_volume_signal(volume, avg_vol_20, is_bullish_candle)
+    sr_sig, sr_details = compute_sr_signal(close, data)
 
-    score = ma_sig + rsi_sig + vol_sig
+    score = ma_sig + rsi_sig + vol_sig + sr_sig
 
     # ── Classify ─────────────────────────────────────────────────
     sentiment = _sentiment_label(score)
@@ -201,6 +241,8 @@ def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
         "rsi_score": rsi_sig,
         "volume_signal": _sig_label(vol_sig),
         "volume_score": vol_sig,
+        "sr_signal": _sig_label(sr_sig),
+        "sr_score": sr_sig,
         "score": score,
         "sentiment": sentiment,
         "entry_signal": entry_signal,
@@ -215,5 +257,6 @@ def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
             "volume": int(volume),
             "avg_volume_20": int(avg_vol_20) if avg_vol_20 is not None else None,
             "is_bullish_candle": is_bullish_candle,
+            **sr_details,
         },
     }
