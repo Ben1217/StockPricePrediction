@@ -183,6 +183,14 @@ def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
     # RSI 14
     data["RSI"] = ta.momentum.rsi(data["Close"], window=14)
 
+    # ATR 14
+    data["ATR"] = ta.volatility.average_true_range(
+        data["High"],
+        data["Low"],
+        data["Close"],
+        window=14,
+    )
+
     # 20-day average volume
     data["Avg_Vol_20"] = data["Volume"].rolling(window=20, min_periods=20).mean()
 
@@ -198,6 +206,7 @@ def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
     sma_200 = float(current["SMA_200"]) if not pd.isna(current["SMA_200"]) else None
     rsi_current = float(current["RSI"]) if not pd.isna(current["RSI"]) else None
     rsi_previous = float(previous["RSI"]) if not pd.isna(previous["RSI"]) else None
+    atr_current = float(current["ATR"]) if not pd.isna(current["ATR"]) else None
     volume = float(current["Volume"])
     avg_vol_20 = float(current["Avg_Vol_20"]) if not pd.isna(current["Avg_Vol_20"]) else None
     is_bullish_candle = close > open_price
@@ -254,6 +263,7 @@ def compute_indicator_sentiment(df: pd.DataFrame) -> Dict[str, Any]:
             "sma_200": round(sma_200, 2) if sma_200 is not None else None,
             "rsi": round(rsi_current, 2) if rsi_current is not None else None,
             "rsi_prev": round(rsi_previous, 2) if rsi_previous is not None else None,
+            "atr": round(atr_current, 2) if atr_current is not None else None,
             "volume": int(volume),
             "avg_volume_20": int(avg_vol_20) if avg_vol_20 is not None else None,
             "is_bullish_candle": is_bullish_candle,

@@ -177,6 +177,28 @@ function entryBadge(entry) {
     );
 }
 
+function formatShareVolume(value) {
+    if (value == null || Number.isNaN(Number(value))) return "—";
+    const volume = Number(value);
+    if (volume >= 1e6) return `${(volume / 1e6).toFixed(2)}M shares`;
+    if (volume >= 1e3) return `${(volume / 1e3).toFixed(2)}K shares`;
+    return `${Math.round(volume)} shares`;
+}
+
+function getAtrLabel(atr, close) {
+    if (atr == null || close == null || !close) return "Volatility unavailable";
+    const atrPct = (Number(atr) / Number(close)) * 100;
+    if (atrPct >= 4) return "High Volatility";
+    if (atrPct >= 2) return "Moderate Volatility";
+    return "Low Volatility";
+}
+
+function getActionTone(entrySignal) {
+    if (entrySignal === "BULLISH") return { label: "BUY", color: C.green, glow: `${C.green}22` };
+    if (entrySignal === "BEARISH") return { label: "SELL", color: C.red, glow: `${C.red}22` };
+    return { label: "WAIT", color: C.amber, glow: `${C.amber}22` };
+}
+
 function SignalCard({ name, signal, score, detail1Label, detail1Value, detail2Label, detail2Value }) {
     const meta = INDICATOR_META[name];
     const clr = score > 0 ? C.green : score < 0 ? C.red : C.amber;
@@ -235,7 +257,7 @@ function SignalCard({ name, signal, score, detail1Label, detail1Value, detail2La
     );
 }
 
-function IndicatorSentimentPanel({ data, loading, error }) {
+function IndicatorSentimentPanel({ data, latestBar, loading, error }) {
     if (loading) return (
         <div className="fade-up" style={{ marginTop: 24 }}>
             <div style={{
@@ -264,6 +286,13 @@ function IndicatorSentimentPanel({ data, loading, error }) {
     // Map score [-3,+3] to [0,100] for gauge
     const gaugePct = ((score + 3) / 6) * 100;
     const det = data.details || {};
+    const actionTone = getActionTone(data.entry_signal);
+    const volumeText = formatShareVolume(det.volume);
+    const avgVolumeText = formatShareVolume(det.avg_volume_20);
+    const atrValue = latestBar?.atr;
+    const atrLabel = getAtrLabel(atrValue, det.close ?? latestBar?.close);
+    const supportText = det.support != null ? `$${Number(det.support).toFixed(2)}` : "—";
+    const resistanceText = det.resistance != null ? `$${Number(det.resistance).toFixed(2)}` : "—";
 
     return (
         <div className="fade-up" style={{ marginTop: 24 }}>
@@ -279,7 +308,13 @@ function IndicatorSentimentPanel({ data, loading, error }) {
                         color: C.text, letterSpacing: 1, textTransform: "uppercase",
                     }}>Indicator Sentiment</span>
                 </div>
-                {entryBadge(data.entry_signal)}
+                <span style={{
+                    background: clr + "18", color: clr, borderRadius: 999,
+                    padding: "6px 14px", fontSize: 11, fontWeight: 800,
+                    border: `1px solid ${clr}44`, letterSpacing: 0.8,
+                }}>
+                    {data.confidence}% confidence
+                </span>
             </div>
 
             {/* Score Card */}
@@ -295,6 +330,46 @@ function IndicatorSentimentPanel({ data, loading, error }) {
                     background: `radial-gradient(circle, ${clr}15, transparent)`,
                     borderRadius: "50%",
                 }} />
+                <div style={{
+                    position: "relative",
+                    background: actionTone.glow,
+                    border: `1px solid ${actionTone.color}44`,
+                    borderRadius: 16,
+                    padding: "18px 20px",
+                    marginBottom: 18,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    flexWrap: "wrap",
+                }}>
+                    <div>
+                        <div style={{
+                            color: C.textDim, fontSize: 10, letterSpacing: 1.5, marginBottom: 8,
+                            fontFamily: "'Syne',sans-serif",
+                        }}>
+                            ACTION SIGNAL
+                        </div>
+                        <div style={{
+                            color: actionTone.color,
+                            fontSize: 36,
+                            fontWeight: 900,
+                            lineHeight: 1,
+                            letterSpacing: 1.8,
+                            fontFamily: "'Syne',sans-serif",
+                        }}>
+                            {actionTone.label}
+                        </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                        <div style={{ color: C.text, fontSize: 13, fontWeight: 800, marginBottom: 4 }}>
+                            {data.sentiment}
+                        </div>
+                        <div style={{ color: C.textDim, fontSize: 10 }}>
+                            Indicators provide context
+                        </div>
+                    </div>
+                </div>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", position: "relative" }}>
                     <div>
                         <div style={{
@@ -356,6 +431,54 @@ function IndicatorSentimentPanel({ data, loading, error }) {
                                 }} />
                             ))}
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <div style={{
+                background: C.bg2,
+                border: `1px solid ${C.border}`,
+                borderRadius: 12,
+                padding: "16px 18px",
+                marginBottom: 16,
+                display: "grid",
+                gap: 10,
+            }}>
+                <div style={{ color: C.textDim, fontSize: 10, letterSpacing: 1.4, textTransform: "uppercase", fontFamily: "'Syne',sans-serif" }}>
+                    Indicator Summary
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                    <span style={{ color: C.textDim }}>Trend</span>
+                    <span style={{ color: data.trend === "bullish" ? C.green : data.trend === "bearish" ? C.red : C.amber, fontWeight: 700 }}>
+                        {data.trend?.charAt(0).toUpperCase()}{data.trend?.slice(1)}
+                    </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                    <span style={{ color: C.textDim }}>RSI</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>
+                        {det.rsi != null ? det.rsi.toFixed(1) : "—"} → {data.rsi_signal === "bullish" ? "Bullish" : data.rsi_signal === "bearish" ? "Bearish" : "Neutral"}
+                    </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                    <span style={{ color: C.textDim }}>Volume</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>
+                        {volumeText} → {data.volume_strength === "strong" ? "Strong" : "Weak"}
+                    </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                    <span style={{ color: C.textDim }}>ATR</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>
+                        {atrValue != null ? Number(atrValue).toFixed(2) : "—"} → {atrLabel}
+                    </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ color: C.textDim }}>Support</span>
+                        <span style={{ color: C.cyan, fontWeight: 700 }}>{supportText}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ color: C.textDim }}>Resistance</span>
+                        <span style={{ color: C.red, fontWeight: 700 }}>{resistanceText}</span>
                     </div>
                 </div>
             </div>
@@ -632,7 +755,7 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
             </div>
 
             {/* ── Indicator Sentiment Panel ────────────────────── */}
-            <IndicatorSentimentPanel data={sentiment} loading={sentimentLoading} error={sentimentError} />
+            <IndicatorSentimentPanel data={sentiment} latestBar={last} loading={sentimentLoading} error={sentimentError} />
         </div>
     );
 }

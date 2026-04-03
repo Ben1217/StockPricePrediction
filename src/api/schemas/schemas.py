@@ -158,16 +158,46 @@ class MultiTFPatternItem(BaseModel):
     end_date: str
     timeframe: str
     weight: int
+    confidence: float
     
     # Path & levels
     key_levels: List[KeyLevel]
     trendlines: Optional[List[List[KeyLevel]]] = None
     
     # Actionable levels
+    entry_price: Optional[float] = None
     neckline: Optional[float] = None
     breakout_price: Optional[float] = None
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
+    risk_reward_ratio: Optional[float] = None
+    strength_label: Optional[str] = None
+    secondary_targets: List[float] = Field(default_factory=list)
+
+
+class SetupScoreComponents(BaseModel):
+    ml_probability: float
+    pattern_quality: float
+    indicator_alignment: float
+    volume_confirmation: float
+    composite_score: float
+
+
+class BestTradeSetup(BaseModel):
+    pattern_name: str
+    timeframe: str
+    direction: str
+    pattern_status: str
+    confidence_score: Optional[float] = None
+    entry_price: float
+    stop_loss: float
+    primary_target: float
+    secondary_targets: List[float] = Field(default_factory=list)
+    risk_reward_ratio: Optional[float] = None
+    strength_label: str
+    target_move_pct: Optional[float] = None
+    action: str
+    score_components: SetupScoreComponents
 
 
 class ConfluenceSignal(BaseModel):
@@ -200,9 +230,35 @@ class SupportResistanceResponse(BaseModel):
     dynamic_levels: List[Dict]
 
 
+class BestSetupStatus(BaseModel):
+    status: str
+    setup_available: bool
+    reason_code: str
+    reason: str
+    sufficient_data: bool
+    has_detected_pattern: bool
+    confidence_ok: bool
+    levels_ok: bool
+    risk_reward_ok: bool
+    no_conflicting_filters: bool
+    candle_count: int
+    min_candles: int
+    min_confidence: float
+    min_risk_reward: float
+    candidate_pattern_name: Optional[str] = None
+    candidate_confidence: Optional[float] = None
+    candidate_risk_reward: Optional[float] = None
+    candidate_strength_label: Optional[str] = None
+    conflicting_pattern_names: List[str] = Field(default_factory=list)
+
+
 class PatternResponse(BaseModel):
     symbol: str
     timeframe: str
+    status: str
+    best_setup_status: BestSetupStatus
+    best_setup: Optional[BestTradeSetup] = None
+    best_pattern: Optional[MultiTFPatternItem] = None
     patterns: List[MultiTFPatternItem]
 
 

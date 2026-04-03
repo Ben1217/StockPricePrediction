@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries, createSeriesMarkers } from "lightweight-charts";
-import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns, fetchSupportResistance, fetchSentiment, fetchConfluence } from "../utils/api";
+import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns, fetchSupportResistance, fetchConfluence } from "../utils/api";
 import { C } from "../utils/data";
 
 function parseChartTime(dateStr) {
@@ -223,6 +223,558 @@ function PatternDropdown({ selected, onToggle, onClear, onClose }) {
 }
 
 // ── Sub-panel Chart Creator ────────────────────────────────
+function formatSetupPrice(value) {
+    return value == null ? "—" : `$${Number(value).toFixed(2)}`;
+}
+
+function isActionableSetup(pattern) {
+    return Boolean(
+        pattern?.direction &&
+        pattern.direction !== "neutral" &&
+        pattern.entry_price != null &&
+        pattern.target_price != null &&
+        pattern.stop_loss != null
+    );
+}
+
+function getSetupTone(pattern) {
+    if (pattern?.direction === "bullish") return { color: C.green, label: "Bullish" };
+    if (pattern?.direction === "bearish") return { color: C.red, label: "Bearish" };
+    return { color: C.amber, label: "Neutral" };
+}
+
+function getSetupAction(pattern) {
+    if (!pattern) return "No setup";
+    if (pattern.direction === "bullish" && pattern.entry_price != null) {
+        return `Buy above ${Number(pattern.entry_price).toFixed(2)}`;
+    }
+    if (pattern.direction === "bearish" && pattern.entry_price != null) {
+        return `Sell below ${Number(pattern.entry_price).toFixed(2)}`;
+    }
+    return "Wait for breakout";
+}
+
+function getSetupRiskReward(pattern) {
+    if (!isActionableSetup(pattern)) return null;
+    const risk = Math.abs(Number(pattern.entry_price) - Number(pattern.stop_loss));
+    const reward = Math.abs(Number(pattern.target_price) - Number(pattern.entry_price));
+    if (!risk) return null;
+    return reward / risk;
+}
+
+function formatSetupPercent(value, signed = true) {
+    if (value == null) return "--";
+    const number = Number(value);
+    const prefix = signed && number > 0 ? "+" : "";
+    return `${prefix}${number.toFixed(1)}%`;
+}
+
+function getReasonTone(reasonCode) {
+    if (reasonCode === "INSUFFICIENT_DATA") return C.amber;
+    if (reasonCode === "VALID_SETUP") return C.green;
+    return C.red;
+}
+
+function getStrengthTone(strengthLabel) {
+    if (strengthLabel === "Strong") return C.green;
+    if (strengthLabel === "Moderate") return C.amber;
+    return C.red;
+}
+
+function formatIndicatorVolume(value) {
+    if (value == null || Number.isNaN(Number(value))) return "--";
+    const volume = Number(value);
+    if (volume >= 1e6) return `${(volume / 1e6).toFixed(2)}M shares`;
+    if (volume >= 1e3) return `${(volume / 1e3).toFixed(2)}K shares`;
+    return `${Math.round(volume)} shares`;
+}
+
+function getIndicatorActionTone(action) {
+    if (action === "BUY") return { color: C.green, label: "BUY" };
+    if (action === "SELL") return { color: C.red, label: "SELL" };
+    return { color: C.amber, label: "WAIT" };
+}
+
+function getIndicatorRsiLabel(rsiValue) {
+    if (rsiValue == null || Number.isNaN(Number(rsiValue))) return "Unavailable";
+    const rsi = Number(rsiValue);
+    if (rsi >= 70) return "Overbought";
+    if (rsi <= 30) return "Oversold";
+    return "Neutral";
+}
+
+function getIndicatorAtrLabel(atrValue, closeValue) {
+    if (atrValue == null || closeValue == null || !Number(closeValue)) return "Volatility unavailable";
+    const atrPct = (Number(atrValue) / Number(closeValue)) * 100;
+    if (atrPct >= 4) return "High Volatility";
+    if (atrPct >= 2) return "Moderate Volatility";
+    return "Low Volatility";
+}
+
+function getPrimaryLevels(srData) {
+    const levels = Array.isArray(srData?.levels) ? srData.levels : [];
+    const supports = levels.filter(level => level.type === "support").sort((a, b) => b.price - a.price);
+    const resistances = levels.filter(level => level.type === "resistance").sort((a, b) => a.price - b.price);
+    return {
+        support: supports[0]?.price ?? null,
+        resistance: resistances[0]?.price ?? null,
+    };
+}
+
+function buildIndicatorSummary({ indicators, prices, srData, interval }) {
+    const latestIndicator = Array.isArray(indicators) && indicators.length > 0 ? indicators[indicators.length - 1] : null;
+    const latestPrice = Array.isArray(prices) && prices.length > 0 ? prices[prices.length - 1] : null;
+    const srLevels = getPrimaryLevels(srData);
+
+    const close = latestPrice?.close ?? null;
+    const rsi = latestIndicator?.RSI ?? null;
+    const atr = latestIndicator?.ATR ?? null;
+    const volume = latestPrice?.volume ?? null;
+    const avgVolume = latestIndicator?.Volume_SMA_20 ?? null;
+    const support = srLevels.support;
+    const resistance = srLevels.resistance;
+
+    let trend = null;
+    if (close != null && latestIndicator?.SMA_200 != null) {
+        trend = Number(close) >= Number(latestIndicator.SMA_200) ? "bullish" : "bearish";
+    }
+
+    let volumeStrength = null;
+    if (volume != null && avgVolume != null) {
+        volumeStrength = Number(volume) >= Number(avgVolume) ? "strong" : "weak";
+    }
+
+    const trendScore = trend === "bullish" ? 1 : trend === "bearish" ? -1 : 0;
+    const rsiScore = rsi != null && rsi <= 30 ? 1 : rsi != null && rsi >= 70 ? -1 : 0;
+    const volumeScore = volumeStrength === "strong" ? (trend === "bearish" ? -1 : 1) : 0;
+    const score = trendScore + rsiScore + volumeScore;
+    const action = score >= 2 ? "BUY" : score <= -2 ? "SELL" : "WAIT";
+    const sentimentLabel = score >= 2 ? "Bullish" : score <= -2 ? "Bearish" : "Neutral";
+    const confidence = Math.min(95, Math.max(35, 40 + (Math.abs(score) * 20)));
+
+    return {
+        mode: "INDICATOR",
+        timeframe: interval,
+        trend: trend || "neutral",
+        rsi,
+        volume,
+        avgVolume,
+        atr,
+        support,
+        resistance,
+        action,
+        confidence,
+        sentimentLabel,
+        volumeStrength: volumeStrength || "weak",
+        close,
+    };
+}
+
+function IndicatorSummaryPanel({ summary, loading, error }) {
+    if (loading) return (
+        <div style={{
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+            textAlign: "center", color: C.textDim,
+        }}>
+            <div style={{ fontSize: 16, marginBottom: 6, animation: "pulse 1.5s infinite" }}>...</div>
+            Computing indicator summary...
+        </div>
+    );
+
+    if (error) return (
+        <div style={{
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+            alignSelf: "flex-start",
+        }}>
+            <div style={{
+                color: C.textDim, fontSize: 9, letterSpacing: 1.4, marginBottom: 10,
+                fontWeight: 800, textTransform: "uppercase",
+            }}>
+                Indicator Summary
+            </div>
+            <div style={{
+                background: C.red + "14",
+                border: `1px solid ${C.red}33`,
+                borderRadius: 8,
+                padding: "12px 14px",
+                color: C.red,
+                fontSize: 12,
+                fontWeight: 700,
+                lineHeight: 1.5,
+            }}>
+                Indicator summary unavailable: {error}
+            </div>
+        </div>
+    );
+
+    if (!summary) return (
+        <div style={{
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+            alignSelf: "flex-start",
+        }}>
+            <div style={{
+                color: C.textDim, fontSize: 9, letterSpacing: 1.4, marginBottom: 10,
+                fontWeight: 800, textTransform: "uppercase",
+            }}>
+                Indicator Summary
+            </div>
+            <div style={{
+                background: C.amber + "14",
+                border: `1px solid ${C.amber}33`,
+                borderRadius: 8,
+                padding: "12px 14px",
+                color: C.text,
+                lineHeight: 1.5,
+            }}>
+                Indicator data is still loading.
+            </div>
+        </div>
+    );
+
+    const actionTone = getIndicatorActionTone(summary.action);
+    const trendTone = summary.trend === "bullish" ? C.green : summary.trend === "bearish" ? C.red : C.amber;
+    const rsiLabel = getIndicatorRsiLabel(summary.rsi);
+    const atrLabel = getIndicatorAtrLabel(summary.atr, summary.close);
+    const confidenceText = summary.confidence != null ? `${Number(summary.confidence).toFixed(0)}%` : "--";
+    const supportText = summary.support != null ? `$${Number(summary.support).toFixed(2)}` : "--";
+    const resistanceText = summary.resistance != null ? `$${Number(summary.resistance).toFixed(2)}` : "--";
+    const trendLabel = summary.trend ? `${summary.trend.charAt(0).toUpperCase()}${summary.trend.slice(1)}` : "Neutral";
+
+    return (
+        <div style={{
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+            alignSelf: "flex-start",
+        }}>
+            <div style={{
+                color: C.textDim, fontSize: 9, letterSpacing: 1.4, marginBottom: 10,
+                fontWeight: 800, textTransform: "uppercase",
+            }}>
+                Indicator Summary
+            </div>
+
+            <div style={{
+                background: actionTone.color + "14",
+                border: `1px solid ${actionTone.color}33`,
+                borderRadius: 10,
+                padding: "14px 16px",
+                marginBottom: 14,
+            }}>
+                <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 8 }}>
+                    Action
+                </div>
+                <div style={{ color: actionTone.color, fontSize: 28, fontWeight: 900, lineHeight: 1, marginBottom: 8 }}>
+                    {actionTone.label}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, color: C.textMid, fontSize: 9 }}>
+                    <span>{summary.sentimentLabel || "Indicator decision"}</span>
+                    <span>{summary.timeframe}</span>
+                </div>
+            </div>
+
+            <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Trend</span>
+                    <span style={{ color: trendTone, fontWeight: 700 }}>{trendLabel}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>RSI</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>
+                        {summary.rsi != null ? Number(summary.rsi).toFixed(1) : "--"} {"->"} {rsiLabel}
+                    </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Volume</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>
+                        {formatIndicatorVolume(summary.volume)} {"->"} {summary.volumeStrength === "strong" ? "Strong" : "Weak"}
+                    </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>ATR</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>
+                        {summary.atr != null ? Number(summary.atr).toFixed(2) : "--"} {"->"} {atrLabel}
+                    </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Support</span>
+                    <span style={{ color: C.cyan, fontWeight: 700 }}>{supportText}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Resistance</span>
+                    <span style={{ color: C.red, fontWeight: 700 }}>{resistanceText}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+                    <span style={{ color: C.textDim }}>Confidence</span>
+                    <span style={{ color: actionTone.color, fontWeight: 700 }}>{confidenceText}</span>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function DecisionCheckRow({ label, passed }) {
+    const color = passed ? C.green : C.red;
+    return (
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+            <span style={{ color: C.textDim }}>{label}</span>
+            <span style={{ color, fontWeight: 700 }}>{passed ? "Pass" : "Fail"}</span>
+        </div>
+    );
+}
+
+function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) {
+    const [showTargets, setShowTargets] = useState(false);
+    if (loading) return (
+        <div style={{
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+            textAlign: "center", color: C.textDim,
+        }}>
+            <div style={{ fontSize: 16, marginBottom: 6, animation: "pulse 1.5s infinite" }}>⏳</div>
+            Ranking setups…
+        </div>
+    );
+
+    const checks = setupStatus ? [
+        { label: "Pattern detected", passed: setupStatus.has_detected_pattern },
+        { label: `Confidence >= ${Number(setupStatus.min_confidence || 0).toFixed(0)}%`, passed: setupStatus.confidence_ok },
+        { label: "Valid entry / stop / target", passed: setupStatus.levels_ok },
+        { label: `Risk / reward >= ${Number(setupStatus.min_risk_reward || 0).toFixed(1)}`, passed: setupStatus.risk_reward_ok },
+        { label: "No conflicting filters", passed: setupStatus.no_conflicting_filters },
+        { label: `Sufficient candles (${setupStatus.candle_count || 0}/${setupStatus.min_candles || 0})`, passed: setupStatus.sufficient_data },
+    ] : [];
+
+    if (!bestSetup) {
+        const reasonTone = getReasonTone(setupStatus?.reason_code);
+        return (
+            <div style={{
+                background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+                padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+                alignSelf: "flex-start",
+            }}>
+                <div style={{
+                    color: C.textDim, fontSize: 9, letterSpacing: 1.4, marginBottom: 10,
+                    fontWeight: 800, textTransform: "uppercase",
+                }}>
+                    Best Setup Status
+                </div>
+
+                <div style={{
+                    background: reasonTone + "14",
+                    border: `1px solid ${reasonTone}33`,
+                    borderRadius: 8,
+                    padding: "12px 14px",
+                    marginBottom: 12,
+                }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                        <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2 }}>
+                            {setupStatus?.status || "NO_SETUP"}
+                        </div>
+                        <div style={{
+                            color: reasonTone,
+                            background: reasonTone + "18",
+                            border: `1px solid ${reasonTone}33`,
+                            borderRadius: 999,
+                            padding: "3px 8px",
+                            fontSize: 9,
+                            fontWeight: 800,
+                        }}>
+                            {setupStatus?.reason_code || "NO_PATTERN"}
+                        </div>
+                    </div>
+                    <div style={{ color: reasonTone, fontSize: 14, fontWeight: 900, lineHeight: 1.35 }}>
+                        No clear trade setup right now
+                    </div>
+                    <div style={{ color: C.textMid, fontSize: 10, lineHeight: 1.5, marginTop: 6 }}>
+                        Reason: {setupStatus?.reason || "No pattern detected"}
+                    </div>
+                    {setupStatus?.candidate_pattern_name && (
+                        <div style={{ color: C.textDim, fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
+                            Candidate: {setupStatus.candidate_pattern_name}
+                            {setupStatus.candidate_confidence != null ? ` • ${Number(setupStatus.candidate_confidence).toFixed(0)}%` : ""}
+                            {setupStatus.candidate_risk_reward != null ? ` • R/R ${Number(setupStatus.candidate_risk_reward).toFixed(2)}` : ""}
+                        </div>
+                    )}
+                    {setupStatus?.conflicting_pattern_names?.length > 0 && (
+                        <div style={{ color: C.textDim, fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
+                            Conflicts: {setupStatus.conflicting_pattern_names.join(", ")}
+                        </div>
+                    )}
+                </div>
+
+                {checks.length > 0 && (
+                    <div style={{ display: "grid", gap: 0 }}>
+                        {checks.map(check => (
+                            <DecisionCheckRow key={check.label} label={check.label} passed={check.passed} />
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    const tone = getSetupTone(bestSetup);
+    const confidence = Number(bestSetup.confidence_score ?? 0);
+    const riskReward = bestSetup.risk_reward_ratio != null ? Number(bestSetup.risk_reward_ratio) : null;
+    const actionText = bestSetup.action;
+    const statusLabel = bestSetup.pattern_status === "confirmed" ? "Confirmed" : bestSetup.pattern_status === "forming" ? "Forming" : "Broken";
+    const strengthTone = getStrengthTone(bestSetup.strength_label);
+
+    return (
+        <div style={{
+            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
+            padding: "16px", minWidth: 280, fontFamily: "'DM Mono', monospace", fontSize: 10,
+            alignSelf: "flex-start",
+        }}>
+            <div style={{
+                color: C.textDim, fontSize: 9, letterSpacing: 1.4, marginBottom: 10,
+                fontWeight: 800, textTransform: "uppercase",
+            }}>
+                Best Trade Setup
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                    <div>
+                        <div style={{ color: tone.color, fontSize: 18, fontWeight: 900, lineHeight: 1.2 }}>
+                            {`● ${bestSetup.pattern_name}`}
+                        </div>
+                        <div style={{ color: C.textDim, fontSize: 10, marginTop: 4 }}>
+                            {bestSetup.timeframe} · {tone.label}
+                        </div>
+                    </div>
+                    <div style={{
+                        background: tone.color + "1a", color: tone.color, border: `1px solid ${tone.color}44`,
+                        borderRadius: 999, padding: "4px 10px", fontWeight: 800, fontSize: 10,
+                        whiteSpace: "nowrap",
+                    }}>
+                        {confidence.toFixed(0)}%
+                    </div>
+                </div>
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim, marginBottom: 4 }}>
+                    <span>Confidence</span>
+                    <span style={{ color: tone.color, fontWeight: 700 }}>{confidence.toFixed(0)}%</span>
+                </div>
+                <div style={{ background: C.border, borderRadius: 4, height: 6, overflow: "hidden" }}>
+                    <div style={{
+                        width: `${Math.max(Math.min(confidence, 100), 0)}%`,
+                        height: "100%",
+                        borderRadius: 4,
+                        background: tone.color,
+                        transition: "width 0.4s ease",
+                    }} />
+                </div>
+            </div>
+
+            <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Status</span>
+                    <span style={{ color: tone.color, fontWeight: 700 }}>{statusLabel}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Entry</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>{formatSetupPrice(bestSetup.entry_price)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Stop</span>
+                    <span style={{ color: C.red, fontWeight: 700 }}>{formatSetupPrice(bestSetup.stop_loss)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Target</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ color: C.green, fontWeight: 700 }}>{formatSetupPrice(bestSetup.primary_target)}</span>
+                        <span style={{ color: tone.color, fontSize: 9 }}>{formatSetupPercent(bestSetup.target_move_pct)}</span>
+                    </div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+                    <span style={{ color: C.textDim }}>Risk / Reward</span>
+                    <span style={{ color: C.text, fontWeight: 700 }}>{riskReward ? riskReward.toFixed(1) : "—"}</span>
+                </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", marginTop: 10 }}>
+                <span style={{ color: C.textDim }}>Strength</span>
+                <span style={{ color: strengthTone, fontWeight: 800 }}>{bestSetup.strength_label}</span>
+            </div>
+
+            {Array.isArray(bestSetup.secondary_targets) && bestSetup.secondary_targets.length > 0 && (
+                <div style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 10,
+                    marginTop: 10,
+                    padding: "10px 12px",
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 8,
+                    flexWrap: "wrap",
+                }}>
+                    <div style={{ display: "flex", gap: 12, color: C.textMid, fontSize: 9, flexWrap: "wrap" }}>
+                        {showTargets && bestSetup.secondary_targets[0] != null && <span>T2 {formatSetupPrice(bestSetup.secondary_targets[0])}</span>}
+                        {showTargets && bestSetup.secondary_targets[1] != null && <span>T3 {formatSetupPrice(bestSetup.secondary_targets[1])}</span>}
+                        {!showTargets && <span>Secondary targets hidden</span>}
+                    </div>
+                    <button onClick={() => setShowTargets(v => !v)} style={{
+                        background: "transparent",
+                        color: tone.color,
+                        border: `1px solid ${tone.color}44`,
+                        borderRadius: 999,
+                        padding: "4px 10px",
+                        fontSize: 9,
+                        fontWeight: 800,
+                        cursor: "pointer",
+                    }}>
+                        {showTargets ? "Collapse targets ^" : "Expand targets v"}
+                    </button>
+                </div>
+            )}
+
+            <div style={{
+                marginTop: 14,
+                background: tone.color + "14",
+                border: `1px solid ${tone.color}33`,
+                borderRadius: 8,
+                padding: "12px 14px",
+            }}>
+                <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 6 }}>
+                    Action
+                </div>
+                <div style={{ color: tone.color, fontSize: 14, fontWeight: 900, lineHeight: 1.35 }}>
+                    {actionText}
+                </div>
+                <div style={{ color: C.textMid, fontSize: 9, marginTop: 6, lineHeight: 1.5 }}>
+                    {setupStatus?.status || "VALID_SETUP"} | {statusLabel} | {tone.label}
+                </div>
+            </div>
+
+            {alternativeCount > 0 && (
+                <div style={{ marginTop: 12, color: C.textDim, fontSize: 9, lineHeight: 1.5 }}>
+                    {alternativeCount} other pattern{alternativeCount === 1 ? "" : "s"} hidden by default for a cleaner decision view.
+                </div>
+            )}
+
+            {checks.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                    <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 4 }}>
+                        Decision Checks
+                    </div>
+                    <div style={{ display: "grid" }}>
+                        {checks.map(check => (
+                            <DecisionCheckRow key={check.label} label={check.label} passed={check.passed} />
+                        ))}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 function createSubChart(container, interval, height = 100) {
     if (!container) return null;
     const w = container.clientWidth || 900;
@@ -234,6 +786,20 @@ function createSubChart(container, interval, height = 100) {
 }
 
 // ── Mode Toggle Button ─────────────────────────────────────
+function PatternScopeButton({ label, active, onClick }) {
+    return (
+        <button onClick={onClick} style={{
+            background: active ? C.amber + "22" : "transparent",
+            color: active ? C.amber : C.textDim,
+            border: `1px solid ${active ? C.amber + "55" : C.border}`,
+            borderRadius: 6, padding: "4px 10px", fontSize: 10, fontWeight: 700,
+            cursor: "pointer", transition: "all .2s",
+        }}>
+            {label}
+        </button>
+    );
+}
+
 function ModeButton({ label, emoji, active, disabled, onClick }) {
     return (
         <button onClick={onClick} disabled={disabled} style={{
@@ -264,15 +830,14 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const [error, setError] = useState(null);
     const [srSummary, setSrSummary] = useState(null);
 
-    // Sentiment data for DecisionPanel
-    const [sentiment, setSentiment] = useState(null);
-    const [sentimentLoading, setSentimentLoading] = useState(false);
-
     const [interval, setInterval] = useState("1d");
     const intervals = ["1m", "1h", "1d", "1wk", "1mo"];
 
     // ── View Mode ──────────────────────────────────────────
-    const [viewMode, setViewMode] = useState("indicator"); // "indicator" | "pattern" | "advanced"
+    const [viewMode, setViewMode] = useState("pattern"); // "indicator" | "pattern" | "advanced"
+    const [patternScope, setPatternScope] = useState(() => {
+        try { return localStorage.getItem("qv_patternScope") || "best"; } catch { return "best"; }
+    });
 
     // ── User Level ─────────────────────────────────────────
     const [userLevel, setUserLevel] = useState(() => {
@@ -280,12 +845,16 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     });
     useEffect(() => {
         localStorage.setItem("qv_userLevel", userLevel);
-        // If beginner, force indicator mode
-        if (userLevel === "beginner" && viewMode !== "indicator") setViewMode("indicator");
-    }, [userLevel]);
+        if (userLevel === "beginner" && viewMode === "advanced") setViewMode("pattern");
+    }, [userLevel, viewMode]);
+    useEffect(() => {
+        localStorage.setItem("qv_patternScope", patternScope);
+    }, [patternScope]);
 
     // ── Derive toggle states from viewMode ─────────────────
-    const showSR = viewMode === "indicator" || viewMode === "advanced";
+    const isIndicatorMode = viewMode === "indicator";
+    const isPatternMode = viewMode === "pattern" || viewMode === "advanced";
+    const showSR = isIndicatorMode || viewMode === "advanced";
     const showSMA200 = viewMode === "indicator" || viewMode === "advanced";
     const showSMA = viewMode === "advanced";
     const showEMA = viewMode === "advanced";
@@ -295,66 +864,49 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const showMACD = viewMode === "advanced";
     const showVol = viewMode === "indicator" || viewMode === "advanced";
     const showATR = viewMode === "advanced";
-    const showPatterns = viewMode === "pattern" || viewMode === "advanced";
+    const showPatterns = isPatternMode;
     const showMLSignals = viewMode === "advanced";
 
-    // Pattern selection layer
-    const [selectedPatterns, setSelectedPatterns] = useState(() => {
-        try {
-            const saved = localStorage.getItem("qv_selectedPatterns");
-            return saved ? new Set(JSON.parse(saved)) : new Set();
-        } catch { return new Set(); }
+    const stateData = useRef({
+        ohlc: [],
+        indicators: [],
+        signals: [],
+        patterns: [],
+        bestPattern: null,
+        bestSetup: null,
+        bestSetupStatus: null,
+        srData: null,
+        indicatorSummary: null,
     });
-    const [patternDropdownOpen, setPatternDropdownOpen] = useState(false);
-
-    useEffect(() => {
-        localStorage.setItem("qv_selectedPatterns", JSON.stringify([...selectedPatterns]));
-    }, [selectedPatterns]);
-
-    const togglePattern = (name) => {
-        setSelectedPatterns(prev => {
-            const next = new Set(prev);
-            if (next.has(name)) next.delete(name);
-            else if (next.size < MAX_PATTERNS) next.add(name);
-            return next;
-        });
-    };
-    const clearPatterns = () => setSelectedPatterns(new Set());
-
-    const stateData = useRef({ ohlc: [], indicators: [], signals: [], patterns: null, srData: null });
 
     // Fetch confluence independent of main timeframe API
     const [confluence, setConfluence] = useState([]);
     useEffect(() => {
+        if (!isPatternMode) {
+            setConfluence([]);
+            return;
+        }
         let active = true;
         fetchConfluence(symbol).then(d => {
             if (active && d?.confluence_signals) setConfluence(d.confluence_signals);
         }).catch(() => {});
         return () => { active = false; };
-    }, [symbol]);
+    }, [symbol, isPatternMode]);
 
     // ── Fetch sentiment for DecisionPanel ──────────────────
-    useEffect(() => {
-        setSentimentLoading(true);
-        import("../utils/api").then(api => {
-            api.fetchSentiment(symbol).then(d => { setSentiment(d); setSentimentLoading(false); })
-               .catch(() => { setSentiment(null); setSentimentLoading(false); });
-        });
-    }, [symbol]);
-
     useEffect(() => {
         let cancelled = false;
 
         async function loadData() {
             setLoading(true); setError(null);
             try {
-                let days = interval.includes("m") ? 5 : (interval === "1h" ? 20 : (interval === "4h" ? 60 : 120));
-                const lookback = Math.max(days, 60);
-
+                const priceDays = { "1m": 5, "1h": 180, "1d": 420, "1wk": 2500, "1mo": 5600 }[interval] || 120;
+                const indicatorDays = { "1m": 120, "1h": 240, "1d": 320, "1wk": 300, "1mo": 180 }[interval] || 120;
+                const lookback = { "1m": 90, "1h": 365, "1d": 420, "1wk": 2500, "1mo": 5600 }[interval] || 180;
                 const [priceRes, indRes, patRes, srRes] = await Promise.all([
-                    fetchPrices(symbol, "yfinance", days, interval),
-                    fetchIndicators(symbol, days, interval),
-                    fetchPatterns(symbol, interval),
+                    fetchPrices(symbol, "yfinance", priceDays, interval),
+                    fetchIndicators(symbol, indicatorDays, interval),
+                    isPatternMode ? fetchPatterns(symbol, interval) : Promise.resolve(null),
                     showSR ? fetchSupportResistance(symbol, interval, lookback) : Promise.resolve(null),
                 ].map(p => p.catch(e => null)));
 
@@ -371,8 +923,17 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     ohlc: priceRes.bars,
                     indicators: indRes?.data || [],
                     signals: sigRes || [],
-                    patterns: patRes?.patterns || null,
+                    patterns: patRes?.patterns || [],
+                    bestPattern: patRes?.best_pattern || null,
+                    bestSetup: patRes?.best_setup || null,
+                    bestSetupStatus: patRes?.best_setup_status || null,
                     srData: srRes || null,
+                    indicatorSummary: isIndicatorMode ? buildIndicatorSummary({
+                        indicators: indRes?.data || [],
+                        prices: priceRes?.bars || [],
+                        srData: srRes,
+                        interval,
+                    }) : null,
                 };
 
                 if (srRes?.levels) {
@@ -429,7 +990,10 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             });
             seriesRefs.current.candle = candleSeries;
 
-            const { ohlc, indicators, signals, patterns, srData } = stateData.current;
+            const { ohlc, indicators, signals, patterns, bestPattern, srData } = stateData.current;
+            const visiblePatterns = showPatterns
+                ? (patternScope === "all" ? (patterns || []) : (bestPattern ? [bestPattern] : []))
+                : [];
             const ohlcData = processChartData(ohlc.map(b => ({
                 time: parseChartTime(b.date),
                 open: b.open, high: b.high, low: b.low, close: b.close
@@ -496,8 +1060,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             }
 
             // Chart patterns (Markers)
-            if (showPatterns && patterns && selectedPatterns.size > 0) {
-                patterns.filter(p => selectedPatterns.has(p.pattern_name)).forEach(p => {
+            if (visiblePatterns.length > 0) {
+                visiblePatterns.forEach(p => {
                     const isBullish = p.direction === "bullish";
                     const isNeutral = p.direction === "neutral";
                     
@@ -534,8 +1098,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             }
 
             // ── Chart Pattern Trendlines & Draw ────────────────────
-            if (showPatterns && patterns && selectedPatterns.size > 0) {
-                patterns.filter(cp => selectedPatterns.has(cp.pattern_name)).forEach(cp => {
+            if (visiblePatterns.length > 0) {
+                visiblePatterns.forEach(cp => {
                     const isBullish = cp.direction === "bullish";
                     
                     // Draw continuous key_levels if it's head & shoulders or double bottom
@@ -567,37 +1131,56 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                         });
                     }
 
-                    // Only draw action levels if the pattern is confirmed, OR if it's not a symmetrical triangle
-                    if (cp.status === "confirmed" || cp.pattern_name !== "Symmetrical Triangle") {
-                        if (cp.neckline) {
+                    if (patternScope === "best") {
+                        if (cp.entry_price != null) {
                             candleSeries.createPriceLine({
-                                price: cp.neckline, color: C.amber + '88', lineWidth: 1, lineStyle: 2,
-                                axisLabelVisible: true, title: cp.pattern_name + " Neckline",
+                                price: cp.entry_price,
+                                color: "#fbbf24", lineWidth: 2, lineStyle: 0,
+                                axisLabelVisible: true, title: "Entry",
                             });
                         }
 
-                        if (cp.breakout_price) {
+                        if (cp.target_price != null) {
                             candleSeries.createPriceLine({
-                                price: cp.breakout_price, color: "#fbbf24", lineWidth: 1, lineStyle: 3,
-                                axisLabelVisible: true, title: "Entry / Breakout",
+                                price: cp.target_price,
+                                color: C.green + 'CC',
+                                lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
+                                title: "Target",
                             });
                         }
 
-                        if (cp.target_price) {
+                        if (cp.stop_loss != null) {
+                            candleSeries.createPriceLine({
+                                price: cp.stop_loss,
+                                color: C.red + 'CC',
+                                lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
+                                title: "Stop",
+                            });
+                        }
+                    } else if (cp.status === "confirmed" || cp.pattern_name !== "Symmetrical Triangle") {
+                        if (cp.entry_price != null) {
+                            candleSeries.createPriceLine({
+                                price: cp.entry_price,
+                                color: "#fbbf24", lineWidth: 1, lineStyle: 3,
+                                axisLabelVisible: true, title: `${cp.pattern_name} Entry`,
+                            });
+                        }
+
+                        if (cp.target_price != null) {
                             candleSeries.createPriceLine({
                                 price: cp.target_price,
                                 color: C.green + 'CC',
                                 lineWidth: 1, lineStyle: 4, axisLabelVisible: true,
-                                title: `Target: $${cp.target_price.toFixed(2)}`,
+                                title: `${cp.pattern_name} Target`,
                             });
                         }
 
-                        if (cp.stop_loss !== null && cp.stop_loss !== undefined) {
+                        if (cp.stop_loss != null) {
                             candleSeries.createPriceLine({
                                 price: cp.stop_loss,
                                 color: C.red + 'CC',
                                 lineWidth: 1, lineStyle: 4, axisLabelVisible: true,
-                                title: `Stop: $${cp.stop_loss.toFixed(2)}`,
+                                title: `${cp.pattern_name} Stop`,
                             });
                         }
                     } else if (cp.pattern_name === "Symmetrical Triangle" && cp.status !== "confirmed") {
@@ -737,7 +1320,18 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             window.removeEventListener("resize", handleResize);
             cleanup();
         };
-    }, [symbol, interval, viewMode, mode, predictionData, selectedPatterns]);
+    }, [symbol, interval, viewMode, mode, predictionData, patternScope, confluence]);
+
+    const bestPattern = stateData.current.bestPattern;
+    const bestSetup = stateData.current.bestSetup;
+    const bestSetupStatus = stateData.current.bestSetupStatus;
+    const indicatorSummary = stateData.current.indicatorSummary;
+    const selectedPatterns = new Set(
+        (patternScope === "all"
+            ? (stateData.current.patterns || []).map(pattern => pattern.pattern_name)
+            : bestPattern ? [bestPattern.pattern_name] : [])
+    );
+    const alternativeCount = Math.max((stateData.current.patterns?.length || 0) - (bestSetup ? 1 : 0), 0);
 
     return (
         <div className="fade-up" style={{ display: "flex", flexDirection: "column", width: "100%" }}>
@@ -765,12 +1359,22 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                             {/* Mode Toggle */}
                             <div style={{ display: "flex", gap: 4, background: C.bg0, padding: 3, borderRadius: 6 }}>
                                 <ModeButton label="Indicator" emoji="🟢" active={viewMode === "indicator"} onClick={() => setViewMode("indicator")} />
-                                <ModeButton label="Pattern" emoji="🟣" active={viewMode === "pattern"} disabled={userLevel === "beginner"} onClick={() => { if (userLevel !== "beginner") setViewMode("pattern"); }} />
+                                <ModeButton label="Pattern" emoji="🟣" active={viewMode === "pattern"} onClick={() => setViewMode("pattern")} />
                                 <ModeButton label="Advanced" emoji="🔴" active={viewMode === "advanced"} disabled={userLevel === "beginner"} onClick={() => { if (userLevel !== "beginner") setViewMode("advanced"); }} />
                             </div>
 
-                            {/* Pattern selector (Pattern/Advanced mode only) */}
                             {showPatterns && (
+                                <>
+                                    <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
+                                    <div style={{ display: "flex", gap: 4, background: C.bg0, padding: 3, borderRadius: 6 }}>
+                                        <PatternScopeButton label="Best Setup Only" active={patternScope === "best"} onClick={() => setPatternScope("best")} />
+                                        <PatternScopeButton label="Show All Patterns" active={patternScope === "all"} onClick={() => setPatternScope("all")} />
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Pattern selector (Pattern/Advanced mode only) */}
+                            {false && (
                                 <>
                                     <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
                                     <div style={{ position: "relative" }}>
@@ -858,9 +1462,13 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     )}
                 </div>
 
-                {/* Right side: Decision Panel */}
-                <div style={{ width: 220, flexShrink: 0 }}>
-                    <DecisionPanel sentiment={sentiment} srSummary={showSR ? srSummary : null} loading={sentimentLoading} />
+                {/* Right side: Mode-specific decision panel */}
+                <div style={{ width: 300, flexShrink: 0 }}>
+                    {isIndicatorMode ? (
+                        <IndicatorSummaryPanel summary={indicatorSummary} loading={loading} error={error} />
+                    ) : (
+                        <TradeSetupPanel bestSetup={bestSetup} setupStatus={bestSetupStatus} alternativeCount={alternativeCount} loading={loading} />
+                    )}
                 </div>
             </div>
 

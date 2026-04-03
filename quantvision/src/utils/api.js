@@ -5,6 +5,25 @@
 
 const API_BASE = "http://localhost:8000/api";
 
+const INTERVAL_LIMITS = {
+    "1m": { priceDays: [7, 7], indicatorDays: [60, 120], lookback: [60, 90], sentimentDays: [120, 120] },
+    "5m": { priceDays: [30, 60], indicatorDays: [60, 120], lookback: [60, 120], sentimentDays: [120, 180] },
+    "15m": { priceDays: [30, 60], indicatorDays: [60, 120], lookback: [60, 120], sentimentDays: [120, 180] },
+    "1h": { priceDays: [180, 730], indicatorDays: [120, 240], lookback: [120, 365], sentimentDays: [240, 730] },
+    "4h": { priceDays: [180, 730], indicatorDays: [120, 240], lookback: [120, 365], sentimentDays: [240, 730] },
+    "1d": { priceDays: [30, 420], indicatorDays: [120, 320], lookback: [120, 420], sentimentDays: [240, 420] },
+    "1wk": { priceDays: [730, 3650], indicatorDays: [120, 300], lookback: [180, 500], sentimentDays: [800, 2600] },
+    "1mo": { priceDays: [1825, 3650], indicatorDays: [120, 180], lookback: [180, 500], sentimentDays: [1200, 3650] },
+};
+
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+
+function getIntervalLimit(interval, key) {
+    return INTERVAL_LIMITS[interval]?.[key] || INTERVAL_LIMITS["1d"][key];
+}
+
 async function apiFetch(path, options = {}) {
     const url = `${API_BASE}${path}`;
     const res = await fetch(url, {
@@ -20,7 +39,18 @@ async function apiFetch(path, options = {}) {
 
 // ── Data ────────────────────────────────────────────────────
 export async function fetchPrices(symbol, source = "yfinance", days = 120, interval = "1d") {
-    return apiFetch(`/data/prices/${symbol}?source=${source}&days=${days}&interval=${interval}`);
+    const [minDays, maxDays] = getIntervalLimit(interval, "priceDays");
+    const safeDays = clamp(days, minDays, maxDays);
+    const url = `/data/prices/${symbol}?source=${source}&days=${safeDays}&interval=${interval}`;
+    try {
+        return await apiFetch(url);
+    } catch (err) {
+        const msg = String(err?.message || "");
+        const shouldRetry = msg.includes("API 404") || msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
+        if (!shouldRetry) throw err;
+        const fallbackDays = maxDays;
+        return apiFetch(`/data/prices/${symbol}?source=${source}&days=${fallbackDays}&interval=${interval}`);
+    }
 }
 
 export async function fetchLiveQuote(symbol, source = "yfinance") {
@@ -32,7 +62,18 @@ export async function fetchExtendedQuote(symbol, source = "yfinance") {
 }
 
 export async function fetchIndicators(symbol, days = 120, interval = "1d") {
-    return apiFetch(`/data/indicators/${symbol}?days=${days}&interval=${interval}`);
+    const [minDays, maxDays] = getIntervalLimit(interval, "indicatorDays");
+    const safeDays = clamp(days, minDays, maxDays);
+    const url = `/data/indicators/${symbol}?days=${safeDays}&interval=${interval}`;
+    try {
+        return await apiFetch(url);
+    } catch (err) {
+        const msg = String(err?.message || "");
+        const shouldRetry = msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
+        if (!shouldRetry) throw err;
+        const fallbackDays = maxDays;
+        return apiFetch(`/data/indicators/${symbol}?days=${fallbackDays}&interval=${interval}`);
+    }
 }
 
 export async function fetchSP500() {
@@ -88,11 +129,24 @@ export async function fetchConfluence(symbol) {
 }
 
 export async function fetchSupportResistance(symbol, interval = "1d", lookback = 180) {
-    return apiFetch(`/patterns/support-resistance/${symbol}?interval=${interval}&lookback=${lookback}`);
+    const [minLookback, maxLookback] = getIntervalLimit(interval, "lookback");
+    const safeLookback = clamp(lookback, minLookback, maxLookback);
+    return apiFetch(`/patterns/support-resistance/${symbol}?interval=${interval}&lookback=${safeLookback}`);
 }
 
-export async function fetchSentiment(symbol, days = 400) {
-    return apiFetch(`/sentiment/${symbol}?days=${days}`);
+export async function fetchSentiment(symbol, days = 400, interval = "1d") {
+    const [minDays, maxDays] = getIntervalLimit(interval, "sentimentDays");
+    const safeDays = clamp(days, minDays, maxDays);
+    const url = `/sentiment/${symbol}?days=${safeDays}&interval=${interval}`;
+    try {
+        return await apiFetch(url);
+    } catch (err) {
+        const msg = String(err?.message || "");
+        const shouldRetry = msg.includes("API 400") || msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
+        if (!shouldRetry) throw err;
+        const fallbackDays = maxDays;
+        return apiFetch(`/sentiment/${symbol}?days=${fallbackDays}&interval=${interval}`);
+    }
 }
 
 // ── Backtesting ─────────────────────────────────────────────

@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 import pytz
@@ -43,6 +44,17 @@ _UTC = pytz.UTC
 _price_cache: dict = {}          # key -> (df, cached_at)
 _uploaded_datasets: dict = {}   # filename -> DataFrame
 
+_INTERVAL_DAY_LIMITS = {
+    "1m": {"prices": (7, 7), "indicators": (60, 120)},
+    "5m": {"prices": (30, 60), "indicators": (60, 120)},
+    "15m": {"prices": (30, 60), "indicators": (60, 120)},
+    "1h": {"prices": (180, 730), "indicators": (120, 240)},
+    "4h": {"prices": (180, 730), "indicators": (120, 240)},
+    "1d": {"prices": (30, 420), "indicators": (120, 320)},
+    "1wk": {"prices": (730, 3650), "indicators": (120, 300)},
+    "1mo": {"prices": (1825, 3650), "indicators": (120, 180)},
+}
+
 
 def _cache_get(key: str) -> Optional[pd.DataFrame]:
     """Return cached DataFrame if within the current TTL, else None."""
@@ -61,6 +73,11 @@ def _cache_set(key: str, df: pd.DataFrame) -> None:
     _price_cache[key] = (df, datetime.utcnow())
 
 
+def _clamp_interval_days(interval: str, value: int, bucket: str) -> int:
+    lower, upper = _INTERVAL_DAY_LIMITS.get(interval, _INTERVAL_DAY_LIMITS["1d"])[bucket]
+    return min(max(value, lower), upper)
+
+
 # ── Internal fetchers ─────────────────────────────────────────────────────────
 
 def _fetch_yfinance(symbol: str, start: str, end: str, interval: str = "1d") -> pd.DataFrame:
@@ -72,8 +89,9 @@ def _fetch_yfinance(symbol: str, start: str, end: str, interval: str = "1d") -> 
     if cached is not None:
         return cached
 
+    df = pd.DataFrame()
     try:
-        if interval in ("1d", "1wk"):
+        if interval in ("1d", "1wk", "1mo"):
             df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
         else:
             # For intraday, use period matching limits to avoid empty errors
@@ -81,8 +99,22 @@ def _fetch_yfinance(symbol: str, start: str, end: str, interval: str = "1d") -> 
             period = period_map.get(interval, "1mo")
             df = yf.download(symbol, period=period, interval=interval, progress=False)
     except Exception as e:
-        logger.error(f"YF fetch failed for {symbol} at {interval}: {e}")
-        return pd.DataFrame()
+        logger.warning(f"Primary YF fetch failed for {symbol} at {interval}: {e}")
+        df = pd.DataFrame()
+
+    # Yahoo occasionally returns an empty frame for valid symbols. Retry with period-based fallback.
+    if df.empty:
+        fallback_period = {
+            "1d": "1y",
+            "1wk": "max",
+            "1mo": "max",
+        }.get(interval)
+        if fallback_period:
+            try:
+                df = yf.download(symbol, period=fallback_period, interval=interval, progress=False)
+            except Exception as e:
+                logger.error(f"Fallback YF fetch failed for {symbol} at {interval}: {e}")
+                df = pd.DataFrame()
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -220,13 +252,14 @@ async def get_extended_quote(
 async def get_prices(
     symbol: str,
     source: str = Query("yfinance", enum=["yfinance", "alpha_vantage"]),
-    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
     start: Optional[str] = None,
     end: Optional[str] = None,
-    days: int = Query(120, ge=5, le=3650),
+    days: int = Query(120, ge=1, le=20000),
 ):
     """Fetch OHLCV price data for a symbol."""
     symbol = symbol.upper()
+    days = _clamp_interval_days(interval, days, "prices")
     if end is None:
         end = datetime.now().strftime("%Y-%m-%d")
     if start is None:
@@ -270,19 +303,35 @@ async def get_prices(
 @router.get("/indicators/{symbol}", response_model=IndicatorResponse)
 async def get_indicators(
     symbol: str,
-    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
-    days: int = Query(120, ge=1, le=3650),
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
+    days: int = Query(120, ge=1, le=20000),
 ):
     """Compute technical indicators for a symbol."""
     symbol = symbol.upper()
+    days = _clamp_interval_days(interval, days, "indicators")
     end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=days + 200)).strftime("%Y-%m-%d")  # extra for SMA200
+    padding_days = {
+        "1d": 420,
+        "1wk": 2400,
+        "1mo": 5600,
+    }.get(interval, 200)
+    start = (datetime.now() - timedelta(days=days + padding_days)).strftime("%Y-%m-%d")
 
     df = _fetch_yfinance(symbol, start, end, interval=interval)
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
 
-    df = add_all_technical_indicators(df)
+    if len(df) < 20:
+        raise HTTPException(
+            422,
+            f"Insufficient candles for {interval} indicators. Need at least 20 bars, got {len(df)}."
+        )
+
+    try:
+        df = add_all_technical_indicators(df)
+    except Exception as e:
+        logger.error(f"Indicator calculation failed for {symbol} at {interval}: {e}")
+        raise HTTPException(502, f"Indicator calculation failed for {symbol} ({interval}).")
     df = df[~df.index.duplicated(keep='last')]
     df = df.sort_index()
     df = df.tail(days)
@@ -298,7 +347,10 @@ async def get_indicators(
         entry = {"date": format_date}
         for c in indicator_cols:
             v = row[c]
-            entry[c] = round(float(v), 4) if v is not None else None
+            if v is None or pd.isna(v) or (isinstance(v, (float, np.floating)) and not np.isfinite(v)):
+                entry[c] = None
+            else:
+                entry[c] = round(float(v), 4)
         data.append(entry)
 
     return IndicatorResponse(

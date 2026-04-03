@@ -22,10 +22,47 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _fetch_sentiment_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
+    try:
+        if interval in ("1wk", "1mo"):
+            df = yf.download(symbol, period="max", interval=interval, progress=False)
+        elif interval in ("1d",):
+            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+        else:
+            period_map = {
+                "1m": "7d",
+                "5m": "60d",
+                "15m": "60d",
+                "1h": "730d",
+                "4h": "730d",
+            }
+            df = yf.download(symbol, period=period_map.get(interval, "1mo"), interval=interval, progress=False)
+    except Exception as e:
+        raise HTTPException(502, f"Data fetch failed for {symbol}: {e}")
+
+    if df.empty and interval in ("1d", "1wk", "1mo"):
+        fallback_period = {"1d": "1y", "1wk": "max", "1mo": "max"}[interval]
+        try:
+            df = yf.download(symbol, period=fallback_period, interval=interval, progress=False)
+        except Exception as e:
+            raise HTTPException(502, f"Fallback data fetch failed for {symbol}: {e}")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if not df.empty:
+        df = df.dropna(subset=["Close"])
+
+    return df
+
+
 @router.get("/{symbol}")
 async def get_sentiment(
     symbol: str,
-    days: int = Query(400, ge=30, le=800),
+    days: int = Query(400, ge=30, le=7000),
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
 ):
     """
     Compute 3-indicator sentiment for a symbol.
@@ -35,16 +72,7 @@ async def get_sentiment(
     """
     symbol = symbol.upper()
 
-    # Fetch enough data for the 200 MA
-    end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-    try:
-        df = yf.download(symbol, start=start, end=end, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-    except Exception as e:
-        raise HTTPException(502, f"Data fetch failed for {symbol}: {e}")
+    df = _fetch_sentiment_data(symbol, interval, days)
 
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
@@ -62,7 +90,19 @@ async def get_sentiment(
         logger.exception("Sentiment computation failed for %s", symbol)
         raise HTTPException(500, f"Computation error: {e}")
 
+    details = result.get("details", {})
+    entry_signal = result.get("entry_signal", "WAIT")
+    action = "BUY" if entry_signal == "BULLISH" else "SELL" if entry_signal == "BEARISH" else "WAIT"
+
     return {
+        "mode": "INDICATOR",
         "symbol": symbol,
+        "timeframe": interval,
+        "action": action,
+        "rsi": details.get("rsi"),
+        "volume": details.get("volume"),
+        "atr": details.get("atr"),
+        "support": details.get("support"),
+        "resistance": details.get("resistance"),
         **result,
     }

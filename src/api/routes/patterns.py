@@ -12,9 +12,15 @@ import yfinance as yf
 from fastapi import APIRouter, Query, HTTPException, BackgroundTasks
 
 from src.api.schemas.schemas import (
-    PatternResponse, MultiTFPatternItem, ConfluenceResponse, ConfluenceSignal
+    PatternResponse, MultiTFPatternItem, ConfluenceResponse, ConfluenceSignal, BestSetupStatus,
+    BestTradeSetup
 )
-from src.features.pattern_detector import detect_chart_patterns
+from src.features.pattern_detector import (
+    detect_chart_patterns,
+    evaluate_best_setup,
+    rank_patterns,
+    build_market_context,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,25 +31,53 @@ _confluence_store: Dict[str, List[Dict]] = {}
 _confluence_last_update: Dict[str, datetime] = {}
 
 TF_CONFIG = {
-    "1m": {"yf_interval": "1m", "weight": 1, "lookback_mult": 1, "period": "7d"},
-    "1h": {"yf_interval": "1h", "weight": 2, "lookback_mult": 1, "period": "730d"},
-    "1d": {"yf_interval": "1d", "weight": 3, "lookback_mult": 1, "period": "max"},
-    "1wk": {"yf_interval": "1wk", "weight": 4, "lookback_mult": 5, "period": "max"},
-    "1mo": {"yf_interval": "1mo", "weight": 5, "lookback_mult": 20, "period": "max"},
+    "1m": {"yf_interval": "1m", "weight": 1, "period": "7d", "pattern_lookback": 180, "min_candles": 120, "analysis_days": 7},
+    "1h": {"yf_interval": "1h", "weight": 2, "period": "730d", "pattern_lookback": 240, "min_candles": 160, "analysis_days": 730},
+    "1d": {"yf_interval": "1d", "weight": 3, "period": "max", "pattern_lookback": 320, "min_candles": 260, "analysis_days": 900},
+    "1wk": {"yf_interval": "1wk", "weight": 4, "period": "max", "pattern_lookback": 300, "min_candles": 280, "analysis_days": 2600},
+    "1mo": {"yf_interval": "1mo", "weight": 5, "period": "max", "pattern_lookback": 180, "min_candles": 150, "analysis_days": 5600},
+}
+
+_SR_LOOKBACK_LIMITS = {
+    "1m": (60, 90),
+    "5m": (60, 120),
+    "15m": (60, 120),
+    "1h": (120, 365),
+    "4h": (120, 365),
+    "1d": (120, 420),
+    "1wk": (180, 500),
+    "1mo": (180, 500),
 }
 
 
+def _clamp_sr_lookback(interval: str, lookback: int) -> int:
+    lower, upper = _SR_LOOKBACK_LIMITS.get(interval, _SR_LOOKBACK_LIMITS["1d"])
+    return min(max(lookback, lower), upper)
+
+
 def _fetch_yf_data(symbol: str, interval: str, period: str, days_lookback: int) -> pd.DataFrame:
+    df = pd.DataFrame()
     try:
-        if interval in ("1d", "1wk", "1mo") and period == "max":
-            end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=days_lookback)).strftime("%Y-%m-%d")
-            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+        if period == "max":
+            df = yf.download(symbol, period="max", interval=interval, progress=False)
         else:
             df = yf.download(symbol, period=period, interval=interval, progress=False)
     except Exception as e:
-        logger.error(f"YF fetch failed for {symbol} at {interval}: {e}")
-        return pd.DataFrame()
+        logger.warning(f"Primary YF fetch failed for {symbol} at {interval}: {e}")
+        df = pd.DataFrame()
+
+    if df.empty:
+        fallback_period = {
+            "1d": "1y",
+            "1wk": "max",
+            "1mo": "max",
+        }.get(interval)
+        if fallback_period:
+            try:
+                df = yf.download(symbol, period=fallback_period, interval=interval, progress=False)
+            except Exception as e:
+                logger.error(f"Fallback YF fetch failed for {symbol} at {interval}: {e}")
+                return pd.DataFrame()
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -59,11 +93,11 @@ def _compute_confluence_bg(symbol: str):
     
     # Fetch all 5 timeframes
     for tf, cfg in TF_CONFIG.items():
-        df = _fetch_yf_data(symbol, cfg["yf_interval"], cfg["period"], 365*2)
+        df = _fetch_yf_data(symbol, cfg["yf_interval"], cfg["period"], cfg["analysis_days"])
         if df.empty: continue
         
         # We need about 120 bars minimum for good detection
-        pats = detect_chart_patterns(df, lookback=200, timeframe=tf, weight=cfg["weight"])
+        pats = detect_chart_patterns(df, lookback=cfg["pattern_lookback"], timeframe=tf, weight=cfg["weight"])
         all_patterns.extend(pats)
         
     # Group patterns by name and direction to find overlapping confidences
@@ -118,16 +152,17 @@ async def get_confluence(symbol: str):
 @router.get("/support-resistance/{symbol}", response_model=None)
 async def get_support_resistance(
     symbol: str,
-    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk"]),
-    lookback: int = Query(180, ge=60, le=500),
+    interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
+    lookback: int = Query(180, ge=20, le=20000),
 ):
     """Detect dynamic Support and Resistance levels based on patterns, MAs, and pivots."""
     from src.features.support_resistance import detect_support_resistance
     
     symbol = symbol.upper()
+    lookback = _clamp_sr_lookback(interval, lookback)
     
     try:
-        if interval in ("1d", "1wk"):
+        if interval in ("1d", "1wk", "1mo"):
             end = datetime.now().strftime("%Y-%m-%d")
             start = (datetime.now() - timedelta(days=lookback + 200)).strftime("%Y-%m-%d")
             df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
@@ -181,24 +216,42 @@ async def get_patterns(
          background_tasks.add_task(_compute_confluence_bg, symbol)
 
     cfg = TF_CONFIG[tf]
-    df = _fetch_yf_data(symbol, cfg["yf_interval"], cfg["period"], 500)
+    df = _fetch_yf_data(symbol, cfg["yf_interval"], cfg["period"], cfg["analysis_days"])
     
     if df.empty:
         raise HTTPException(404, f"No data for {symbol} at {tf}")
 
-    patterns_raw = detect_chart_patterns(
+    market_context = build_market_context(df)
+    detected_patterns = detect_chart_patterns(
         df, 
-        lookback=300, 
+        lookback=cfg["pattern_lookback"], 
         timeframe=tf, 
         weight=cfg["weight"]
     )
+    patterns_raw = rank_patterns(detected_patterns, market_context=market_context)
     
     patterns = []
     for p in patterns_raw:
         patterns.append(MultiTFPatternItem(**p))
 
+    setup_status_raw = evaluate_best_setup(
+        patterns_raw,
+        candle_count=len(df),
+        timeframe=tf,
+        min_candles=cfg["min_candles"],
+    )
+    best_setup_raw = setup_status_raw.pop("best_setup")
+    best_pattern_raw = setup_status_raw.pop("best_pattern")
+    setup_status = BestSetupStatus(**setup_status_raw)
+    best_setup = BestTradeSetup(**best_setup_raw) if best_setup_raw else None
+    best_pattern = MultiTFPatternItem(**best_pattern_raw) if best_pattern_raw else None
+
     return PatternResponse(
         symbol=symbol,
         timeframe=tf,
+        status=setup_status.status,
+        best_setup_status=setup_status,
+        best_setup=best_setup,
+        best_pattern=best_pattern,
         patterns=patterns
     )
