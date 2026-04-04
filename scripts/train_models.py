@@ -1,6 +1,8 @@
 """
-Quick Model Training Script
-Trains XGBoost and Random Forest models for signal generation
+Quick model-training script.
+
+Trains local model artifacts that can be picked up by the FastAPI prediction
+and backtest endpoints.
 """
 
 import sys
@@ -188,6 +190,7 @@ if __name__ == "__main__":
     print("""
 Next steps:
 1. Models are now saved in models/saved_models/
-2. Restart the dashboard to use FULL MODE
-3. Run: streamlit run src/dashboard/app.py
+2. Start the backend: python -m uvicorn src.api.main:app --reload --port 8000
+3. Start the frontend: cd quantvision && npm run dev
+4. Open the Predictions or Backtest tab to use the saved artifacts
     """)

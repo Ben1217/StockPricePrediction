@@ -164,9 +164,8 @@ GENERAL RECOMMENDATIONS:
 1. Always display "Last Updated: [timestamp]" in the dashboard
 2. Add disclaimer: "Data provided by Yahoo Finance. May be delayed."
 3. For real-time needs, consider:
-   - Polygon.io (paid) - True real-time
-   - Alpha Vantage (free tier) - 5 API calls/min
-   - IEX Cloud (paid) - Good for small projects
+   - Alpha Vantage (optional fallback in this repo)
+   - A dedicated paid market-data provider if true real-time delivery is required
     """)
     
     return results, market_status

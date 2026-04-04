@@ -1,22 +1,18 @@
-from setuptools import setup, find_packages
+from pathlib import Path
+
+from setuptools import find_packages, setup
+
+
+README = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+
 
 setup(
-    name="stock-prediction-dashboard",
-    version="1.0.0",
-    author="Tan Yee Hern",
-    author_email="your.email@student.utar.edu.my",
-    description="Stock Price Prediction and Portfolio Optimization Dashboard",
-    long_description=open("README.md").read(),
+    name="quantvision",
+    version="2.0.0",
+    description="FastAPI and React workspace for stock analysis, forecasting, and portfolio research",
+    long_description=README,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/stock-prediction-dashboard",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "License :: OSI Approved :: MIT License",
-        "Operating System :: OS Independent",
-    ],
-    python_requires=">=3.10",
+    python_requires=">=3.11",
 )

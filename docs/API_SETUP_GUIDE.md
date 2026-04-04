@@ -1,168 +1,139 @@
-# API Configuration Guide
+# API and Environment Setup Guide
 
-## Quick Summary
+This project no longer uses the older Streamlit dashboard flow. The current runtime is:
 
-| API/Service | Key Required? | Status | Used In Code? | Priority |
-|-------------|---------------|--------|---------------|----------|
-| yfinance | ❌ No | ✅ Working | ✅ Yes (4 files) | **HIGH** |
-| Wikipedia | ❌ No | ✅ Working | ✅ Yes (2 files) | **HIGH** |
-| Alpha Vantage | ✅ Yes | ⚪ Not Used | ❌ No | LOW |
-| Polygon.io | ✅ Yes | ⚪ Not Used | ❌ No | LOW |
-| IEX Cloud | ✅ Yes | ⚪ Not Used | ❌ No | LOW |
+- FastAPI backend on `http://localhost:8000`
+- React/Vite frontend on `http://localhost:5173`
+- Optional CrewAI agents layered on top of the backend
 
-> **TL;DR:** Only yfinance and Wikipedia are actually used. No API keys needed!
+## Quick summary
 
----
+| Service | Required | Current use | Notes |
+| --- | --- | --- | --- |
+| yfinance | No key | Core market data source | Used across price, indicator, prediction, backtest, and portfolio flows |
+| Wikipedia | No key | S&P 500 constituent lookup | Used by market-data helpers |
+| Alpha Vantage | Optional key | Selected live/history fallback endpoints | Only enabled when `ALPHA_VANTAGE_API_KEY` is set |
+| Anthropic | Optional key | CrewAI agent workflows | Needed for `/api/agent` and local agent helpers |
+| PostgreSQL / TimescaleDB | Optional | Storage and migration utilities | Only needed if you use the database utilities |
 
-## No API Key Needed (Primary Sources)
+## Environment variables that matter
 
-### 1. yfinance
-- **Purpose:** Primary stock data source for all features
-- **Status:** ✅ WORKING
-- **Used in:**
-  - `src/data/market_data.py` - Market heatmap data
-  - `src/data/data_loader.py` - Stock downloads
-  - `src/data/data_acquisition.py` - Bulk data downloads
-  - `src/dashboard/heatmap.py` - Market status detection
-- **Limits:** Rate limiting by Yahoo Finance (unofficial)
-- **Notes:** No API key required. May have ~15 min delay during market hours.
+### Core local development
 
-### 2. Wikipedia
-- **Purpose:** S&P 500 constituent list with sectors
-- **Status:** ✅ WORKING
-- **Used in:**
-  - `src/data/market_data.py` - S&P 500 list for heatmap
-  - `src/data/data_acquisition.py` - S&P 500 ticker list
-- **Limits:** None
-- **Notes:** Uses web scraping with User-Agent header.
-
----
-
-## Optional APIs (Not Currently Used)
-
-The following APIs are listed in `.env.example` and `config.yaml` as potential fallbacks, but **NO CODE** currently uses them.
-
-### Alpha Vantage
-- **Purpose:** Backup data source (mentioned in config.yaml)
-- **Status:** ⚪ NOT IMPLEMENTED
-- **Free Tier:** 25 calls/day, 5 calls/min
-- **Get Key:** https://www.alphavantage.co/support/#api-key
-- **Recommendation:** Keep in config for future use, but not required.
-
-### Polygon.io
-- **Purpose:** Intraday data (mentioned in config.yaml)
-- **Status:** ⚪ NOT IMPLEMENTED
-- **Free Tier:** Limited, paid plans available
-- **Get Key:** https://polygon.io/dashboard/signup
-- **Recommendation:** Only needed if adding intraday charts.
-
-### IEX Cloud
-- **Purpose:** Real-time data (mentioned in README only)
-- **Status:** ⚪ NOT IMPLEMENTED
-- **Free Tier:** 50,000 messages/month
-- **Get Key:** https://iexcloud.io/console/
-- **Recommendation:** Can be removed from documentation.
-
----
-
-## Setup Instructions
-
-### Quick Setup (Works Out of Box)
-```bash
-# No configuration needed!
-# yfinance and Wikipedia work without API keys
-
-# Just run the dashboard
-streamlit run src/dashboard/app.py
+```env
+APP_NAME=QuantVision
+APP_VERSION=2.0.0
+ENVIRONMENT=development
+DEBUG=True
+API_HOST=127.0.0.1
+API_PORT=8000
+FRONTEND_PORT=5173
 ```
 
-### Full Setup (If Adding Optional APIs)
-```bash
-# Copy environment template
-cp .env.example .env
+### Data sources
 
-# Edit .env and fill in (OPTIONAL):
-ALPHA_VANTAGE_API_KEY=your_key_here
-POLYGON_API_KEY=your_key_here
+```env
+ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key
+DATA_START_DATE=2019-01-01
+DATA_END_DATE=2024-12-31
+ENABLE_SP500=True
+ENABLE_RUSSELL2000=False
 ```
 
----
+### Optional agent support
 
-## Testing Configuration
+```env
+ANTHROPIC_API_KEY=your_anthropic_api_key
+QUANTVISION_API_URL=http://localhost:8000
+```
+
+### Optional database support
+
+```env
+DB_TYPE=sqlite
+SQLITE_DB_PATH=database/stock_data.db
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=password
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=stock_data
+```
+
+## Recommended local setup
+
+### 1. Install backend dependencies
 
 ```bash
-# Run API test script
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. Install frontend dependencies
+
+```bash
+cd quantvision
+npm install
+cd ..
+```
+
+### 3. Create `.env`
+
+```bash
+copy .env.example .env
+```
+
+### 4. Start the backend
+
+```bash
+python -m uvicorn src.api.main:app --reload --port 8000
+```
+
+### 5. Start the frontend
+
+```bash
+cd quantvision
+npm run dev
+```
+
+## Verification
+
+### Backend health
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
+```
+
+### Source configuration check
+
+```bash
 python tests/test_api_keys.py
 ```
 
-**Expected Output:**
-```
-yfinance             [OK] Working
-  Purpose: PRIMARY - Stock data (no key)
-  Status:  AAPL: $259.37 - No API key required
+That script verifies:
 
-Wikipedia            [OK] Working
-  Purpose: PRIMARY - S&P 500 list (no key)
-  Status:  Found 503 S&P 500 companies - No API key required
+- yfinance access
+- Wikipedia constituent scraping
+- optional Alpha Vantage key presence and validity
+- optional Anthropic key presence
 
-Alpha Vantage        [SKIP] Not Configured
-  Purpose: OPTIONAL - Backup data source
-  Status:  Optional - Add key to .env if needed
+## What is no longer part of the setup story
 
-Polygon.io           [SKIP] Not Configured
-  Purpose: OPTIONAL - Intraday data
-  Status:  Optional - Add key to .env if needed
+- No Streamlit app startup command
+- No Dash frontend
+- No `requirements-dev.txt`
+- No `update_data.py`, `train_model.py`, or `train_all_models.py` workflow
+- No Polygon or IEX setup path in the current codebase
 
-SUMMARY
-  [OK]   Working:        2
-  [SKIP] Not Configured: 2
+## Notes
 
-[SUCCESS] Primary APIs working! Dashboard is fully functional.
-```
-
----
-
-## Cleanup Recommendations
-
-### Can Be Removed from `.env.example`:
-None - Keep Alpha Vantage and Polygon.io as future options.
-
-### Can Be Removed from Documentation:
-- IEX Cloud (not in .env.example, only in README)
-
-### Already Correct:
-- All APIs are marked as optional
-- No hardcoded API keys in source code
-- API keys loaded from environment variables
-
----
-
-## Feature → API Mapping
-
-```
-Feature: Market Heatmap
-├── S&P 500 List: Wikipedia (no key) ✅
-├── Stock Prices: yfinance (no key) ✅
-└── Market Status: yfinance (no key) ✅
-
-Feature: Stock Predictions
-├── Historical Data: yfinance (no key) ✅
-└── Technical Indicators: Calculated locally ✅
-
-Feature: Portfolio Analysis
-├── Price Data: yfinance (no key) ✅
-└── Metrics: Calculated locally ✅
-
-Feature: Backtesting
-└── Price Data: yfinance (no key) ✅
-```
-
----
-
-## Data Freshness Notes
-
-- **Market Closed:** End-of-day prices (expected)
-- **Market Open:** ~15 minute delay (yfinance free tier)
-- **Real-time Needed?** Consider Polygon.io paid tier
-
-For more details, see `data_freshness_report.md`.
+- Most of the project works without any API key.
+- Alpha Vantage is only needed if you want the optional fallback/live endpoints that reference it.
+- CrewAI agents are optional; the main UI and API do not require Anthropic credentials.
+- The repository still includes SQLite-to-PostgreSQL migration utilities and Docker support for TimescaleDB, but they are optional.

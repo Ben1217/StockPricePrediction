@@ -814,10 +814,10 @@ export default function App() {
             }}>
                 <div style={{ display: "flex", gap: 20 }}>
                     <span>Data: {dataSource.replace("_", " ")} {apiConnected ? "· Connected" : "· Offline"}</span>
-                    <span>Models: PyTorch LSTM + XGBoost + RF ensemble</span>
+                    <span>Models: PyTorch LSTM + XGBoost + Random Forest</span>
                     <span>⚠️ Not financial advice</span>
                 </div>
-                <div style={{ color: C.amber }}>QuantVision v3.0.0</div>
+                <div style={{ color: C.amber }}>QuantVision v2.0.0</div>
             </div>
 
             {/* AI Chat Widget */}

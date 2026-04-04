@@ -2,8 +2,8 @@
 # APPLICATION CONFIGURATION
 # ================================
 app:
-  name: "Stock Prediction Dashboard"
-  version: "1.0.0"
+  name: "QuantVision"
+  version: "2.0.0"
   debug: true
 
 # ================================
@@ -12,7 +12,7 @@ app:
 data:
   sources:
     primary: "yfinance"
-    fallback: ["alpha_vantage", "polygon"]
+    fallback: ["alpha_vantage"]
 
   indices:
     sp500:
@@ -216,7 +216,7 @@ backtesting:
   benchmark: "SPY"
 
 # ================================
-# DASHBOARD
+# FRONTEND
 # ================================
 dashboard:
   refresh_interval: 300
@@ -224,13 +224,17 @@ dashboard:
   chart_height: 600
 
   tabs:
-    - name: "Market Overview"
+    - name: "Analysis"
       enabled: true
     - name: "Predictions"
       enabled: true
     - name: "Portfolio"
       enabled: true
-    - name: "Backtesting"
+    - name: "Backtest"
+      enabled: true
+    - name: "Optimization"
+      enabled: true
+    - name: "Heatmap"
       enabled: true
 
 # ================================
@@ -249,7 +253,7 @@ logging:
     max_size_mb: 100
 
 # ================================
-# AI AGENTS (CrewAI)
+# AI AGENTS
 # ================================
 agents:
   llm:

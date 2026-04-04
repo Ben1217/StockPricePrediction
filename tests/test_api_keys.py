@@ -1,140 +1,127 @@
 """
-API Configuration Test Script
-Tests all API connections and key validity
+Environment and data-source configuration check for the current project.
 """
+
 import os
 import sys
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
-    print("[WARN] python-dotenv not installed. Environment variables from .env won't be loaded.")
+    print("[WARN] python-dotenv not installed. .env values will not be loaded automatically.")
 
 
 def test_yfinance():
-    """Test yfinance (no key needed)"""
+    """Test yfinance access."""
     try:
         import yfinance as yf
-        data = yf.download('AAPL', period='1d', progress=False)
+
+        data = yf.download("AAPL", period="1d", progress=False)
         if not data.empty:
-            price = float(data['Close'].iloc[-1])
+            price = float(data["Close"].iloc[-1])
             return "[OK] Working", f"AAPL: ${price:.2f} - No API key required"
         return "[FAIL] Failed", "Unable to fetch data"
     except ImportError:
         return "[FAIL] Not Installed", "pip install yfinance"
-    except Exception as e:
-        return "[FAIL] Error", str(e)
+    except Exception as exc:
+        return "[FAIL] Error", str(exc)
 
 
 def test_wikipedia():
-    """Test Wikipedia S&P 500 list (no key needed)"""
+    """Test S&P 500 constituent lookup."""
     try:
-        import requests
         import pandas as pd
+        import requests
         from io import StringIO
-        
+
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
         tables = pd.read_html(StringIO(response.text))
-        
-        if len(tables) > 0 and len(tables[0]) > 400:
+
+        if tables and len(tables[0]) > 400:
             return "[OK] Working", f"Found {len(tables[0])} S&P 500 companies - No API key required"
-        return "[FAIL] Failed", "Could not parse S&P 500 table"
-    except Exception as e:
-        return "[FAIL] Error", str(e)
+        return "[FAIL] Failed", "Could not parse the S&P 500 table"
+    except Exception as exc:
+        return "[FAIL] Error", str(exc)
 
 
 def test_alpha_vantage():
-    """Test Alpha Vantage API (optional - not currently used in code)"""
-    api_key = os.getenv('ALPHA_VANTAGE_API_KEY')
-    
-    if not api_key or api_key in ['your_alpha_vantage_key', 'your_key_here', '']:
-        return "[SKIP] Not Configured", "Optional - Add key to .env if needed"
-    
+    """Test Alpha Vantage when configured."""
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
+
+    if not api_key or api_key in ["your_alpha_vantage_key", "your_key_here", ""]:
+        return "[SKIP] Not Configured", "Optional - set ALPHA_VANTAGE_API_KEY only if you want fallback endpoints"
+
     try:
         import requests
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=AAPL&interval=5min&apikey={api_key}"
+
+        url = (
+            "https://www.alphavantage.co/query"
+            f"?function=GLOBAL_QUOTE&symbol=AAPL&apikey={api_key}"
+        )
         response = requests.get(url, timeout=10)
         data = response.json()
-        
+
         if "Error Message" in data:
-            return "[FAIL] Invalid Key", "Check your API key"
-        elif "Note" in data:
-            return "[WARN] Rate Limited", "Free tier limit reached (5 calls/min)"
-        elif "Time Series (5min)" in data:
+            return "[FAIL] Invalid Key", "Check your Alpha Vantage key"
+        if "Note" in data:
+            return "[WARN] Rate Limited", "Alpha Vantage rate limit reached"
+        if "Global Quote" in data:
             return "[OK] Working", f"Key valid ({api_key[:8]}...)"
-        else:
-            return "[UNKNOWN]", str(data)[:100]
-    except Exception as e:
-        return "[FAIL] Error", str(e)
+        return "[UNKNOWN]", str(data)[:120]
+    except Exception as exc:
+        return "[FAIL] Error", str(exc)
 
 
-def test_polygon():
-    """Test Polygon.io API (optional - not currently used in code)"""
-    api_key = os.getenv('POLYGON_API_KEY')
-    
-    if not api_key or api_key in ['your_polygon_key', 'your_key_here', '']:
-        return "[SKIP] Not Configured", "Optional - Add key to .env if needed"
-    
-    try:
-        import requests
-        url = f"https://api.polygon.io/v2/aggs/ticker/AAPL/range/1/day/2023-01-09/2023-01-09?apiKey={api_key}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            return "[OK] Working", f"Key valid ({api_key[:8]}...)"
-        elif response.status_code == 401:
-            return "[FAIL] Invalid Key", "Authentication failed"
-        elif response.status_code == 429:
-            return "[WARN] Rate Limited", "Too many requests"
-        else:
-            return "[FAIL] Error", f"HTTP {response.status_code}"
-    except Exception as e:
-        return "[FAIL] Error", str(e)
+def test_anthropic_env():
+    """Check whether Anthropic support is configured for optional agent flows."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key or api_key in ["your_anthropic_api_key", "your_key_here", ""]:
+        return "[SKIP] Not Configured", "Optional - set ANTHROPIC_API_KEY only if you want agent workflows"
+    return "[OK] Present", f"Anthropic key detected ({api_key[:8]}...)"
 
 
 def check_env_variables():
-    """Check which environment variables are set"""
+    """Print the key environment values used by the project."""
     print("\n" + "=" * 70)
     print("ENVIRONMENT VARIABLES CHECK")
     print("=" * 70)
-    
+
     env_vars = {
-        'USE_YFINANCE': ('Data Source', os.getenv('USE_YFINANCE', 'True')),
-        'ALPHA_VANTAGE_API_KEY': ('API Key', os.getenv('ALPHA_VANTAGE_API_KEY', 'Not set')),
-        'POLYGON_API_KEY': ('API Key', os.getenv('POLYGON_API_KEY', 'Not set')),
+        "ALPHA_VANTAGE_API_KEY": os.getenv("ALPHA_VANTAGE_API_KEY", "Not set"),
+        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "Not set"),
+        "QUANTVISION_API_URL": os.getenv("QUANTVISION_API_URL", "http://localhost:8000"),
+        "POSTGRES_HOST": os.getenv("POSTGRES_HOST", "localhost"),
+        "POSTGRES_DB": os.getenv("POSTGRES_DB", "stock_data"),
     }
-    
-    for var, (category, value) in env_vars.items():
-        # Mask API keys
-        if 'KEY' in var and value not in ['Not set', 'your_alpha_vantage_key', 'your_polygon_key']:
-            display_value = f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
+
+    for key, value in env_vars.items():
+        if "KEY" in key and value not in ["Not set", "your_alpha_vantage_key", "your_anthropic_api_key"]:
+            display = f"{value[:4]}...{value[-4:]}" if len(value) > 8 else "****"
         else:
-            display_value = value
-        
-        print(f"  {var:30} = {display_value}")
+            display = value
+        print(f"  {key:24} = {display}")
 
 
 def main():
     print("=" * 70)
-    print("API CONFIGURATION TEST")
+    print("QUANTVISION DATA-SOURCE CHECK")
     print("=" * 70)
-    print("Testing all data source APIs...")
-    
+    print("Testing the services used by the current project...")
+
     tests = [
-        ("yfinance", test_yfinance, "PRIMARY - Stock data (no key)"),
-        ("Wikipedia", test_wikipedia, "PRIMARY - S&P 500 list (no key)"),
-        ("Alpha Vantage", test_alpha_vantage, "OPTIONAL - Backup data source"),
-        ("Polygon.io", test_polygon, "OPTIONAL - Intraday data"),
+        ("yfinance", test_yfinance, "Primary market data source"),
+        ("Wikipedia", test_wikipedia, "S&P 500 constituent lookup"),
+        ("Alpha Vantage", test_alpha_vantage, "Optional fallback data source"),
+        ("Anthropic", test_anthropic_env, "Optional CrewAI agent support"),
     ]
-    
+
     results = []
     for name, test_func, purpose in tests:
         status, message = test_func()
@@ -142,45 +129,43 @@ def main():
         print(f"\n{name:20} {status:20}")
         print(f"  Purpose: {purpose}")
         print(f"  Status:  {message}")
-    
-    # Check environment variables
+
     check_env_variables()
-    
-    # Summary
+
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    
-    working = sum(1 for _, s, _, _ in results if "[OK]" in s)
-    not_configured = sum(1 for _, s, _, _ in results if "[SKIP]" in s)
-    failed = sum(1 for _, s, _, _ in results if "[FAIL]" in s)
-    
+
+    working = sum(1 for _, status, _, _ in results if "[OK]" in status)
+    skipped = sum(1 for _, status, _, _ in results if "[SKIP]" in status)
+    failed = sum(1 for _, status, _, _ in results if "[FAIL]" in status)
+
     print(f"  [OK]   Working:        {working}")
-    print(f"  [SKIP] Not Configured: {not_configured}")
+    print(f"  [SKIP] Not Configured: {skipped}")
     print(f"  [FAIL] Failed:         {failed}")
-    
+
     print("\n" + "=" * 70)
     print("RECOMMENDATIONS")
     print("=" * 70)
-    
-    print("""
-  REQUIRED APIs (Must Work):
-    - yfinance: Primary stock data source
-    - Wikipedia: S&P 500 constituent list
-  
-  OPTIONAL APIs (Nice to Have):
-    - Alpha Vantage: Backup data source (25 calls/day free)
-    - Polygon.io: Intraday data (paid plans available)
-  
-  NOTE: Alpha Vantage and Polygon.io are NOT currently used in code.
-        They are listed as potential fallback options only.
-        You can safely leave these unconfigured.
-    """)
-    
+    print(
+        """
+  Required for the main app:
+    - yfinance
+    - Wikipedia S&P 500 lookup
+
+  Optional:
+    - Alpha Vantage for fallback/live quote endpoints
+    - Anthropic for CrewAI agent workflows
+
+  The FastAPI backend and React frontend do not require Alpha Vantage or Anthropic
+  unless you explicitly want those optional features.
+        """
+    )
+
     if working >= 2:
-        print("  [SUCCESS] Primary APIs working! Dashboard is fully functional.")
+        print("  [SUCCESS] Core services are available for the current project.")
     else:
-        print("  [WARNING] Some primary APIs failed. Check errors above.")
+        print("  [WARNING] A core data source failed. Review the errors above.")
 
 
 if __name__ == "__main__":
