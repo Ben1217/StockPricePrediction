@@ -3,7 +3,7 @@ Pydantic schemas for API request/response validation.
 """
 
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 from enum import Enum
 
@@ -18,6 +18,11 @@ class ModelTypeEnum(str, Enum):
     lstm = "lstm"
     xgboost = "xgboost"
     random_forest = "random_forest"
+
+
+class ValidationModeEnum(str, Enum):
+    single_period = "single_period"
+    walk_forward = "walk_forward"
 
 
 class OptimizationMethod(str, Enum):
@@ -269,16 +274,29 @@ class BacktestRequest(BaseModel):
     end_date: str = Field(default="2024-12-31")
     initial_capital: float = Field(default=100000)
     model_type: ModelTypeEnum = Field(default=ModelTypeEnum.xgboost)
+    primary_model: Optional[ModelTypeEnum] = Field(default=None)
     position_size: float = Field(default=0.1, ge=0.01, le=1.0)
     commission_rate: float = Field(default=0.0)
     slippage_rate: float = Field(default=0.001)
+    include_market_benchmark: bool = Field(default=True)
+    benchmark_symbol: str = Field(default="SPY")
+    validation_mode: ValidationModeEnum = Field(default=ValidationModeEnum.single_period)
+    walk_forward_splits: int = Field(default=3, ge=2, le=10)
+    walk_forward_gap: int = Field(default=5, ge=0, le=60)
 
 
 class BacktestResponse(BaseModel):
     backtest_id: str
-    metrics: Dict
-    equity_curve: List[Dict]
-    trades: List[Dict]
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    price_series: List[Dict[str, Any]] = Field(default_factory=list)
+    primary_run: Dict[str, Any] = Field(default_factory=dict)
+    strategy_runs: List[Dict[str, Any]] = Field(default_factory=list)
+    model_runs: List[Dict[str, Any]] = Field(default_factory=list)
+    benchmarks: List[Dict[str, Any]] = Field(default_factory=list)
+    validation: Optional[Dict[str, Any]] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    equity_curve: List[Dict[str, Any]] = Field(default_factory=list)
+    trades: List[Dict[str, Any]] = Field(default_factory=list)
     message: str
 
 
