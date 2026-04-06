@@ -33,6 +33,10 @@ const ForecastLegend = ({ payload }) => {
     );
 };
 
+function formatChartDateLabel(date) {
+    return typeof date === "string" ? date.slice(5) : date;
+}
+
 export default function PredictionsTab({ selectedTicker, apiConnected, priceData }) {
     const [showDetails, setShowDetails] = useState(false);
     const [horizon, setHorizon] = useState(30);
@@ -72,32 +76,29 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
     let forecastBoundaryDate = null;
 
     // Process history
-    historyBars.forEach(b => {
+    historyBars.forEach((b, index) => {
+        const isLastHistoryBar = index === historyBars.length - 1;
+        const shouldBridgeForecast = isLastHistoryBar && forecasts.length > 0;
         chartData.push({
-            date: b.date.slice(5), // MM-DD
+            date: b.date,
             historical: b.close,
-            predicted: null
+            predicted: shouldBridgeForecast ? b.close : null,
+            upper95: shouldBridgeForecast ? b.close : null,
+            lower95: shouldBridgeForecast ? b.close : null,
+            upper68: shouldBridgeForecast ? b.close : null,
+            lower68: shouldBridgeForecast ? b.close : null,
         });
     });
 
-    // To connect the lines, inject the last historical close into the first forecast properties
+    // Keep a boundary marker without inserting a duplicate x-axis category.
     if (historyBars.length > 0 && forecasts.length > 0) {
         const lastHist = historyBars[historyBars.length - 1];
-        forecastBoundaryDate = lastHist.date.slice(5);
-        chartData.push({
-            date: forecastBoundaryDate,
-            historical: lastHist.close,
-            predicted: lastHist.close,
-            upper95: lastHist.close,
-            lower95: lastHist.close,
-            upper68: lastHist.close,
-            lower68: lastHist.close
-        });
+        forecastBoundaryDate = lastHist.date;
     }
 
     // Process forecast
     forecasts.forEach((f, i) => {
-        const fd = f.date?.slice(5) || `D${i + 1}`;
+        const fd = f.date || `forecast-${i + 1}`;
         if (!forecastBoundaryDate && i === 0) forecastBoundaryDate = fd;
         chartData.push({
             date: fd,
@@ -171,7 +172,7 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                 <ResponsiveContainer width="100%" height={360}>
                     <ComposedChart data={chartData}>
                         <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                        <XAxis dataKey="date" tick={{ fill: C.textDim, fontSize: 10 }} />
+                        <XAxis dataKey="date" tick={{ fill: C.textDim, fontSize: 10 }} tickFormatter={formatChartDateLabel} />
                         <YAxis tick={{ fill: C.textDim, fontSize: 10 }} domain={["auto", "auto"]} tickFormatter={v => `$${v}`} />
                         <Tooltip content={<ChartTooltip />} />
                         <Legend verticalAlign="top" height={36} content={<ForecastLegend />} />

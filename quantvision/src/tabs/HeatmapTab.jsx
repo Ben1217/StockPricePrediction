@@ -210,6 +210,55 @@ function fmtCap(b) {
     return `$${b.toFixed(0)}B`;
 }
 
+function shortSectorName(name) {
+    const sectorLabels = {
+        "Information Technology": "Tech",
+        "Health Care": "Health Care",
+        "Communication Services": "Communication",
+        "Consumer Discretionary": "Consumer",
+        "Consumer Staples": "Staples",
+    };
+    return sectorLabels[name] || name;
+}
+
+function getVolumeStatus(volume, baseline) {
+    const ratio = baseline > 0 ? volume / baseline : 1;
+    if (ratio >= 1.2) return "High";
+    if (ratio <= 0.8) return "Low";
+    return "Normal";
+}
+
+function getScannerSignal(chg, volumeStatus) {
+    if (Math.abs(chg) >= 2 && volumeStatus === "High") {
+        return { icon: "🔥", label: "Strong", color: C.amber };
+    }
+    if (volumeStatus === "Low") {
+        return { icon: "⚠", label: "Weak", color: C.red };
+    }
+    return { icon: "⚪", label: "Normal", color: C.textDim };
+}
+
+function SignalBadge({ signal, compact = false }) {
+    return (
+        <span style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: compact ? 0 : 6,
+            padding: compact ? "2px 5px" : "4px 8px",
+            borderRadius: 999,
+            background: `${signal.color}22`,
+            border: `1px solid ${signal.color}44`,
+            color: signal.color,
+            fontSize: compact ? 10 : 11,
+            fontWeight: 700,
+            lineHeight: 1,
+        }}>
+            <span>{signal.icon}</span>
+            {!compact && <span>{signal.label}</span>}
+        </span>
+    );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    LOGO CACHE  (module-level Map + localStorage persistence)
 ═══════════════════════════════════════════════════════════════ */
@@ -347,13 +396,9 @@ function Sparkline({ data, color, width = 72, height = 24 }) {
 /* ═══════════════════════════════════════════════════════════════
    SECTOR TOOLTIP
 ═══════════════════════════════════════════════════════════════ */
-function SectorTooltip({ sector, mousePos, containerRef }) {
+function SectorTooltip({ sector, mousePos }) {
     if (!sector) return null;
-    const avgChg = sector.companies.reduce((s, c) => s + c.chg, 0) / sector.companies.length;
-    const best = [...sector.companies].sort((a, b) => b.chg - a.chg)[0];
-    const worst = [...sector.companies].sort((a, b) => a.chg - b.chg)[0];
-    const sparkData = sector.companies.map((c, i) => c.price * (1 + Math.sin(i * 0.8) * 0.03));
-    const borderCol = avgChg >= 0 ? C.green : C.red;
+    const borderCol = sector.chg >= 0 ? C.green : C.red;
     return (
         <div style={{
             position: "fixed",
@@ -376,27 +421,18 @@ function SectorTooltip({ sector, mousePos, containerRef }) {
                 {sector.icon}&nbsp;{sector.name}
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ color: C.textDim }}>Avg change</span>
-                <span style={{ color: chgToText(avgChg), fontWeight: 700 }}>{fmtChg(avgChg)}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <span style={{ color: C.textDim }}>Companies</span>
-                <span style={{ color: C.text }}>{sector.companies.length}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                <span style={{ color: C.textDim }}>Index weight</span>
-                <span style={{ color: C.text }}>{sector.indexWeight.toFixed(1)}%</span>
+                <span style={{ color: C.textDim }}>Sector move</span>
+                <span style={{ color: chgToText(sector.chg), fontWeight: 700 }}>{fmtChg(sector.chg)}</span>
             </div>
             <div style={{ height: 1, background: `${C.border}`, marginBottom: 8 }} />
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <span style={{ color: C.green, fontSize: 10 }}>▲ Best</span>
-                <span style={{ color: C.green }}>{best.ticker} {fmtChg(best.chg)}</span>
+                <span style={{ color: C.textDim }}>Strongest</span>
+                <span style={{ color: C.green }}>{sector.strongestCompany?.ticker} {fmtChg(sector.strongestCompany?.chg || 0)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                <span style={{ color: C.red, fontSize: 10 }}>▼ Worst</span>
-                <span style={{ color: C.red }}>{worst.ticker} {fmtChg(worst.chg)}</span>
+                <span style={{ color: C.textDim }}>Weakest</span>
+                <span style={{ color: C.red }}>{sector.weakestCompany?.ticker} {fmtChg(sector.weakestCompany?.chg || 0)}</span>
             </div>
-            <Sparkline data={sparkData} color={borderCol} />
             <div style={{ marginTop: 8, color: C.textDim, fontSize: 10, textAlign: "center" }}>Click to drill in →</div>
         </div>
     );
@@ -408,7 +444,6 @@ function SectorTooltip({ sector, mousePos, containerRef }) {
 function CompanyTooltip({ company, mousePos }) {
     if (!company) return null;
     const borderCol = company.chg >= 0 ? C.green : C.red;
-    const sparkData = [company.w52lo, company.price * 0.97, company.price * 0.99, company.price, company.price * 1.01, company.price * 0.98, company.price];
     return (
         <div style={{
             position: "fixed",
@@ -431,23 +466,20 @@ function CompanyTooltip({ company, mousePos }) {
                 <span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: 13, color: C.amber }}>{company.ticker}</span>
                 <span style={{ color: chgToText(company.chg), fontWeight: 700 }}>{fmtChg(company.chg)}</span>
             </div>
-            <div style={{ color: C.textMid, fontSize: 10, marginBottom: 8 }}>{company.name}</div>
+            <div style={{ marginBottom: 8 }}>
+                <SignalBadge signal={company.signal} />
+            </div>
             <div style={{ height: 1, background: C.border, marginBottom: 8 }} />
             {[
                 ["Price", `$${company.price.toFixed(2)}`],
-                ["Volume", fmtVol(company.vol)],
-                ["Market Cap", fmtCap(company.marketCapB)],
-                ["52W High", `$${company.w52hi.toFixed(2)}`],
-                ["52W Low", `$${company.w52lo.toFixed(2)}`],
+                ["Change", fmtChg(company.chg)],
+                ["Volume", company.volumeStatus],
             ].map(([k, v]) => (
                 <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
                     <span style={{ color: C.textDim }}>{k}</span>
                     <span style={{ color: C.text }}>{v}</span>
                 </div>
             ))}
-            <div style={{ marginTop: 8 }}>
-                <Sparkline data={sparkData} color={borderCol} />
-            </div>
         </div>
     );
 }
@@ -546,7 +578,7 @@ function SectorCell({ cell, onClick, onHover, onLeave, onMouseMove }) {
     );
 }
 
-function CompanyCell({ cell, onHover, onLeave, onMouseMove }) {
+function CompanyCell({ cell, onClick, onHover, onLeave, onMouseMove, isSelected }) {
     const [hovered, setHovered] = useState(false);
     const bigMover = Math.abs(cell.chg) >= 2.5;
     const w = cell.w - GAP;
@@ -554,6 +586,7 @@ function CompanyCell({ cell, onHover, onLeave, onMouseMove }) {
 
     return (
         <div
+            onClick={() => onClick(cell)}
             onMouseEnter={() => { setHovered(true); onHover(cell); }}
             onMouseLeave={() => { setHovered(false); onLeave(); }}
             onMouseMove={onMouseMove}
@@ -566,18 +599,18 @@ function CompanyCell({ cell, onHover, onLeave, onMouseMove }) {
                 background: chgToColor(cell.chg),
                 borderRadius: 5,
                 overflow: "hidden",
-                cursor: "default",
+                cursor: "pointer",
                 transition: "filter .15s, transform .15s",
                 transform: hovered ? "scale(1.03)" : "scale(1)",
                 filter: hovered ? "brightness(1.3)" : "brightness(1)",
-                border: "1px solid rgba(255,255,255,.07)",
+                border: isSelected ? `1px solid ${C.amber}` : "1px solid rgba(255,255,255,.07)",
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
                 padding: "4px 3px",
                 userSelect: "none",
-                zIndex: hovered ? 10 : 1,
+                zIndex: hovered || isSelected ? 10 : 1,
             }}
         >
             <div style={{
@@ -616,6 +649,11 @@ function CompanyCell({ cell, onHover, onLeave, onMouseMove }) {
                             <CompanyLogo ticker={cell.ticker} name={cell.name} domain={cell.logo} size={14} />
                         </div>
                     )}
+                    {w > 70 && h > 38 && (
+                        <div style={{ position: "absolute", top: 4, right: 4 }}>
+                            <SignalBadge signal={cell.signal} compact />
+                        </div>
+                    )}
 
                     <div style={{ fontSize: Math.min(11, Math.max(8, Math.min(w, h) * 0.18)), color: C.amber, fontFamily: "'Syne',sans-serif", fontWeight: 700, lineHeight: 1 }}>
                         {cell.ticker}
@@ -631,7 +669,7 @@ function CompanyCell({ cell, onHover, onLeave, onMouseMove }) {
                     {h > 60 && w > 80 && (
                         <>
                             <div style={{ fontSize: 8, color: "rgba(255,255,255,.5)", marginTop: 2 }}>${cell.price.toFixed(2)}</div>
-                            <div style={{ fontSize: 8, color: "rgba(255,255,255,.4)" }}>{fmtCap(cell.marketCapB)}</div>
+                            <div style={{ fontSize: 8, color: "rgba(255,255,255,.4)" }}>{cell.volumeStatus} vol</div>
                         </>
                     )}
                 </>
@@ -643,13 +681,12 @@ function CompanyCell({ cell, onHover, onLeave, onMouseMove }) {
 /* ═══════════════════════════════════════════════════════════════
    MAIN HEATMAP TAB
 ═══════════════════════════════════════════════════════════════ */
-export default function HeatmapTab({ apiConnected }) {
+export default function HeatmapTab({ apiConnected, setSelectedTicker, setActiveTab }) {
     // ── State ──────────────────────────────────────────────────────
     const [sectors, setSectors] = useState(SECTOR_DATA);
     const [drillSector, setDrillSector] = useState(null); // null = sector view
-    const [viewMode, setViewMode] = useState("sectors"); // "sectors" | "allstocks"
-    const [sortMode, setSortMode] = useState("cap"); // "cap" | "gainers" | "losers"
-    const [search, setSearch] = useState("");
+    const [filterMode, setFilterMode] = useState("all"); // "all" | "gainers" | "losers"
+    const [selectedCompanyTicker, setSelectedCompanyTicker] = useState(null);
     const [status, setStatus] = useState("mock"); // "mock" | "fetching" | "live" | "error"
     const [liveTime, setLiveTime] = useState(null);
     const [fetchError, setFetchError] = useState(null);
@@ -748,34 +785,64 @@ export default function HeatmapTab({ apiConnected }) {
     }, []);
 
     // ── Derived data ────────────────────────────────────────────────
-    const allCompanies = sectors.flatMap(s => s.companies.map(c => ({ ...c, sectorName: s.name, sectorIcon: s.icon })));
+    const sectorsWithMeta = sectors.map((sector) => {
+        const avgVolume = sector.companies.reduce((sum, company) => sum + company.vol, 0) / sector.companies.length;
+        const companies = sector.companies.map((company) => {
+            const volumeStatus = getVolumeStatus(company.vol, avgVolume);
+            const signal = getScannerSignal(company.chg, volumeStatus);
+            return {
+                ...company,
+                sectorId: sector.id,
+                sectorName: sector.name,
+                sectorIcon: sector.icon,
+                avgVolume,
+                volumeStatus,
+                signal,
+            };
+        });
+        const chg = companies.reduce((sum, company) => sum + company.chg, 0) / companies.length;
+        return {
+            ...sector,
+            companies,
+            chg,
+            strongestCompany: [...companies].sort((a, b) => b.chg - a.chg)[0],
+            weakestCompany: [...companies].sort((a, b) => a.chg - b.chg)[0],
+        };
+    });
 
-    const advancing = allCompanies.filter(c => c.chg >= 0).length;
-    const declining = allCompanies.filter(c => c.chg < 0).length;
-
-    const sectorsWithMeta = sectors.map(s => ({
-        ...s,
-        chg: s.companies.reduce((sum, c) => sum + c.chg, 0) / s.companies.length,
-        topTickers: [...s.companies].sort((a, b) => b.marketCapB - a.marketCapB).slice(0, 3).map(c => c.ticker),
-    }));
+    const allCompanies = sectorsWithMeta.flatMap((sector) => sector.companies);
+    const advancing = allCompanies.filter((company) => company.chg >= 0).length;
+    const declining = allCompanies.filter((company) => company.chg < 0).length;
+    const strongestSector = [...sectorsWithMeta].sort((a, b) => b.chg - a.chg)[0];
+    const weakestSector = [...sectorsWithMeta].sort((a, b) => a.chg - b.chg)[0];
+    const topGainer = [...allCompanies].sort((a, b) => b.chg - a.chg)[0];
+    const selectedCompany = selectedCompanyTicker
+        ? allCompanies.find((company) => company.ticker === selectedCompanyTicker) || null
+        : null;
+    const viewMode = drillSector ? "drill" : "sectors";
+    const sortMode = filterMode === "all" ? "cap" : filterMode;
+    const q = "";
+    const search = "";
+    const setViewMode = () => {};
+    const setSearch = () => {};
+    const setSortMode = (mode) => setFilterMode(mode === "cap" ? "all" : mode);
 
     // ── Filter by search ────────────────────────────────────────────
-    const q = search.toLowerCase().trim();
+    function getVisibleCompanies(companies) {
+        if (filterMode === "gainers") {
+            return [...companies].filter((company) => company.chg > 0).sort((a, b) => b.chg - a.chg);
+        }
+        if (filterMode === "losers") {
+            return [...companies].filter((company) => company.chg < 0).sort((a, b) => a.chg - b.chg);
+        }
+        return [...companies].sort((a, b) => b.marketCapB - a.marketCapB);
+    }
 
-    const filteredSectors = sectorsWithMeta.map(s => ({
-        ...s,
-        companies: s.companies.filter(c =>
-            !q || c.ticker.toLowerCase().includes(q) || c.name.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)
-        ),
-    })).filter(s => !q || s.companies.length > 0);
+    const filteredSectors = sectorsWithMeta;
 
     // ── Sort companies in drill view ────────────────────────────────
     function getSortedCompanies(companies) {
-        const sorted = [...companies];
-        if (sortMode === "cap") sorted.sort((a, b) => b.marketCapB - a.marketCapB);
-        else if (sortMode === "gainers") sorted.sort((a, b) => b.chg - a.chg);
-        else if (sortMode === "losers") sorted.sort((a, b) => a.chg - b.chg);
-        return sorted;
+        return getVisibleCompanies(companies);
     }
 
     // ── Treemap inputs ──────────────────────────────────────────────
@@ -805,14 +872,34 @@ export default function HeatmapTab({ apiConnected }) {
         setViewMode("drill");
         setSearch("");
         setSortMode("cap");
+        setSelectedCompanyTicker(null);
     };
 
     const drillIntoSector = (sectorId) => {
         const s = sectorsWithMeta.find(x => x.id === sectorId);
-        if (s) { setDrillSector(s); setViewMode("drill"); }
+        if (s) {
+            setDrillSector(s);
+            setViewMode("drill");
+            setSelectedCompanyTicker(null);
+        }
     };
 
-    const goBack = () => { setDrillSector(null); setViewMode("sectors"); setSearch(""); };
+    const handleCompanyClick = (company) => {
+        setSelectedCompanyTicker(company.ticker);
+    };
+
+    const openAnalysis = () => {
+        if (!selectedCompany) return;
+        setSelectedTicker?.(selectedCompany.ticker);
+        setActiveTab?.("analysis");
+    };
+
+    const goBack = () => {
+        setDrillSector(null);
+        setViewMode("sectors");
+        setSearch("");
+        setSelectedCompanyTicker(null);
+    };
 
     // ── Status badge ────────────────────────────────────────────────
     const StatusBadge = () => {
@@ -836,9 +923,29 @@ export default function HeatmapTab({ apiConnected }) {
     /* ── RENDER ──────────────────────────────────────────────────── */
     return (
         <div style={{ fontFamily: "'DM Mono',monospace", animation: "fadeUp .35s ease both" }}>
+            <div style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                marginBottom: 12,
+                padding: "12px 14px",
+                borderRadius: 10,
+                border: `1px solid ${C.border}`,
+                background: `linear-gradient(135deg, ${C.bg2}, ${C.bg1})`,
+                color: C.text,
+                flexWrap: "wrap",
+            }}>
+                <div style={{ fontSize: 12, fontFamily: "'Syne',sans-serif", fontWeight: 700 }}>
+                    {shortSectorName(strongestSector?.name || "N/A")} strongest | {shortSectorName(weakestSector?.name || "N/A")} weakest | {topGainer?.ticker || "N/A"} {topGainer ? fmtChg(topGainer.chg) : ""}
+                </div>
+                <div style={{ fontSize: 10, color: C.textDim }}>
+                    Heatmap = scanner. Analysis stays one click away.
+                </div>
+            </div>
 
             {/* ── Advancing / Declining Bar ────── */}
-            <div style={{ marginBottom: 6 }}>
+            <div style={{ marginBottom: 6, display: "none" }}>
                 <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
                     <div style={{ flex: advancing, background: C.green, opacity: 0.85, transition: "flex .6s ease" }} />
                     <div style={{ flex: declining, background: C.red, opacity: 0.85, transition: "flex .6s ease" }} />
@@ -851,7 +958,7 @@ export default function HeatmapTab({ apiConnected }) {
             </div>
 
             {/* ── Sector Strip ─────────────────── */}
-            <div style={{ display: "flex", height: 10, borderRadius: 4, overflow: "hidden", marginBottom: 10, gap: 1 }}>
+            <div style={{ display: "none", height: 10, borderRadius: 4, overflow: "hidden", marginBottom: 10, gap: 1 }}>
                 {sectorsWithMeta.map(s => (
                     <div
                         key={s.id}
@@ -885,8 +992,8 @@ export default function HeatmapTab({ apiConnected }) {
                 {/* Drill-view sort pills */}
                 {viewMode === "drill" && (
                     <div style={{ display: "flex", gap: 4 }}>
-                        {[["cap", "Market Cap"], ["gainers", "Top Gainers ▲"], ["losers", "Top Losers ▼"]].map(([k, label]) => (
-                            <button key={k} onClick={() => setSortMode(k)} style={{
+                        {[["cap", "All"], ["gainers", "Top Gainers"], ["losers", "Top Losers"]].map(([k, label]) => (
+                            <button key={k} onClick={() => { setSortMode(k); setSelectedCompanyTicker(null); }} style={{
                                 background: sortMode === k ? C.amberDim : C.bg2,
                                 border: `1px solid ${sortMode === k ? C.amber + "66" : C.border}`,
                                 borderRadius: 20, color: sortMode === k ? C.amber : C.textMid,
@@ -899,7 +1006,7 @@ export default function HeatmapTab({ apiConnected }) {
 
                 {/* View toggle */}
                 {viewMode !== "drill" && (
-                    <div style={{ display: "flex", gap: 4 }}>
+                    <div style={{ display: "none", gap: 4 }}>
                         {[["sectors", "Sectors"], ["allstocks", "All Stocks"]].map(([k, label]) => (
                             <button key={k} onClick={() => { setViewMode(k); setSearch(""); }} style={{
                                 background: viewMode === k ? C.amberDim : C.bg2,
@@ -913,18 +1020,8 @@ export default function HeatmapTab({ apiConnected }) {
                 )}
 
                 {/* Search */}
-                <div style={{ position: "relative", flexGrow: 1, maxWidth: 220 }}>
-                    <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: C.textDim, fontSize: 11 }}>🔍</span>
-                    <input
-                        placeholder="Filter ticker / company…"
-                        value={search}
-                        onChange={e => setSearch(e.target.value)}
-                        style={{
-                            background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 6,
-                            color: C.text, padding: "5px 10px 5px 26px", fontSize: 11,
-                            fontFamily: "'DM Mono',monospace", width: "100%", outline: "none",
-                        }}
-                    />
+                <div style={{ flexGrow: 1, minWidth: 180, color: C.textDim, fontSize: 10 }}>
+                    {viewMode === "drill" ? "Select a stock tile for a quick handoff to analysis." : "Click a sector to drill into stocks."}
                 </div>
 
                 <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
@@ -950,7 +1047,45 @@ export default function HeatmapTab({ apiConnected }) {
                     <span style={{ fontSize: 20 }}>{drillSector.icon}</span>
                     <span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: 15, color: C.text }}>{drillSector.name}</span>
                     <span style={{ fontSize: 11, color: chgToText(drillSector.chg), fontWeight: 700 }}>{fmtChg(drillSector.chg)}</span>
-                    <span style={{ fontSize: 10, color: C.textDim, marginLeft: 4 }}>{drillSector.indexWeight?.toFixed(1)}% of index</span>
+                    <span style={{ fontSize: 10, color: C.textDim, marginLeft: 4 }}>Size = market cap</span>
+                </div>
+            )}
+
+            {selectedCompany && viewMode === "drill" && (
+                <div style={{
+                    marginBottom: 12,
+                    padding: "14px 16px",
+                    borderRadius: 10,
+                    border: `1px solid ${C.border}`,
+                    background: C.bg2,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    flexWrap: "wrap",
+                }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 18, color: C.amber }}>
+                            {selectedCompany.ticker}
+                        </div>
+                        <div style={{ color: C.text }}>${selectedCompany.price.toFixed(2)}</div>
+                        <div style={{ color: chgToText(selectedCompany.chg), fontWeight: 700 }}>{fmtChg(selectedCompany.chg)}</div>
+                        <div style={{ color: C.textDim, fontSize: 11 }}>{selectedCompany.sectorName}</div>
+                        <SignalBadge signal={selectedCompany.signal} />
+                    </div>
+                    <button onClick={openAnalysis} style={{
+                        background: `linear-gradient(135deg, ${C.amber}, #f97316)`,
+                        border: "none",
+                        borderRadius: 8,
+                        color: "#000",
+                        padding: "9px 14px",
+                        cursor: "pointer",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        fontFamily: "'Syne',sans-serif",
+                    }}>
+                        Open Analysis
+                    </button>
                 </div>
             )}
 
@@ -1003,18 +1138,18 @@ export default function HeatmapTab({ apiConnected }) {
                 {cells.map((cell, i) => (
                     viewMode === "sectors"
                         ? <SectorCell key={cell.id || i} cell={cell} onClick={handleSectorClick} onHover={setHoveredSector} onLeave={() => setHoveredSector(null)} onMouseMove={handleMouseMove} />
-                        : <CompanyCell key={cell.ticker || i} cell={cell} onHover={setHoveredCompany} onLeave={() => setHoveredCompany(null)} onMouseMove={handleMouseMove} />
+                        : <CompanyCell key={cell.ticker || i} cell={cell} onClick={handleCompanyClick} isSelected={selectedCompanyTicker === cell.ticker} onHover={setHoveredCompany} onLeave={() => setHoveredCompany(null)} onMouseMove={handleMouseMove} />
                 ))}
 
                 {cells.length === 0 && status !== "fetching" && (
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: C.textDim, fontSize: 13 }}>
-                        No data matches your filter.
+                        No stocks match this scanner view.
                     </div>
                 )}
             </div>
 
             {/* ── Sector Chips ─────────────────── */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+            <div style={{ display: "none", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
                 {sectorsWithMeta.map(s => (
                     <button
                         key={s.id}
@@ -1045,7 +1180,7 @@ export default function HeatmapTab({ apiConnected }) {
                     background: "linear-gradient(90deg, #7f1d1d, #17263d, #064e3b)",
                 }} />
                 <span style={{ color: C.green }}>+4%</span>
-                <span style={{ marginLeft: 16, color: C.textDim }}>Box size = market cap / index weight</span>
+                <span style={{ marginLeft: 16, color: C.textDim }}>Color = % change · Size = {viewMode === "sectors" ? "sector weight" : "market cap"}</span>
             </div>
 
             {/* Tooltips */}

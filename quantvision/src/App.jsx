@@ -802,7 +802,11 @@ export default function App() {
                     />
                 )}
                 {activeTab === "heatmap" && (
-                    <HeatmapTab apiConnected={apiConnected} />
+                    <HeatmapTab
+                        apiConnected={apiConnected}
+                        setSelectedTicker={setSelectedTicker}
+                        setActiveTab={setActiveTab}
+                    />
                 )}
             </div>
 

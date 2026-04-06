@@ -71,8 +71,8 @@ function SimpleTooltip({ active, payload, label }) {
     return (
         <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, minWidth: 180 }}>
             <div style={{ color: C.text, fontWeight: 700, marginBottom: 6 }}>{label}</div>
-            {payload.map((item) => (
-                <div key={item.dataKey || item.name} style={{ color: item.color || C.textDim, fontSize: 11, marginBottom: 4 }}>
+            {payload.map((item, index) => (
+                <div key={`${item.dataKey || item.name || "series"}-${index}`} style={{ color: item.color || C.textDim, fontSize: 11, marginBottom: 4 }}>
                     {item.name || item.dataKey}: {typeof item.value === "number" ? item.value.toFixed(2) : item.value}
                 </div>
             ))}
