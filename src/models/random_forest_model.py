@@ -4,7 +4,7 @@ Random Forest Model Implementation
 
 import numpy as np
 from typing import Dict, Optional
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
 
 from .base_model import BaseModel
 from ..utils.logger import get_logger
@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 class RandomForestModel(BaseModel):
-    """Random Forest regression model for stock prediction"""
+    """Random Forest binary classifier for next-day direction prediction."""
 
     def __init__(self, params: Optional[Dict] = None):
         """
@@ -31,18 +31,21 @@ class RandomForestModel(BaseModel):
             'min_samples_split': 5,
             'min_samples_leaf': 2,
             'random_state': 42,
-            'n_jobs': -1,
+            'n_jobs': 1,
         })
 
         if params:
             default_params.update(params)
 
-        super().__init__(name='RandomForest', params=default_params)
+        default_params["task"] = "classification"
+
+        super().__init__(name='RandomForest', params=default_params, task="classification")
         self.feature_importance_ = None
 
     def build(self) -> None:
         """Build Random Forest model"""
-        self.model = RandomForestRegressor(**self.params)
+        build_params = {k: v for k, v in self.params.items() if k != "task"}
+        self.model = RandomForestClassifier(**build_params)
         logger.info(f"Built Random Forest model with params: {self.params}")
 
     def fit(
@@ -74,7 +77,12 @@ class RandomForestModel(BaseModel):
         """Make predictions"""
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
-        return self.model.predict(X)
+        return self.model.predict(X).astype(int)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before prediction")
+        return self.model.predict_proba(X)
 
     def get_feature_importance(self, feature_names: list = None) -> Dict[str, float]:
         """

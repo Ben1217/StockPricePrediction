@@ -18,17 +18,18 @@ from src.models.model_trainer import ModelTrainer
 
 @pytest.fixture
 def synthetic_data():
-    """500-sample synthetic time-series: noisy sine wave."""
+    """500-sample synthetic binary direction dataset."""
     np.random.seed(42)
     n = 500
     t = np.linspace(0, 10 * np.pi, n)
-    y = np.sin(t) * 0.02 + np.random.normal(0, 0.005, n)
     X = np.column_stack([
         np.sin(t + 0.5) * 0.02,
         np.cos(t) * 0.02,
         np.random.normal(0, 0.01, n),
     ])
-    return X.astype(np.float32), y.astype(np.float32)
+    score = 1.8 * X[:, 0] - 0.9 * X[:, 1] + np.random.normal(0, 0.002, n)
+    y = (score > 0).astype(np.float32)
+    return X.astype(np.float32), y
 
 
 def test_walk_forward_shape(synthetic_data):
@@ -53,7 +54,7 @@ def test_walk_forward_columns(synthetic_data):
 
     result = trainer.walk_forward_validate('xgboost', X, y, n_splits=3, gap=2)
 
-    expected_cols = {'fold', 'rmse', 'mae', 'r2', 'directional_accuracy', 'sharpe_ratio'}
+    expected_cols = {'fold', 'accuracy', 'precision', 'recall', 'f1', 'roc_auc', 'directional_accuracy'}
     assert expected_cols.issubset(set(result.columns)), (
         f"Missing columns: {expected_cols - set(result.columns)}"
     )
@@ -89,7 +90,7 @@ def test_walk_forward_metrics_are_finite(synthetic_data):
 
     # Check the data rows only (not the summary row)
     data_rows = result.iloc[:-1]
-    for col in ['rmse', 'mae', 'r2', 'directional_accuracy', 'sharpe_ratio']:
+    for col in ['accuracy', 'precision', 'recall', 'f1', 'roc_auc', 'directional_accuracy']:
         vals = data_rows[col].astype(float)
         assert vals.notna().all(), f"NaN found in {col}"
         assert np.isfinite(vals.values).all(), f"Inf found in {col}"

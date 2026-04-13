@@ -17,11 +17,12 @@ from src.models.model_trainer import ModelTrainer
 
 @pytest.fixture
 def synthetic_data():
-    """300-sample synthetic returns data."""
+    """300-sample synthetic direction labels."""
     np.random.seed(42)
     n = 300
     X = np.random.randn(n, 5).astype(np.float32)
-    y = (0.3 * X[:, 0] + 0.2 * X[:, 1] + np.random.normal(0, 0.01, n)).astype(np.float32)
+    raw_score = 0.8 * X[:, 0] + 0.5 * X[:, 1] + np.random.normal(0, 0.1, n)
+    y = (raw_score > 0).astype(np.float32)
     return X, y
 
 
@@ -41,7 +42,7 @@ def test_optuna_xgboost_returns_params(synthetic_data):
 
 
 def test_optuna_study_best_value_is_finite(synthetic_data):
-    """The study's best Sharpe value should be a finite float."""
+    """The study's best F1 value should be a finite float."""
     X, y = synthetic_data
     trainer = ModelTrainer()
 

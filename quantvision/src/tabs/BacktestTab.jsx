@@ -11,7 +11,7 @@ import {
     XAxis,
     YAxis,
 } from "recharts";
-import { C } from "../utils/data";
+import { C, DEFAULT_INDEX_SYMBOL } from "../utils/data";
 import { runBacktest, getCSVExportURL, getPDFExportURL } from "../utils/api";
 import { StatCard, Section } from "../components/UIComponents";
 
@@ -130,7 +130,7 @@ export default function BacktestTab({ selectedTicker, apiConnected, notify }) {
     const [commission, setCommission] = useState(0);
     const [slippage, setSlippage] = useState(0.001);
     const [includeBenchmark, setIncludeBenchmark] = useState(true);
-    const [benchmarkSymbol, setBenchmarkSymbol] = useState("SPY");
+    const [benchmarkSymbol, setBenchmarkSymbol] = useState(DEFAULT_INDEX_SYMBOL);
     const [validationMode, setValidationMode] = useState("single_period");
     const [running, setRunning] = useState(false);
     const [result, setResult] = useState(null);

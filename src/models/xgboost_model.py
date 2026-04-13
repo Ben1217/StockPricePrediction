@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 class XGBoostModel(BaseModel):
-    """XGBoost regression model for stock prediction"""
+    """XGBoost binary classifier for next-day direction prediction."""
 
     def __init__(self, params: Optional[Dict] = None):
         """
@@ -31,19 +31,23 @@ class XGBoostModel(BaseModel):
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'objective': 'reg:squarederror',
+            'objective': 'binary:logistic',
+            'eval_metric': 'logloss',
             'random_state': 42,
         })
 
         if params:
             default_params.update(params)
 
-        super().__init__(name='XGBoost', params=default_params)
+        default_params["task"] = "classification"
+
+        super().__init__(name='XGBoost', params=default_params, task="classification")
         self.feature_importance_ = None
 
     def build(self) -> None:
         """Build XGBoost model"""
-        self.model = xgb.XGBRegressor(**self.params)
+        build_params = {k: v for k, v in self.params.items() if k != "task"}
+        self.model = xgb.XGBClassifier(**build_params)
         logger.info(f"Built XGBoost model with params: {self.params}")
 
     def fit(
@@ -89,7 +93,12 @@ class XGBoostModel(BaseModel):
         """Make predictions"""
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
-        return self.model.predict(X)
+        return self.model.predict(X).astype(int)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before prediction")
+        return self.model.predict_proba(X)
 
     def get_feature_importance(self, feature_names: list = None) -> Dict[str, float]:
         """

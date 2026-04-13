@@ -1,0 +1,157 @@
+{
+  "trained_at": "2026-04-13T05:03:27.933992",
+  "objective": "next_day_direction",
+  "target_type": "direction",
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "lookback_days": 756,
+  "training_horizon": 1,
+  "horizons": [
+    1
+  ],
+  "test_size": 0.2,
+  "validation_size": 0.1,
+  "serving_mode": "next_day_direction_classifier",
+  "monitoring": {
+    "retrain_threshold_hours": 24,
+    "stale_after_hours": 24
+  },
+  "preprocessing": {
+    "scaler_type": "minmax",
+    "sequence_length": 60
+  },
+  "split_sizes": {
+    "train": 223,
+    "validation": 32,
+    "test": 64
+  },
+  "samples": 319,
+  "training_sample_count": 223,
+  "features": 59,
+  "feature_count": 59,
+  "params": {
+    "sequence_length": 60
+  },
+  "metrics": {
+    "validation": {
+      "accuracy": 0.40625,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "directional_accuracy": 0.40625,
+      "roc_auc": 0.5425101214574899,
+      "positive_rate": 0.0,
+      "average_probability_up": 0.47247248888015747
+    },
+    "test": {
+      "accuracy": 0.578125,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "directional_accuracy": 0.578125,
+      "roc_auc": 0.5785785785785785,
+      "positive_rate": 0.0,
+      "average_probability_up": 0.4725496470928192
+    }
+  },
+  "backtest": {
+    "validation": {
+      "strategy_return": 0.0,
+      "benchmark_return": 0.29093945026397705,
+      "trade_days": 0,
+      "long_ratio": 0.0,
+      "win_rate": 0.0
+    },
+    "test": {
+      "strategy_return": 0.0,
+      "benchmark_return": NaN,
+      "trade_days": 0,
+      "long_ratio": 0.0,
+      "win_rate": 0.0
+    },
+    "rule": "long_when_probability_up_at_least_0.55_else_flat"
+  },
+  "version_id": "lstm_CMG_h1_20260413_050327",
+  "model_type": "lstm",
+  "symbol": "CMG",
+  "training_symbol": "CMG",
+  "horizon": 1,
+  "feature_columns": [
+    "Returns",
+    "Log_Returns",
+    "SMA_20",
+    "SMA_50",
+    "SMA_200",
+    "EMA_12",
+    "EMA_26",
+    "EMA_50",
+    "MACD",
+    "MACD_Signal",
+    "MACD_Histogram",
+    "ADX",
+    "Ichimoku_A",
+    "Ichimoku_B",
+    "RSI",
+    "Stoch_K",
+    "Stoch_D",
+    "Williams_R",
+    "ROC",
+    "Ultimate_Osc",
+    "TSI",
+    "ATR",
+    "BB_High",
+    "BB_Mid",
+    "BB_Low",
+    "BB_Width",
+    "BB_Pband",
+    "KC_High",
+    "KC_Low",
+    "DC_High",
+    "DC_Low",
+    "OBV",
+    "CMF",
+    "MFI",
+    "VWAP",
+    "Volume_SMA_20",
+    "Volume_Ratio",
+    "Daily_Return",
+    "Log_Return",
+    "High_Low_Range",
+    "Open_Close_Range",
+    "Close_Lag_1",
+    "Return_Lag_1",
+    "Volume_Lag_1",
+    "Close_Lag_2",
+    "Return_Lag_2",
+    "Volume_Lag_2",
+    "Close_Lag_3",
+    "Return_Lag_3",
+    "Volume_Lag_3",
+    "Close_Lag_5",
+    "Return_Lag_5",
+    "Volume_Lag_5",
+    "Close_Lag_10",
+    "Return_Lag_10",
+    "Volume_Lag_10",
+    "DayOfWeek",
+    "Month",
+    "Quarter"
+  ],
+  "bundle_layout": "canonical_symbol_model",
+  "bundle_dir": "models\\bundles\\CMG\\lstm",
+  "artifact_dir": "models\\bundles\\CMG\\lstm",
+  "model_path": "models\\bundles\\CMG\\lstm\\model.pt",
+  "scaler_path": "models\\bundles\\CMG\\lstm\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\CMG\\lstm\\feature_columns.json"
+}

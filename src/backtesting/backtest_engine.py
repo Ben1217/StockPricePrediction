@@ -28,6 +28,7 @@ class Trade:
     reason: str = ""
     confidence: float = 0.0
     predicted_return: Optional[float] = None
+    probability_up: Optional[float] = None
     patterns: List[str] = field(default_factory=list)
     strategy: Optional[str] = None
     model_type: Optional[str] = None
@@ -196,6 +197,7 @@ class BacktestEngine:
                 reason=(detail or {}).get('reason', ''),
                 confidence=float((detail or {}).get('confidence', 0.0) or 0.0),
                 predicted_return=(detail or {}).get('predicted_return'),
+                probability_up=(detail or {}).get('probability_up'),
                 patterns=list((detail or {}).get('patterns', []) or []),
                 strategy=strategy_name,
                 model_type=model_type,
@@ -244,6 +246,7 @@ class BacktestEngine:
                 reason=(detail or {}).get('reason', ''),
                 confidence=float((detail or {}).get('confidence', 0.0) or 0.0),
                 predicted_return=(detail or {}).get('predicted_return'),
+                probability_up=(detail or {}).get('probability_up'),
                 patterns=list((detail or {}).get('patterns', []) or []),
                 strategy=strategy_name,
                 model_type=model_type,

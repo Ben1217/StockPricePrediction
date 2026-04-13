@@ -25,7 +25,7 @@ def download_stock_data(
     Parameters
     ----------
     ticker : str
-        Stock ticker symbol (e.g., 'SPY', 'AAPL')
+        Stock ticker symbol (e.g., '^GSPC', 'AAPL')
     start_date : str or datetime
         Start date for data download
     end_date : str or datetime

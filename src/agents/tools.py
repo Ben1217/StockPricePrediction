@@ -15,8 +15,8 @@ BASE_URL = os.getenv("QUANTVISION_API_URL", "http://localhost:8000")
 
 
 @tool("Get Price Prediction")
-def get_prediction(ticker: str, model: str = "ensemble") -> dict:
-    """Get ML price prediction for a stock ticker.
+def get_prediction(ticker: str, model: str = "xgboost") -> dict:
+    """Get next-day ML direction prediction for a stock ticker.
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'MSFT').
@@ -28,7 +28,7 @@ def get_prediction(ticker: str, model: str = "ensemble") -> dict:
     try:
         r = httpx.post(
             f"{BASE_URL}/api/predict",
-            json={"symbol": ticker, "model_type": model, "horizon": 30},
+            json={"symbol": ticker, "model_type": model, "horizon": 1},
             timeout=60.0,
         )
         r.raise_for_status()

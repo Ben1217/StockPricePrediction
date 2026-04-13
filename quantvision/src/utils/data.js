@@ -9,9 +9,9 @@ function seededRand(seed) {
 
 /* ─── Generate price series ──────────────────────────────────── */
 export function genPriceSeries(ticker, days = 120) {
-    const bases = { AAPL: 182, MSFT: 378, GOOGL: 155, AMZN: 185, NVDA: 875, TSLA: 245, META: 505, NFLX: 620 };
-    const vols = { AAPL: .012, MSFT: .011, GOOGL: .013, AMZN: .015, NVDA: .022, TSLA: .028, META: .016, NFLX: .017 };
-    const drifts = { AAPL: .0003, MSFT: .0004, GOOGL: .0002, AMZN: .0003, NVDA: .0008, TSLA: -.0001, META: .0005, NFLX: .0004 };
+    const bases = { "^GSPC": 5200, AAPL: 182, MSFT: 378, GOOGL: 155, AMZN: 185, NVDA: 875, TSLA: 245, META: 505, NFLX: 620 };
+    const vols = { "^GSPC": .008, AAPL: .012, MSFT: .011, GOOGL: .013, AMZN: .015, NVDA: .022, TSLA: .028, META: .016, NFLX: .017 };
+    const drifts = { "^GSPC": .00025, AAPL: .0003, MSFT: .0004, GOOGL: .0002, AMZN: .0003, NVDA: .0008, TSLA: -.0001, META: .0005, NFLX: .0004 };
     const rand = seededRand(ticker.charCodeAt(0) * 31 + ticker.charCodeAt(1));
     let price = bases[ticker] || 150;
     const vol = vols[ticker] || .015;
@@ -128,6 +128,7 @@ export function optimizePortfolio(tickers, method = "sharpe") {
 
 /* ─── Constants ─────────────────────────────────────────────── */
 export const FUNDAMENTALS = {
+    "^GSPC": { pe: 0, eps: 0, mktCap: "Index", beta: 1.0, div: 0, sector: "Index" },
     AAPL: { pe: 28.4, eps: 6.42, mktCap: "2.87T", beta: .95, div: .96, sector: "Technology" },
     MSFT: { pe: 35.1, eps: 10.76, mktCap: "2.81T", beta: .9, div: 2.72, sector: "Technology" },
     GOOGL: { pe: 24.8, eps: 6.22, mktCap: "1.91T", beta: 1.05, div: 0, sector: "Technology" },
@@ -138,7 +139,9 @@ export const FUNDAMENTALS = {
     NFLX: { pe: 43.6, eps: 14.2, mktCap: "268B", beta: 1.35, div: 0, sector: "Media" },
 };
 
-export const TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX"];
+export const DEFAULT_INDEX_SYMBOL = "^GSPC";
+export const LEGACY_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX"];
+export const TICKERS = [DEFAULT_INDEX_SYMBOL, "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"];
 
 export const SP500_LIST = [
     { ticker: "AAPL", name: "Apple Inc.", sector: "Technology" },

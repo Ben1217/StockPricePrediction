@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 class BaseModel(ABC):
     """Abstract base class for all prediction models"""
 
-    def __init__(self, name: str, params: Optional[Dict] = None):
+    def __init__(self, name: str, params: Optional[Dict] = None, task: str = "classification"):
         """
         Initialize base model
 
@@ -33,6 +33,7 @@ class BaseModel(ABC):
         self.model = None
         self.is_fitted = False
         self.feature_names = None
+        self.task = str(self.params.get("task", task)).lower()
 
     @abstractmethod
     def build(self) -> None:
@@ -86,12 +87,49 @@ class BaseModel(ABC):
         dict
             Evaluation metrics
         """
-        from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+        from sklearn.metrics import (
+            accuracy_score,
+            f1_score,
+            mean_absolute_error,
+            mean_squared_error,
+            precision_score,
+            r2_score,
+            recall_score,
+            roc_auc_score,
+        )
 
         if not self.is_fitted:
             raise ValueError("Model must be fitted before evaluation")
 
         predictions = self.predict(X_test)
+
+        if self.task == "classification":
+            y_true = np.asarray(y_test).astype(int).reshape(-1)
+            y_pred = np.asarray(predictions).astype(int).reshape(-1)
+
+            metrics = {
+                'accuracy': float(accuracy_score(y_true, y_pred)),
+                'precision': float(precision_score(y_true, y_pred, zero_division=0)),
+                'recall': float(recall_score(y_true, y_pred, zero_division=0)),
+                'f1': float(f1_score(y_true, y_pred, zero_division=0)),
+                'directional_accuracy': float(accuracy_score(y_true, y_pred)),
+            }
+
+            try:
+                probabilities = self.predict_proba(X_test)
+                positive_proba = np.asarray(probabilities)[:, -1]
+                metrics['roc_auc'] = float(roc_auc_score(y_true, positive_proba))
+            except Exception:
+                metrics['roc_auc'] = 0.5
+
+            logger.info(
+                "%s evaluation: ACC=%.4f, F1=%.4f, ROC-AUC=%.4f",
+                self.name,
+                metrics['accuracy'],
+                metrics['f1'],
+                metrics['roc_auc'],
+            )
+            return metrics
 
         metrics = {
             'mae': mean_absolute_error(y_test, predictions),
@@ -109,6 +147,14 @@ class BaseModel(ABC):
         logger.info(f"{self.name} evaluation: RMSE={metrics['rmse']:.6f}, R2={metrics['r2']:.4f}")
 
         return metrics
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return class probabilities when supported."""
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before prediction")
+        if hasattr(self.model, "predict_proba"):
+            return self.model.predict_proba(X)
+        raise NotImplementedError(f"{self.name} does not expose predict_proba")
 
     def save(self, filepath: str) -> None:
         """Save model to file"""

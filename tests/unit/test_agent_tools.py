@@ -18,12 +18,13 @@ def test_get_prediction_success(mock_post):
     mock_response.json.return_value = {
         "symbol": "AAPL",
         "model_type": "xgboost",
-        "horizon": 30,
+        "horizon": 1,
         "current_price": 185.50,
-        "forecasts": [
-            {"date": "2024-01-02", "predicted": 186.0, "upper95": 190.0,
-             "lower95": 182.0, "upper68": 188.0, "lower68": 184.0}
-        ],
+        "direction": "Bullish",
+        "signal": "BUY",
+        "confidence": 72.0,
+        "probability_up": 0.72,
+        "probability_down": 0.28,
         "model_info": {"type": "xgboost", "source": "trained"},
     }
     mock_response.raise_for_status = MagicMock()
@@ -33,7 +34,7 @@ def test_get_prediction_success(mock_post):
     result = get_prediction.run(ticker="AAPL", model="xgboost")
 
     assert result["symbol"] == "AAPL"
-    assert "forecasts" in result
+    assert result["direction"] == "Bullish"
     assert result["current_price"] == 185.50
     mock_post.assert_called_once()
 

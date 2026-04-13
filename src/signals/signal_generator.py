@@ -628,13 +628,18 @@ class TradingSignalGenerator:
     
     def check_ml_models_available(self) -> Dict[str, bool]:
         """Check which ML models are available."""
-        models_dir = Path('models/saved_models')
-        
+        from src.models.model_bundle import list_model_metadata
+
+        model_presence = {
+            "xgboost": bool(list_model_metadata(model_type="xgboost")),
+            "lstm": bool(list_model_metadata(model_type="lstm")),
+            "random_forest": bool(list_model_metadata(model_type="random_forest")),
+        }
+        has_scaler = any(bool(meta.get("scaler_path")) for meta in list_model_metadata())
+
         return {
-            'xgboost': (models_dir / 'xgboost').exists(),
-            'lstm': (models_dir / 'lstm').exists(),
-            'random_forest': (models_dir / 'random_forest').exists(),
-            'scaler': Path('models/scalers/feature_scaler.pkl').exists()
+            **model_presence,
+            'scaler': has_scaler,
         }
     
     def analyze_stock(self, symbol: str, df: pd.DataFrame) -> Dict:

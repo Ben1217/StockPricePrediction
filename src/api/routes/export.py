@@ -9,6 +9,8 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+from src.defaults import DEFAULT_INDEX_SYMBOL
+
 router = APIRouter()
 
 
@@ -38,7 +40,7 @@ def _comparison_rows(runs):
 @router.get("/csv/{resource}")
 async def export_csv(
     resource: str,
-    symbol: str = Query("SPY"),
+    symbol: str = Query(DEFAULT_INDEX_SYMBOL),
 ):
     """Export data as CSV. Resources: prices, predictions, backtest, portfolio."""
     if resource == "prices":
@@ -110,13 +112,34 @@ async def export_csv(
     elif resource == "predictions":
         from src.api.routes.predict import predict
         from src.api.schemas.schemas import PredictRequest
-        req = PredictRequest(symbol=symbol, horizon=30)
+        req = PredictRequest(symbol=symbol, horizon=1)
         resp = await predict(req)
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["date", "predicted", "lower68", "upper68", "lower95", "upper95"])
-        for f in resp.forecasts:
-            writer.writerow([f.date, f.predicted, f.lower68, f.upper68, f.lower95, f.upper95])
+        writer.writerow([
+            "symbol",
+            "prediction_date",
+            "direction",
+            "signal",
+            "confidence",
+            "probability_up",
+            "probability_down",
+            "current_price",
+            "trained_at",
+            "status",
+        ])
+        writer.writerow([
+            resp.symbol,
+            resp.prediction_date,
+            resp.direction,
+            resp.signal,
+            resp.confidence,
+            resp.probability_up,
+            resp.probability_down,
+            resp.current_price,
+            resp.model_info.get("trained_at"),
+            resp.status,
+        ])
         output.seek(0)
         return StreamingResponse(
             iter([output.getvalue()]),
@@ -131,7 +154,7 @@ async def export_csv(
 @router.get("/pdf/{resource}")
 async def export_pdf(
     resource: str,
-    symbol: str = Query("SPY"),
+    symbol: str = Query(DEFAULT_INDEX_SYMBOL),
 ):
     """Export data as PDF report."""
     try:

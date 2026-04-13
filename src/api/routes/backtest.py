@@ -13,10 +13,27 @@ from fastapi import APIRouter, HTTPException
 
 from src.api.schemas.schemas import BacktestRequest, BacktestResponse
 from src.backtesting.backtest_engine import BacktestEngine
-from src.features.feature_engineering import create_features, create_sequences, create_target_variable
+from src.defaults import DEFAULT_INDEX_SYMBOL
+from src.features.feature_engineering import (
+    build_feature_frame,
+    build_supervised_dataset,
+    create_sequences,
+    select_feature_columns,
+    transform_feature_frame,
+)
 from src.features.technical_indicators import add_all_technical_indicators
+from src.models.direction_utils import (
+    BUY_PROBABILITY_THRESHOLD,
+    NEXT_DAY_HORIZON,
+    SELL_PROBABILITY_THRESHOLD,
+    confidence_from_probability,
+    direction_from_probability,
+    probability_up,
+    signal_from_probability,
+)
+from src.models.model_bundle import load_model_bundle
 from src.models.model_trainer import ModelTrainer
-from src.signals.signal_generator import MLPrediction, TradingSignalGenerator
+from src.signals.signal_generator import TradingSignalGenerator
 
 router = APIRouter()
 
@@ -80,60 +97,47 @@ def _to_signal_value(action: str) -> int:
     return 0
 
 
-def _classify_direction(predicted_return: float) -> str:
-    if predicted_return > 0.03:
+def _classify_direction(prob_up: float) -> str:
+    if prob_up >= 0.70:
         return "STRONG_BUY"
-    if predicted_return > 0.01:
+    if prob_up >= BUY_PROBABILITY_THRESHOLD:
         return "BUY"
-    if predicted_return < -0.03:
+    if prob_up <= 0.30:
         return "STRONG_SELL"
-    if predicted_return < -0.01:
+    if prob_up <= SELL_PROBABILITY_THRESHOLD:
         return "SELL"
     return "HOLD"
 
 
-def _prediction_confidence(predicted_return: float, uncertainty: float = 0.0) -> float:
-    magnitude = min(abs(float(predicted_return)), 0.05)
-    confidence = 0.65 + magnitude * 10
-    confidence *= max(0.5, 1 - uncertainty * 0.5)
-    return float(min(0.98, max(0.0, confidence)))
+def _prediction_confidence(prob_up: float) -> float:
+    return float(min(0.98, max(0.0, confidence_from_probability(prob_up) / 100.0)))
 
 
-def _load_feature_columns(feat_df: pd.DataFrame) -> List[str]:
-    feature_cols_file = Path("models/model_metadata/feature_columns.json")
-    if feature_cols_file.exists():
-        with open(feature_cols_file, encoding="utf-8") as f:
-            feature_cols = json.load(f)
-        feature_cols = [col for col in feature_cols if col in feat_df.columns]
-    else:
-        feature_cols = [
-            col for col in feat_df.columns
-            if col not in ["Open", "High", "Low", "Close", "Volume", "Adj Close", "Target"]
-        ]
-    return feature_cols
+def _load_feature_columns(feat_df: pd.DataFrame, bundle=None) -> List[str]:
+    if bundle is not None and bundle.feature_columns:
+        return list(bundle.feature_columns)
+    return select_feature_columns(feat_df)
 
 
-def _load_trained_model(model_type: str):
-    model_dir = Path("models/saved_models") / model_type
-    if not model_dir.exists():
-        return None, None, f"No trained {model_type} model found"
+def _load_trained_model(model_type: str, symbol: str, horizon: int = 1):
+    try:
+        bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=horizon)
+    except Exception as exc:  # pragma: no cover - best effort loading
+        return None, None, f"Failed to load {model_type} model bundle: {exc}"
 
-    trainer = ModelTrainer()
-    model = trainer.create_model(model_type)
-    load_errors = []
-    for path in sorted(model_dir.iterdir()):
-        if not path.is_file():
-            continue
-        try:
-            model.load(str(path))
-            return model, path.name, None
-        except Exception as exc:  # pragma: no cover - best effort loading
-            load_errors.append(f"{path.name}: {exc}")
+    if bundle is None:
+        return None, None, f"No trained {model_type} horizon-{horizon} model bundle found for {symbol}"
+    return bundle, bundle.version_id, None
 
-    message = f"Unable to load any saved {model_type} model"
-    if load_errors:
-        message = f"{message} ({load_errors[0]})"
-    return None, None, message
+
+def _bundle_uncertainty(bundle) -> float:
+    metrics = bundle.metadata.get("metrics", {})
+    nested = metrics.get("test", metrics)
+    rmse = nested.get("rmse")
+    try:
+        return max(0.0, float(rmse))
+    except Exception:
+        return 0.0
 
 
 def _build_indicator_snapshot(row: pd.Series) -> Dict[str, Any]:
@@ -178,13 +182,15 @@ def _compose_technical_reason(tech: Dict[str, Any], indicator_snapshot: Dict[str
 
 def _compose_hybrid_reason(
     tech: Dict[str, Any],
-    combined: Dict[str, Any],
-    predicted_return: Optional[float],
+    probability_up: Optional[float],
     indicator_snapshot: Dict[str, Any],
 ) -> str:
     bits = []
-    if predicted_return is not None:
-        bits.append(f"ML predicted {predicted_return:+.2%} next-period return")
+    if probability_up is not None:
+        bits.append(
+            f"ML probability up {float(probability_up):.1%} "
+            f"({direction_from_probability(float(probability_up)).lower()})"
+        )
 
     tech_signal = tech.get("signal", "NEUTRAL")
     pattern_text = _format_patterns(tech.get("patterns", []))
@@ -207,9 +213,31 @@ def _compose_hybrid_reason(
         bits.append(f"price {'above' if close >= sma20 else 'below'} SMA20")
     if close is not None and sma50 is not None:
         bits.append(f"price {'above' if close >= sma50 else 'below'} SMA50")
-    if combined.get("action") == "HOLD":
-        bits.append(combined.get("reason", "signals did not align"))
     return "; ".join(bits)
+
+
+def _combine_hybrid_action(tech: Dict[str, Any], prob_up: float) -> Dict[str, Any]:
+    tech_signal = tech.get("signal", "NEUTRAL")
+    tech_confidence = float(tech.get("confidence", 0.0) or 0.0)
+    ml_signal = signal_from_probability(prob_up)
+    ml_confidence = confidence_from_probability(prob_up)
+
+    if ml_signal == "BUY" and tech_signal == "BUY":
+        action = "STRONG_BUY" if prob_up >= 0.70 and tech_confidence >= 75 else "BUY"
+        return {
+            "action": action,
+            "confidence": (tech_confidence + ml_confidence) / 2,
+        }
+    if ml_signal == "SELL" and tech_signal == "SELL":
+        action = "STRONG_SELL" if prob_up <= 0.30 and tech_confidence >= 75 else "SELL"
+        return {
+            "action": action,
+            "confidence": (tech_confidence + ml_confidence) / 2,
+        }
+    return {
+        "action": "HOLD",
+        "confidence": 0.0,
+    }
 
 
 def _shift_for_execution(symbol: str, signals: pd.DataFrame, details: pd.DataFrame):
@@ -270,7 +298,22 @@ def _build_technical_signal_history(symbol: str, df: pd.DataFrame) -> Dict[str, 
 
 
 def _build_model_prediction_history(symbol: str, df: pd.DataFrame, model_type: str) -> Dict[str, Any]:
-    feat_df = create_features(df).dropna()
+    bundle, model_file, error_message = _load_trained_model(model_type, symbol, horizon=NEXT_DAY_HORIZON)
+    if bundle is None:
+        return {
+            "status": "unavailable",
+            "model_type": model_type,
+            "message": error_message,
+        }
+    bundle_target_type = getattr(bundle, "target_type", bundle.metadata.get("target_type", "direction"))
+    if bundle_target_type != "direction":
+        return {
+            "status": "unavailable",
+            "model_type": model_type,
+            "message": f"{model_type} bundle for {symbol} must be retrained for next-day direction.",
+        }
+
+    feat_df = build_feature_frame(df, feature_config=bundle.feature_config)
     if feat_df.empty:
         return {
             "status": "unavailable",
@@ -278,7 +321,7 @@ def _build_model_prediction_history(symbol: str, df: pd.DataFrame, model_type: s
             "message": f"Unable to build features for {model_type}.",
         }
 
-    feature_cols = _load_feature_columns(feat_df)
+    feature_cols = _load_feature_columns(feat_df, bundle=bundle)
     if not feature_cols:
         return {
             "status": "unavailable",
@@ -286,36 +329,35 @@ def _build_model_prediction_history(symbol: str, df: pd.DataFrame, model_type: s
             "message": f"No feature columns available for {model_type}.",
         }
 
-    model, model_file, error_message = _load_trained_model(model_type)
-    if model is None:
-        return {
-            "status": "unavailable",
-            "model_type": model_type,
-            "message": error_message,
-        }
-
     prediction_frame = pd.DataFrame(
         index=df.index,
-        columns=["predicted_return", "confidence_score", "uncertainty", "directional_signal"],
+        columns=["probability_up", "confidence_score", "uncertainty", "directional_signal"],
         dtype=object,
     )
 
     try:
-        X = feat_df[feature_cols].values.astype(float)
+        aligned, X = transform_feature_frame(feat_df, feature_cols, scaler=bundle.scaler)
+        if aligned.empty:
+            return {
+                "status": "unavailable",
+                "model_type": model_type,
+                "message": f"No aligned inference rows available for {model_type}.",
+            }
+
         if model_type == "lstm":
-            sequence_length = int(getattr(model, "params", {}).get("sequence_length", 60))
-            if len(X) <= sequence_length:
+            sequence_length = int(bundle.sequence_length)
+            if len(X) < sequence_length:
                 return {
                     "status": "unavailable",
                     "model_type": model_type,
-                    "message": f"Need more than {sequence_length} feature rows for LSTM comparison.",
+                    "message": f"Need at least {sequence_length} feature rows for LSTM comparison.",
                 }
-            X_seq = np.array([X[i - sequence_length:i] for i in range(sequence_length, len(X))])
-            preds = np.array(model.predict(X_seq)).reshape(-1)
-            pred_index = feat_df.index[sequence_length:]
+            X_seq = np.array([X[i - sequence_length + 1:i + 1] for i in range(sequence_length - 1, len(X))])
+            probs = probability_up(bundle.model.predict_proba(X_seq))
+            pred_index = aligned.index[sequence_length - 1:]
         else:
-            preds = np.array(model.predict(X)).reshape(-1)
-            pred_index = feat_df.index
+            probs = probability_up(bundle.model.predict_proba(X))
+            pred_index = aligned.index
     except Exception as exc:
         return {
             "status": "unavailable",
@@ -323,13 +365,12 @@ def _build_model_prediction_history(symbol: str, df: pd.DataFrame, model_type: s
             "message": f"{model_type} prediction failed: {exc}",
         }
 
-    for date, pred in zip(pred_index, preds):
-        predicted_return = float(pred)
-        uncertainty = 0.0
-        prediction_frame.loc[date, "predicted_return"] = predicted_return
-        prediction_frame.loc[date, "confidence_score"] = _prediction_confidence(predicted_return, uncertainty)
-        prediction_frame.loc[date, "uncertainty"] = uncertainty
-        prediction_frame.loc[date, "directional_signal"] = _classify_direction(predicted_return)
+    for date, prob_up in zip(pred_index, probs):
+        probability_value = float(prob_up)
+        prediction_frame.loc[date, "probability_up"] = probability_value
+        prediction_frame.loc[date, "confidence_score"] = _prediction_confidence(probability_value)
+        prediction_frame.loc[date, "uncertainty"] = 0.0
+        prediction_frame.loc[date, "directional_signal"] = _classify_direction(probability_value)
 
     return {
         "status": "ok",
@@ -350,7 +391,6 @@ def _build_hybrid_signal_history(
     if model_history.get("status") != "ok":
         return model_history
 
-    generator = TradingSignalGenerator(mode=TradingSignalGenerator.MODE_FULL)
     signals = pd.DataFrame(0, index=df.index, columns=[symbol], dtype=int)
     details = pd.DataFrame(index=df.index, columns=[symbol], dtype=object)
     prediction_frame = model_history["predictions"]
@@ -360,36 +400,31 @@ def _build_hybrid_signal_history(
         tech = (tech_detail or {}).get("technical_details", {"signal": "NEUTRAL", "confidence": 0.0, "patterns": []})
         indicator_snapshot = (tech_detail or {}).get("indicator_snapshot", {})
         pred_row = prediction_frame.loc[date] if date in prediction_frame.index else None
-        predicted_return = None if pred_row is None else pred_row.get("predicted_return")
+        prob_up = None if pred_row is None else pred_row.get("probability_up")
 
-        if pred_row is None or pd.isna(predicted_return):
+        if pred_row is None or pd.isna(prob_up):
             details.at[date, symbol] = {
                 "action": "HOLD",
                 "confidence": 0.0,
                 "patterns": list(tech.get("patterns", []) or []),
                 "predicted_return": None,
+                "probability_up": None,
                 "reason": "No model prediction available for this date.",
                 "technical_details": tech,
                 "indicator_snapshot": indicator_snapshot,
             }
             continue
 
-        ml_prediction = MLPrediction(
-            predicted_price=float(df.loc[date, "Close"]) * (1 + float(predicted_return)),
-            predicted_return=float(predicted_return),
-            confidence_score=float(pred_row.get("confidence_score", 0.0) or 0.0),
-            directional_signal=str(pred_row.get("directional_signal", "HOLD")),
-            uncertainty_score=float(pred_row.get("uncertainty", 0.0) or 0.0),
-        )
-        combined = generator._combine_signals(tech, ml_prediction)
+        combined = _combine_hybrid_action(tech, float(prob_up))
 
         signals.at[date, symbol] = _to_signal_value(combined.get("action", "HOLD"))
         details.at[date, symbol] = {
             "action": combined.get("action", "HOLD"),
             "confidence": float(combined.get("confidence", 0.0) or 0.0),
             "patterns": list(tech.get("patterns", []) or []),
-            "predicted_return": float(predicted_return),
-            "reason": _compose_hybrid_reason(tech, combined, float(predicted_return), indicator_snapshot),
+            "predicted_return": None,
+            "probability_up": float(prob_up),
+            "reason": _compose_hybrid_reason(tech, float(prob_up), indicator_snapshot),
             "technical_details": tech,
             "indicator_snapshot": indicator_snapshot,
         }
@@ -440,6 +475,7 @@ def _format_trade(trade) -> Dict[str, Any]:
         "reason": trade.reason,
         "confidence": round(float(trade.confidence), 2),
         "predicted_return": round(float(trade.predicted_return), 4) if trade.predicted_return is not None else None,
+        "probability_up": round(float(trade.probability_up), 4) if trade.probability_up is not None else None,
         "patterns": list(trade.patterns or []),
         "strategy": trade.strategy,
         "model_type": trade.model_type,
@@ -495,6 +531,7 @@ def _format_run(
             "reason": trade["reason"],
             "confidence": trade["confidence"],
             "predicted_return": trade["predicted_return"],
+            "probability_up": trade["probability_up"],
             "patterns": trade["patterns"],
         }
         for trade in trades
@@ -582,11 +619,19 @@ def _build_price_series(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return [{"date": str(idx.date()), "close": round(float(close), 2)} for idx, close in df["Close"].items()]
 
 
-def _run_walk_forward_validation(df: pd.DataFrame, model_type: str, n_splits: int, gap: int) -> Dict[str, Any]:
-    dataset = create_features(df)
-    dataset = create_target_variable(dataset, target_type="return", horizon=1)
-    feature_cols = _load_feature_columns(dataset)
-    if not feature_cols:
+def _run_walk_forward_validation(symbol: str, df: pd.DataFrame, model_type: str, n_splits: int, gap: int) -> Dict[str, Any]:
+    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=1)
+    feature_config = bundle.feature_config if bundle is not None else None
+    preferred_feature_cols = bundle.feature_columns if bundle is not None else None
+
+    dataset, feature_cols = build_supervised_dataset(
+        df,
+        horizon=NEXT_DAY_HORIZON,
+        target_type="direction",
+        feature_config=feature_config,
+        feature_columns=preferred_feature_cols,
+    )
+    if dataset.empty or not feature_cols:
         return {
             "mode": "walk_forward",
             "status": "unavailable",
@@ -594,25 +639,16 @@ def _run_walk_forward_validation(df: pd.DataFrame, model_type: str, n_splits: in
             "message": "No features available for walk-forward validation.",
         }
 
-    dataset = dataset.dropna(subset=feature_cols + ["Target"])
-    if dataset.empty:
-        return {
-            "mode": "walk_forward",
-            "status": "unavailable",
-            "model_type": model_type,
-            "message": "Not enough clean rows for walk-forward validation.",
-        }
-
     X = dataset[feature_cols].values.astype(np.float32)
     y = dataset["Target"].values.astype(np.float32)
     if model_type == "lstm":
-        sequence_length = 60
-        if len(X) <= sequence_length + n_splits:
+        sequence_length = int(bundle.sequence_length) if bundle is not None else 60
+        if len(X) < sequence_length + n_splits - 1:
             return {
                 "mode": "walk_forward",
                 "status": "unavailable",
                 "model_type": model_type,
-                "message": f"Need more than {sequence_length + n_splits} rows for LSTM walk-forward validation.",
+                "message": f"Need at least {sequence_length + n_splits - 1} rows for LSTM walk-forward validation.",
             }
         X, y = create_sequences(X, y, sequence_length=sequence_length)
 
@@ -651,7 +687,7 @@ async def run_backtest(req: BacktestRequest):
     """Run comparison-focused backtests for the requested symbol."""
     symbol = req.symbol.upper()
     primary_model = (req.primary_model or req.model_type).value
-    benchmark_symbol = (req.benchmark_symbol or "SPY").upper()
+    benchmark_symbol = (req.benchmark_symbol or DEFAULT_INDEX_SYMBOL).upper()
 
     df = _download_price_data(symbol, req.start_date, req.end_date)
     if len(df) < 30:
@@ -843,7 +879,7 @@ async def run_backtest(req: BacktestRequest):
         "message": "Single-period backtest only.",
     }
     if req.validation_mode.value == "walk_forward":
-        validation = _run_walk_forward_validation(df, primary_model, req.walk_forward_splits, req.walk_forward_gap)
+        validation = _run_walk_forward_validation(symbol, df, primary_model, req.walk_forward_splits, req.walk_forward_gap)
 
     backtest_id = str(uuid.uuid4())[:8]
     response = {

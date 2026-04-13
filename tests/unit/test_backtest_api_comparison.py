@@ -61,7 +61,7 @@ def test_backtest_run_returns_comparison_payload():
             return _make_result(prices.index, 0.12, 3)
         if strategy_name == backtest_route.STRATEGY_TECHNICAL:
             return _make_result(prices.index, 0.09, 2)
-        if column == "SPY":
+        if column == "^GSPC":
             return _make_result(prices.index, 0.05, 1)
         return _make_result(prices.index, 0.07, 1)
 
@@ -99,7 +99,6 @@ def test_backtest_run_returns_comparison_payload():
                 "primary_model": "xgboost",
                 "model_type": "xgboost",
                 "include_market_benchmark": True,
-                "benchmark_symbol": "SPY",
                 "validation_mode": "walk_forward",
             },
         )
@@ -113,5 +112,6 @@ def test_backtest_run_returns_comparison_payload():
     assert "benchmarks" in payload and len(payload["benchmarks"]) == 2
     assert payload["metrics"] == payload["primary_run"]["metrics"]
     assert payload["validation"]["mode"] == "walk_forward"
+    assert payload["summary"]["benchmark_symbol"] == "^GSPC"
     unavailable_models = [run for run in payload["model_runs"] if run["status"] == "unavailable"]
     assert len(unavailable_models) == 2

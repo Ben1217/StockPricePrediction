@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import "./index.css";
 import { fetchPrices, fetchIndicators, fetchDataSources } from "./utils/api";
-import { C, TICKERS, SP500_LIST } from "./utils/data";
+import { C, DEFAULT_INDEX_SYMBOL, LEGACY_TICKERS, SP500_LIST, TICKERS } from "./utils/data";
 import { Tab } from "./components/UIComponents";
 import AnalysisTab from "./tabs/AnalysisTab";
 import PredictionsTab from "./tabs/PredictionsTab";
@@ -29,9 +29,31 @@ const ALL_SECTORS = ["All", ...Object.keys(SECTOR_COLORS)];
 
 /* ─── Helpers ────────────────────────────────────────────────── */
 function loadWatchlist() {
+    const normalizeWatchlist = (list) => {
+        if (!Array.isArray(list)) return [...TICKERS];
+
+        const unique = [...new Set(
+            list
+                .map((ticker) => String(ticker || "").trim().toUpperCase())
+                .filter(Boolean)
+        )].slice(0, 8);
+
+        if (unique.length === 0) return [...TICKERS];
+
+        const matchesLegacyDefault = unique.length === LEGACY_TICKERS.length
+            && unique.every((ticker, index) => ticker === LEGACY_TICKERS[index]);
+        if (matchesLegacyDefault) return [...TICKERS];
+
+        if (unique[0] === "SPY" && !unique.includes(DEFAULT_INDEX_SYMBOL)) {
+            return [DEFAULT_INDEX_SYMBOL, ...unique.filter((ticker) => ticker !== "SPY")].slice(0, 8);
+        }
+
+        return unique;
+    };
+
     try {
         const saved = JSON.parse(localStorage.getItem("qv_watchlist"));
-        if (Array.isArray(saved) && saved.length > 0) return saved;
+        if (Array.isArray(saved) && saved.length > 0) return normalizeWatchlist(saved);
     } catch { /* ignore */ }
     return [...TICKERS];
 }
@@ -529,7 +551,7 @@ function ChatWidget({ apiConnected }) {
 export default function App() {
     const [activeTab, setActiveTab] = useState("analysis");
     const [watchlist, setWatchlist] = useState(loadWatchlist);
-    const [selectedTicker, setSelectedTicker] = useState(() => loadWatchlist()[0]);
+    const [selectedTicker, setSelectedTicker] = useState(() => loadWatchlist()[0] || DEFAULT_INDEX_SYMBOL);
     const [dataSource, setDataSource] = useState("yfinance");
     const [availableSources, setAvailableSources] = useState(["yfinance"]);
     const [notification, setNotif] = useState(null);

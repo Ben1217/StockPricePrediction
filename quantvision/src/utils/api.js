@@ -3,6 +3,8 @@
  * All endpoints hit the FastAPI server at localhost:8000.
  */
 
+import { DEFAULT_INDEX_SYMBOL } from "./data";
+
 const API_BASE = "http://localhost:8000/api";
 
 const INTERVAL_LIMITS = {
@@ -24,6 +26,10 @@ function getIntervalLimit(interval, key) {
     return INTERVAL_LIMITS[interval]?.[key] || INTERVAL_LIMITS["1d"][key];
 }
 
+function encodeSymbol(symbol) {
+    return encodeURIComponent(String(symbol || "").trim());
+}
+
 async function apiFetch(path, options = {}) {
     const url = `${API_BASE}${path}`;
     const res = await fetch(url, {
@@ -41,7 +47,8 @@ async function apiFetch(path, options = {}) {
 export async function fetchPrices(symbol, source = "yfinance", days = 120, interval = "1d") {
     const [minDays, maxDays] = getIntervalLimit(interval, "priceDays");
     const safeDays = clamp(days, minDays, maxDays);
-    const url = `/data/prices/${symbol}?source=${source}&days=${safeDays}&interval=${interval}`;
+    const encodedSymbol = encodeSymbol(symbol);
+    const url = `/data/prices/${encodedSymbol}?source=${source}&days=${safeDays}&interval=${interval}`;
     try {
         return await apiFetch(url);
     } catch (err) {
@@ -49,22 +56,23 @@ export async function fetchPrices(symbol, source = "yfinance", days = 120, inter
         const shouldRetry = msg.includes("API 404") || msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
         if (!shouldRetry) throw err;
         const fallbackDays = maxDays;
-        return apiFetch(`/data/prices/${symbol}?source=${source}&days=${fallbackDays}&interval=${interval}`);
+        return apiFetch(`/data/prices/${encodedSymbol}?source=${source}&days=${fallbackDays}&interval=${interval}`);
     }
 }
 
 export async function fetchLiveQuote(symbol, source = "yfinance") {
-    return apiFetch(`/data/quote/${symbol}?source=${source}`);
+    return apiFetch(`/data/quote/${encodeSymbol(symbol)}?source=${source}`);
 }
 
 export async function fetchExtendedQuote(symbol, source = "yfinance") {
-    return apiFetch(`/data/extended-quote/${symbol}?source=${source}`);
+    return apiFetch(`/data/extended-quote/${encodeSymbol(symbol)}?source=${source}`);
 }
 
 export async function fetchIndicators(symbol, days = 120, interval = "1d") {
     const [minDays, maxDays] = getIntervalLimit(interval, "indicatorDays");
     const safeDays = clamp(days, minDays, maxDays);
-    const url = `/data/indicators/${symbol}?days=${safeDays}&interval=${interval}`;
+    const encodedSymbol = encodeSymbol(symbol);
+    const url = `/data/indicators/${encodedSymbol}?days=${safeDays}&interval=${interval}`;
     try {
         return await apiFetch(url);
     } catch (err) {
@@ -72,7 +80,7 @@ export async function fetchIndicators(symbol, days = 120, interval = "1d") {
         const shouldRetry = msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
         if (!shouldRetry) throw err;
         const fallbackDays = maxDays;
-        return apiFetch(`/data/indicators/${symbol}?days=${fallbackDays}&interval=${interval}`);
+        return apiFetch(`/data/indicators/${encodedSymbol}?days=${fallbackDays}&interval=${interval}`);
     }
 }
 
@@ -109,7 +117,7 @@ export async function listModels() {
 }
 
 // ── Predictions ─────────────────────────────────────────────
-export async function fetchPredictions(symbol, modelType = "xgboost", horizon = 30) {
+export async function fetchPredictions(symbol, modelType = "xgboost", horizon = 1) {
     return apiFetch("/predict", {
         method: "POST",
         body: JSON.stringify({ symbol, model_type: modelType, horizon }),
@@ -117,27 +125,28 @@ export async function fetchPredictions(symbol, modelType = "xgboost", horizon = 
 }
 
 export async function fetchHistoricalSignals(symbol, days = 90, modelType = "xgboost") {
-    return apiFetch(`/predict/historical-signals/${symbol}?days=${days}&model_type=${modelType}`);
+    return apiFetch(`/predict/historical-signals/${encodeSymbol(symbol)}?days=${days}&model_type=${modelType}`);
 }
 
 export async function fetchPatterns(symbol, tf = "1d") {
-    return apiFetch(`/patterns/${symbol}?tf=${tf}`);
+    return apiFetch(`/patterns/${encodeSymbol(symbol)}?tf=${tf}`);
 }
 
 export async function fetchConfluence(symbol) {
-    return apiFetch(`/patterns/confluence/${symbol}`);
+    return apiFetch(`/patterns/confluence/${encodeSymbol(symbol)}`);
 }
 
 export async function fetchSupportResistance(symbol, interval = "1d", lookback = 180) {
     const [minLookback, maxLookback] = getIntervalLimit(interval, "lookback");
     const safeLookback = clamp(lookback, minLookback, maxLookback);
-    return apiFetch(`/patterns/support-resistance/${symbol}?interval=${interval}&lookback=${safeLookback}`);
+    return apiFetch(`/patterns/support-resistance/${encodeSymbol(symbol)}?interval=${interval}&lookback=${safeLookback}`);
 }
 
 export async function fetchSentiment(symbol, days = 400, interval = "1d") {
     const [minDays, maxDays] = getIntervalLimit(interval, "sentimentDays");
     const safeDays = clamp(days, minDays, maxDays);
-    const url = `/sentiment/${symbol}?days=${safeDays}&interval=${interval}`;
+    const encodedSymbol = encodeSymbol(symbol);
+    const url = `/sentiment/${encodedSymbol}?days=${safeDays}&interval=${interval}`;
     try {
         return await apiFetch(url);
     } catch (err) {
@@ -145,7 +154,7 @@ export async function fetchSentiment(symbol, days = 400, interval = "1d") {
         const shouldRetry = msg.includes("API 400") || msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
         if (!shouldRetry) throw err;
         const fallbackDays = maxDays;
-        return apiFetch(`/sentiment/${symbol}?days=${fallbackDays}&interval=${interval}`);
+        return apiFetch(`/sentiment/${encodedSymbol}?days=${fallbackDays}&interval=${interval}`);
     }
 }
 
@@ -186,10 +195,10 @@ export async function fetchPortfolioMetrics(symbols, lookback = 252) {
 }
 
 // ── Export ───────────────────────────────────────────────────
-export function getCSVExportURL(resource, symbol = "SPY") {
-    return `${API_BASE}/export/csv/${resource}?symbol=${symbol}`;
+export function getCSVExportURL(resource, symbol = DEFAULT_INDEX_SYMBOL) {
+    return `${API_BASE}/export/csv/${resource}?symbol=${encodeSymbol(symbol)}`;
 }
 
-export function getPDFExportURL(resource, symbol = "SPY") {
-    return `${API_BASE}/export/pdf/${resource}?symbol=${symbol}`;
+export function getPDFExportURL(resource, symbol = DEFAULT_INDEX_SYMBOL) {
+    return `${API_BASE}/export/pdf/${resource}?symbol=${encodeSymbol(symbol)}`;
 }

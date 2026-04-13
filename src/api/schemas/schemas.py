@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 from enum import Enum
 
+from src.defaults import DEFAULT_INDEX_SYMBOL
+
 
 # ── Enums ──────────────────────────────────────────────────────
 class DataSourceEnum(str, Enum):
@@ -82,9 +84,9 @@ class UploadResponse(BaseModel):
 
 # ── Training Schemas ───────────────────────────────────────────
 class TrainRequest(BaseModel):
-    symbol: str = Field(default="SPY", description="Ticker symbol")
+    symbol: str = Field(default=DEFAULT_INDEX_SYMBOL, description="Ticker symbol")
     model_type: ModelTypeEnum = Field(default=ModelTypeEnum.xgboost)
-    horizons: List[int] = Field(default=[1, 5, 15, 30])
+    horizons: List[int] = Field(default_factory=lambda: [1])
     lookback_days: int = Field(default=756)
     test_size: float = Field(default=0.2, ge=0.05, le=0.5)
     params: Optional[Dict] = None
@@ -95,6 +97,37 @@ class TrainResponse(BaseModel):
     status: str
     model_type: str
     symbol: str
+    message: str
+
+
+class BootstrapTrainRequest(BaseModel):
+    symbols: List[str] = Field(
+        default_factory=lambda: [
+            DEFAULT_INDEX_SYMBOL,
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "NVDA",
+            "TSLA",
+            "META",
+            "NFLX",
+        ]
+    )
+    model_types: List[ModelTypeEnum] = Field(default_factory=lambda: [ModelTypeEnum.xgboost, ModelTypeEnum.random_forest, ModelTypeEnum.lstm])
+    horizons: List[int] = Field(default_factory=lambda: [1])
+    lookback_days: int = Field(default=756)
+    test_size: float = Field(default=0.2, ge=0.05, le=0.5)
+    use_sp500: bool = Field(default=False)
+    skip_fresh_hours: Optional[int] = Field(default=24, ge=0)
+    params: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+class BootstrapTrainResponse(BaseModel):
+    job_id: str
+    status: str
+    symbols: List[str]
+    model_types: List[str]
     message: str
 
 
@@ -118,9 +151,9 @@ class ModelInfo(BaseModel):
 
 # ── Prediction Schemas ─────────────────────────────────────────
 class PredictRequest(BaseModel):
-    symbol: str = Field(default="SPY")
+    symbol: str = Field(default=DEFAULT_INDEX_SYMBOL)
     model_type: ModelTypeEnum = Field(default=ModelTypeEnum.xgboost)
-    horizon: int = Field(default=30, ge=1, le=120)
+    horizon: int = Field(default=1, ge=1, le=120)
     data_source: DataSourceEnum = Field(default=DataSourceEnum.yfinance)
 
 
@@ -138,15 +171,30 @@ class PredictResponse(BaseModel):
     model_type: str
     horizon: int
     current_price: float
-    forecasts: List[ForecastPoint]
+    direction: Optional[str] = None
+    signal: Optional[str] = None
+    confidence: Optional[float] = None
+    probability_up: Optional[float] = None
+    probability_down: Optional[float] = None
+    expected_move: Optional[str] = None
+    prediction_date: Optional[str] = None
+    forecasts: List[ForecastPoint] = Field(default_factory=list)
     model_info: Dict
+    status: str = Field(default="ok")
+    model_available: bool = Field(default=True)
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    can_train: bool = Field(default=False)
+    scenario_paths: Optional[List[List[float]]] = None  # Monte Carlo price paths for fan chart
 
 
 class HistoricalSignal(BaseModel):
     date: str
-    type: str  # "BUY" | "SELL"
+    type: str  # "BUY" | "SELL" | "HOLD"
     confidence: float
-    predicted_return: float
+    predicted_return: Optional[float] = None
+    probability_up: Optional[float] = None
+    direction: Optional[str] = None
 
 
 # ── Pattern Detection Schemas ──────────────────────────────────
@@ -164,11 +212,11 @@ class MultiTFPatternItem(BaseModel):
     timeframe: str
     weight: int
     confidence: float
-    
+
     # Path & levels
     key_levels: List[KeyLevel]
     trendlines: Optional[List[List[KeyLevel]]] = None
-    
+
     # Actionable levels
     entry_price: Optional[float] = None
     neckline: Optional[float] = None
@@ -269,7 +317,7 @@ class PatternResponse(BaseModel):
 
 # ── Backtest Schemas ───────────────────────────────────────────
 class BacktestRequest(BaseModel):
-    symbol: str = Field(default="SPY")
+    symbol: str = Field(default=DEFAULT_INDEX_SYMBOL)
     start_date: str = Field(default="2022-01-01")
     end_date: str = Field(default="2024-12-31")
     initial_capital: float = Field(default=100000)
@@ -279,7 +327,7 @@ class BacktestRequest(BaseModel):
     commission_rate: float = Field(default=0.0)
     slippage_rate: float = Field(default=0.001)
     include_market_benchmark: bool = Field(default=True)
-    benchmark_symbol: str = Field(default="SPY")
+    benchmark_symbol: str = Field(default=DEFAULT_INDEX_SYMBOL)
     validation_mode: ValidationModeEnum = Field(default=ValidationModeEnum.single_period)
     walk_forward_splits: int = Field(default=3, ge=2, le=10)
     walk_forward_gap: int = Field(default=5, ge=0, le=60)

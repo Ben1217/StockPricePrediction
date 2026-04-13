@@ -50,7 +50,7 @@ class LSTMNetwork(nn.Module):
 
 
 class LSTMModel(BaseModel):
-    """PyTorch LSTM model for stock prediction with uncertainty estimation."""
+    """PyTorch LSTM binary classifier with MC Dropout probabilities."""
 
     def __init__(self, params: Optional[Dict] = None):
         default_params = {
@@ -73,7 +73,9 @@ class LSTMModel(BaseModel):
         if params:
             default_params.update(params)
 
-        super().__init__(name='LSTM', params=default_params)
+        default_params["task"] = "classification"
+
+        super().__init__(name='LSTM', params=default_params, task="classification")
         self.history = {'train_loss': [], 'val_loss': []}
         self.scaler = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -128,7 +130,7 @@ class LSTMModel(BaseModel):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=5
         )
-        criterion = nn.MSELoss()
+        criterion = nn.BCEWithLogitsLoss()
 
         batch_size = self.params['batch_size']
         best_val_loss = float('inf')
@@ -207,14 +209,23 @@ class LSTMModel(BaseModel):
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
 
+        probabilities = self.predict_proba(X)[:, 1]
+        return (probabilities >= 0.5).astype(int)
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Model must be fitted before prediction")
+
         if len(X.shape) == 2:
             X = X.reshape((X.shape[0], X.shape[1], 1))
 
         self.model.eval()
         with torch.no_grad():
             X_t = torch.FloatTensor(X).to(self.device)
-            preds = self.model(X_t).cpu().numpy()
-        return preds
+            logits = self.model(X_t)
+            probs = torch.sigmoid(logits).cpu().numpy().reshape(-1)
+
+        return np.column_stack([1.0 - probs, probs])
 
     def predict_with_uncertainty(
         self, X: np.ndarray, n_samples: int = 100
@@ -232,7 +243,7 @@ class LSTMModel(BaseModel):
         Returns
         -------
         tuple
-            (mean_prediction, lower_bound, upper_bound) at 95% CI
+            (mean_up_probability, lower_bound, upper_bound) at 95% CI
         """
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
@@ -247,7 +258,8 @@ class LSTMModel(BaseModel):
         all_preds = []
         with torch.no_grad():
             for _ in range(n_samples):
-                preds = self.model(X_t).cpu().numpy()
+                logits = self.model(X_t)
+                preds = torch.sigmoid(logits).cpu().numpy()
                 all_preds.append(preds)
 
         self.model.eval()

@@ -12,6 +12,7 @@ import json
 from sklearn.model_selection import TimeSeriesSplit
 
 from .base_model import BaseModel
+from .model_bundle import MODEL_FILE_NAMES
 from .xgboost_model import XGBoostModel
 from .lstm_model import LSTMModel
 from .random_forest_model import RandomForestModel
@@ -30,7 +31,7 @@ MODEL_REGISTRY = {
 class ModelTrainer:
     """Orchestrates model training and evaluation"""
 
-    def __init__(self, models_dir: str = "models/saved_models"):
+    def __init__(self, models_dir: str = "models/bundles"):
         """
         Initialize trainer
 
@@ -73,7 +74,9 @@ class ModelTrainer:
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None,
         params: Optional[Dict] = None,
-        save: bool = True
+        save: bool = True,
+        symbol: Optional[str] = None,
+        bundle_dir: Optional[str] = None,
     ) -> BaseModel:
         """
         Train a single model
@@ -104,7 +107,14 @@ class ModelTrainer:
         self.models[model_type] = model
 
         if save:
-            save_path = self.models_dir / model_type / f"{model_type}_model"
+            if bundle_dir is not None:
+                target_dir = Path(bundle_dir)
+            elif symbol:
+                target_dir = self.models_dir / symbol.upper() / model_type
+            else:
+                target_dir = Path("models/saved_models") / model_type
+            model_filename = MODEL_FILE_NAMES.get(model_type, f"{model_type}_model.joblib")
+            save_path = target_dir / model_filename
             model.save(str(save_path))
 
         return model
@@ -138,7 +148,7 @@ class ModelTrainer:
             Dictionary of trained models
         """
         if model_types is None:
-            model_types = ['xgboost', 'random_forest']  # Exclude LSTM by default (slower)
+            model_types = ['xgboost', 'random_forest', 'lstm']
 
         for model_type in model_types:
             try:
@@ -182,12 +192,14 @@ class ModelTrainer:
         df = pd.DataFrame(results)
         if not df.empty:
             df = df.set_index('model')
-            df = df.sort_values('rmse')
+            sort_metric = 'roc_auc' if 'roc_auc' in df.columns else 'f1' if 'f1' in df.columns else 'rmse'
+            ascending = sort_metric in {'rmse', 'mse', 'mae'}
+            df = df.sort_values(sort_metric, ascending=ascending)
 
         logger.info(f"Evaluation complete for {len(results)} models")
         return df
 
-    def get_best_model(self, metric: str = 'rmse') -> Optional[BaseModel]:
+    def get_best_model(self, metric: str = 'roc_auc') -> Optional[BaseModel]:
         """
         Get the best performing model
 
@@ -205,8 +217,10 @@ class ModelTrainer:
             logger.warning("No evaluation results available")
             return None
 
-        # Find best model
-        best_name = min(self.results, key=lambda x: self.results[x].get(metric, float('inf')))
+        higher_is_better = metric not in {'rmse', 'mse', 'mae'}
+        selector = max if higher_is_better else min
+        default_value = float('-inf') if higher_is_better else float('inf')
+        best_name = selector(self.results, key=lambda x: self.results[x].get(metric, default_value))
         return self.models.get(best_name)
 
     def save_results(self, filepath: str) -> None:
@@ -258,7 +272,7 @@ class ModelTrainer:
             fold, rmse, mae, r2, directional_accuracy, sharpe_ratio
             Plus a final 'mean ± std' summary row.
         """
-        from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+        from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 
         tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
         fold_metrics: List[Dict] = []
@@ -285,32 +299,38 @@ class ModelTrainer:
                 # Some models don't accept X_val / y_val
                 model.fit(X_train_fold, y_train_fold)
 
-            preds = model.predict(X_test)
+            preds = np.asarray(model.predict(X_test)).astype(int).reshape(-1)
+            probabilities = np.asarray(model.predict_proba(X_test))[:, -1]
+            y_true = np.asarray(y_test).astype(int).reshape(-1)
 
-            rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
-            mae = float(mean_absolute_error(y_test, preds))
-            r2 = float(r2_score(y_test, preds))
-
-            # Directional accuracy
-            if len(y_test) > 1:
-                actual_dir = np.sign(y_test[1:] - y_test[:-1])
-                pred_dir = np.sign(preds[1:] - preds[:-1])
-                dir_acc = float(np.mean(actual_dir == pred_dir))
-            else:
-                dir_acc = 0.0
-
-            sharpe = self._compute_sharpe(y_test, preds)
+            accuracy = float(accuracy_score(y_true, preds))
+            precision = float(precision_score(y_true, preds, zero_division=0))
+            recall = float(recall_score(y_true, preds, zero_division=0))
+            f1 = float(f1_score(y_true, preds, zero_division=0))
+            try:
+                roc_auc = float(roc_auc_score(y_true, probabilities))
+            except ValueError:
+                roc_auc = 0.5
 
             fold_metrics.append({
                 'fold': fold_idx + 1,
-                'rmse': rmse,
-                'mae': mae,
-                'r2': r2,
-                'directional_accuracy': dir_acc,
-                'sharpe_ratio': sharpe,
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'roc_auc': roc_auc,
+                'directional_accuracy': accuracy,
             })
 
         df = pd.DataFrame(fold_metrics)
+
+        summary = {'fold': 'mean_std'}
+        for col in ['accuracy', 'precision', 'recall', 'f1', 'roc_auc', 'directional_accuracy']:
+            summary[col] = f"{df[col].mean():.4f}±{df[col].std():.4f}"
+        df = pd.concat([df, pd.DataFrame([summary])], ignore_index=True)
+
+        logger.info(f"Walk-forward validation complete ({n_splits} folds)")
+        return df
 
         # Append mean ± std summary row
         summary = {'fold': 'mean±std'}
@@ -384,7 +404,8 @@ class ModelTrainer:
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'subsample': trial.suggest_float('subsample', 0.6, 1.0),
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-                'objective': 'reg:squarederror',
+                'objective': 'binary:logistic',
+                'eval_metric': 'logloss',
                 'random_state': 42,
             }
         elif model_type == 'random_forest':
@@ -394,7 +415,7 @@ class ModelTrainer:
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
                 'random_state': 42,
-                'n_jobs': -1,
+                'n_jobs': 1,
             }
         elif model_type == 'lstm':
             return {
@@ -420,10 +441,10 @@ class ModelTrainer:
         gap: int = 5,
     ) -> Tuple[Dict, "optuna.Study"]:
         """
-        Run Optuna hyperparameter optimization maximising Sharpe Ratio.
+        Run Optuna hyperparameter optimization for the next-day direction task.
 
         Each trial samples a set of hyperparameters, runs walk-forward CV
-        over *n_cv_splits* folds, and reports the mean Sharpe across folds.
+        over *n_cv_splits* folds, and reports the mean F1 score across folds.
 
         Parameters
         ----------
@@ -432,7 +453,7 @@ class ModelTrainer:
         X : np.ndarray
             Full feature matrix.
         y : np.ndarray
-            Full target vector (returns).
+            Full target vector (0 = down, 1 = up).
         n_trials : int
             Number of Optuna trials.
         n_cv_splits : int
@@ -447,14 +468,14 @@ class ModelTrainer:
         """
         import optuna
         from sklearn.model_selection import TimeSeriesSplit
-        from sklearn.metrics import mean_squared_error
+        from sklearn.metrics import f1_score
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         def objective(trial):
             params = self._get_search_space(trial, model_type)
             tscv = TimeSeriesSplit(n_splits=n_cv_splits, gap=gap)
-            fold_sharpes: List[float] = []
+            fold_scores: List[float] = []
 
             for train_idx, test_idx in tscv.split(X):
                 X_train, X_test = X[train_idx], X[test_idx]
@@ -472,16 +493,16 @@ class ModelTrainer:
                     model.fit(X_tr, y_tr)
 
                 preds = model.predict(X_test)
-                fold_sharpes.append(self._compute_sharpe(y_test, preds))
+                fold_scores.append(float(f1_score(y_test, preds, zero_division=0)))
 
-            mean_sharpe = float(np.mean(fold_sharpes))
+            mean_score = float(np.mean(fold_scores))
 
             # Report intermediate value for pruning
-            trial.report(mean_sharpe, step=0)
+            trial.report(mean_score, step=0)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-            return mean_sharpe
+            return mean_score
 
         study = optuna.create_study(
             direction='maximize',
@@ -493,7 +514,7 @@ class ModelTrainer:
         best_params = study.best_params
         logger.info(
             f"Optuna HPO complete for {model_type}: "
-            f"best Sharpe={study.best_value:.4f}, "
+            f"best F1={study.best_value:.4f}, "
             f"params={best_params}"
         )
 

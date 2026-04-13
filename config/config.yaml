@@ -101,7 +101,8 @@ models:
       learning_rate: 0.1
       subsample: 0.8
       colsample_bytree: 0.8
-      objective: "reg:squarederror"
+      objective: "binary:logistic"
+      eval_metric: "logloss"
       random_state: 42
 
   random_forest:
@@ -128,7 +129,7 @@ models:
           activation: "relu"
         - type: "dense"
           units: 1
-          activation: "linear"
+          activation: "sigmoid"
 
     training:
       batch_size: 32
@@ -138,7 +139,7 @@ models:
         patience: 10
         restore_best_weights: true
       optimizer: "adam"
-      loss: "mse"
+      loss: "binary_crossentropy"
 
   ensemble:
     method: "weighted_average"
@@ -213,7 +214,7 @@ backtesting:
     - calmar_ratio
     - win_rate
 
-  benchmark: "SPY"
+  benchmark: "^GSPC"
 
 # ================================
 # FRONTEND
