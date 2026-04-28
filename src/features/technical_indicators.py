@@ -54,6 +54,7 @@ def add_trend_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = data['Close']
     
     # Simple Moving Averages
+    data['SMA_5'] = ta.trend.sma_indicator(close, window=5)
     data['SMA_20'] = ta.trend.sma_indicator(close, window=20)
     data['SMA_50'] = ta.trend.sma_indicator(close, window=50)
     data['SMA_200'] = ta.trend.sma_indicator(close, window=200)
@@ -90,6 +91,7 @@ def add_momentum_indicators(df: pd.DataFrame) -> pd.DataFrame:
     
     # RSI
     data['RSI'] = ta.momentum.rsi(close, window=14)
+    data['RSI_14'] = data['RSI']
     
     # Stochastic Oscillator
     stoch = ta.momentum.StochasticOscillator(high, low, close)
@@ -129,6 +131,9 @@ def add_volatility_indicators(df: pd.DataFrame) -> pd.DataFrame:
     data['BB_Low'] = bollinger.bollinger_lband()
     data['BB_Width'] = bollinger.bollinger_wband()
     data['BB_Pband'] = bollinger.bollinger_pband()
+    data['Bollinger_Upper'] = data['BB_High']
+    data['Bollinger_Lower'] = data['BB_Low']
+    data['Bollinger_Bandwidth'] = data['BB_Width']
     
     # Keltner Channel
     keltner = ta.volatility.KeltnerChannel(high, low, close)
@@ -164,8 +169,31 @@ def add_volume_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # VWAP (Volume Weighted Average Price) - simplified
     data['VWAP'] = (volume * (high + low + close) / 3).cumsum() / volume.cumsum()
     
-    # Volume SMA
+    # Volume SMA and change
     data['Volume_SMA_20'] = volume.rolling(window=20).mean()
     data['Volume_Ratio'] = volume / data['Volume_SMA_20']
+    data['Volume_Change'] = volume.replace(0, np.nan).pct_change()
     
+    return data
+
+
+def add_price_action_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add price-action features useful for regression targets."""
+    data = df.copy()
+    close = data['Close']
+
+    # Previous close (lag 1)
+    data['Prev_Close'] = close.shift(1)
+
+    # Price momentum — 10-day
+    data['Price_Momentum'] = close - close.shift(10)
+
+    # Rolling 20-day realised volatility (annualised)
+    daily_ret = close.pct_change()
+    data['Rolling_Volatility'] = daily_ret.rolling(window=20).std() * np.sqrt(252)
+
+    # Lagged returns (already partly covered by create_features, but kept explicit)
+    for lag in [1, 2, 3, 5]:
+        data[f'Lag_Return_{lag}'] = daily_ret.shift(lag)
+
     return data

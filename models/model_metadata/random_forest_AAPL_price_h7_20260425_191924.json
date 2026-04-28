@@ -1,0 +1,99 @@
+{
+  "version_id": "random_forest_AAPL_price_h7_20260425_191924",
+  "model_type": "random_forest",
+  "symbol": "AAPL",
+  "horizon": 7,
+  "training_horizon": 7,
+  "horizons": [
+    7
+  ],
+  "objective": "future_close_price",
+  "target_type": "price_regression",
+  "target_col": "target_7d",
+  "target_columns": [
+    "target_7d",
+    "target_15d",
+    "target_30d",
+    "target_60d"
+  ],
+  "trained_at": "2026-04-25T19:19:24.714739",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 840,
+    "val": 120,
+    "test": 240
+  },
+  "training_rows": 1200,
+  "val_metrics": {
+    "mae": 13.992932319641113,
+    "rmse": 17.430147104260822,
+    "mape": 6.338354110717773,
+    "directional_accuracy": 0.575
+  },
+  "test_metrics": {
+    "mae": 27.68718147277832,
+    "rmse": 31.80158422590522,
+    "mape": 10.814922332763672,
+    "directional_accuracy": 0.5125
+  },
+  "metrics": {
+    "validation": {
+      "mae": 13.992932319641113,
+      "rmse": 17.430147104260822,
+      "mape": 6.338354110717773,
+      "directional_accuracy": 0.575
+    },
+    "test": {
+      "mae": 27.68718147277832,
+      "rmse": 31.80158422590522,
+      "mape": 10.814922332763672,
+      "directional_accuracy": 0.5125
+    }
+  },
+  "params": {},
+  "model_path": "models\\bundles\\AAPL\\random_forest\\7\\model.joblib",
+  "scaler_path": "models\\bundles\\AAPL\\random_forest\\7\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\AAPL\\random_forest\\7\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\AAPL\\random_forest\\7"
+}

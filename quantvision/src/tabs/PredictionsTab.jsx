@@ -1,410 +1,509 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-    LineChart, Line, AreaChart, Area, ComposedChart,
-    XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-    ReferenceLine, ReferenceArea, Legend
+    Area,
+    CartesianGrid,
+    ComposedChart,
+    Line,
+    ReferenceLine,
+    ResponsiveContainer,
+    Tooltip,
+    XAxis,
+    YAxis,
 } from "recharts";
 import { C } from "../utils/data";
-import { fetchPredictions, triggerTraining } from "../utils/api";
-import { ChartTooltip, StatCard, Section } from "../components/UIComponents";
-import TradingViewDetail from "../components/TradingViewDetail";
+import { fetchEnsemblePrediction, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
 
-// Palette of colours for scenario fan paths
-const SCENARIO_COLORS = [
-    "#e8a83855", "#e8a83845", "#e8a83835", "#e8a83830",
-    "#e8a83828", "#e8a83822", "#e8a83820", "#e8a83818",
-    "#e8a83815", "#e8a83812", "#e8a83810", "#e8a83808",
+const HORIZONS = [7, 15, 30, 60];
+const MODEL_OPTIONS = [
+    { value: "all", label: "All Models" },
+    { value: "ensemble", label: "Ensemble" },
+    { value: "lstm", label: "LSTM" },
+    { value: "xgboost", label: "XGBoost" },
+    { value: "random_forest", label: "Random Forest" },
 ];
 
-// Custom Legend for Forecast Charts
-const ForecastLegend = () => {
+const COLORS = {
+    historical: "#9CA3AF",
+    ensemble: "#F5C842",
+    lstm: "#60A5FA",
+    xgboost: "#F59E0B",
+    random_forest: "#34D399",
+    band: "#6366F1",
+    surface: "#161B22",
+    panel: "#0F1623",
+};
+
+const WEIGHT_LABELS = {
+    lstm: "PyTorch LSTM",
+    xgboost: "XGBoost",
+    random_forest: "Random Forest",
+};
+
+const MODEL_LABELS = {
+    historical: "Historical",
+    ensemble: "Ensemble",
+    lstm: "LSTM",
+    xgboost: "XGBoost",
+    random_forest: "Random Forest",
+};
+
+function formatPrice(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+    return `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatPct(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+    return `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
+}
+
+function formatDateLabel(date) {
+    if (typeof date !== "string" || date.length < 10) return date;
+    return date.slice(5).replace("-", "/");
+}
+
+function MetricCard({ label, value, sub, color }) {
     return (
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 16, fontSize: 11, marginBottom: 8 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 12, height: 12, background: C.textDim, borderRadius: 2 }} />
-                <span style={{ color: C.textDim }}>Historical</span>
+        <div style={{
+            background: COLORS.surface,
+            border: `1px solid ${C.border}`,
+            borderRadius: 8,
+            padding: "16px 18px",
+            minHeight: 96,
+            display: "grid",
+            alignContent: "center",
+            gap: 7,
+        }}>
+            <div style={{ fontSize: 11, color: C.textDim, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                {label}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 16, height: 2, background: C.amber }} />
-                <span style={{ color: C.textMid }}>Predicted (Median)</span>
+            <div style={{ fontSize: 24, lineHeight: 1.1, color: color || C.text, fontWeight: 800 }}>
+                {value}
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 12, height: 12, background: C.amber + "10", borderTop: `1px dashed ${C.amber}44`, borderBottom: `1px dashed ${C.amber}44` }} />
-                <span style={{ color: C.textMid }}>90% CI</span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 12, height: 12, background: C.amber + "18" }} />
-                <span style={{ color: C.textMid }}>50% CI</span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 12, height: 3, background: C.amber + "30", borderRadius: 2 }} />
-                <span style={{ color: C.textMid }}>Scenarios</span>
+            {sub && <div style={{ fontSize: 12, color: C.textMid }}>{sub}</div>}
+        </div>
+    );
+}
+
+function TrainButton({ symbol, onComplete }) {
+    const [state, setState] = useState({ loading: false, jobId: null, message: null, error: null });
+    const pollRef = useRef(null);
+
+    async function handleTrain() {
+        setState({ loading: true, jobId: null, message: "Starting ensemble training...", error: null });
+        try {
+            const result = await triggerEnsembleTraining(symbol);
+            const jobId = result?.job_id;
+            setState((s) => ({ ...s, jobId, message: result?.message || "Training started." }));
+
+            pollRef.current = setInterval(async () => {
+                try {
+                    const status = await getEnsembleTrainingStatus(jobId);
+                    if (status.status === "completed") {
+                        clearInterval(pollRef.current);
+                        setState({ loading: false, jobId, message: "Training complete.", error: null });
+                        setTimeout(() => onComplete?.(), 1200);
+                    } else if (status.status === "failed") {
+                        clearInterval(pollRef.current);
+                        setState({ loading: false, jobId, message: null, error: status.error || "Training failed." });
+                    }
+                } catch {
+                    // Keep polling; transient status fetches are common while the API is busy.
+                }
+            }, 3000);
+        } catch (err) {
+            setState({ loading: false, jobId: null, message: null, error: err?.message || "Training request failed." });
+        }
+    }
+
+    useEffect(() => () => clearInterval(pollRef.current), []);
+
+    return (
+        <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
+            <button
+                type="button"
+                onClick={handleTrain}
+                disabled={state.loading}
+                style={{
+                    background: state.loading ? C.bg3 : COLORS.ensemble,
+                    color: state.loading ? C.textDim : "#10131A",
+                    border: "none",
+                    borderRadius: 8,
+                    padding: "9px 16px",
+                    fontSize: 13,
+                    fontWeight: 800,
+                    cursor: state.loading ? "default" : "pointer",
+                }}
+            >
+                {state.loading ? "Training in progress..." : `Train ensemble for ${symbol}`}
+            </button>
+            {state.message && <div style={{ fontSize: 12, color: C.textMid }}>{state.message}</div>}
+            {state.error && <div style={{ fontSize: 12, color: C.red }}>{state.error}</div>}
+        </div>
+    );
+}
+
+function TooltipContent({ active, payload, label }) {
+    if (!active || !payload?.length) return null;
+    const rows = payload
+        .filter((item) => MODEL_LABELS[item.dataKey] && item.value !== null && item.value !== undefined)
+        .map((item) => ({
+            key: item.dataKey,
+            label: MODEL_LABELS[item.dataKey],
+            value: item.value,
+            color: item.color,
+        }));
+    if (!rows.length) return null;
+
+    return (
+        <div style={{
+            background: "#0B101A",
+            border: `1px solid ${C.border}`,
+            borderRadius: 8,
+            padding: "10px 12px",
+            boxShadow: "0 12px 28px rgba(0,0,0,.28)",
+            minWidth: 170,
+        }}>
+            <div style={{ color: C.text, fontWeight: 700, fontSize: 12, marginBottom: 8 }}>{label}</div>
+            <div style={{ display: "grid", gap: 5 }}>
+                {rows.map((row) => (
+                    <div key={row.key} style={{ display: "flex", justifyContent: "space-between", gap: 18, fontSize: 12 }}>
+                        <span style={{ color: row.color }}>{row.label}</span>
+                        <span style={{ color: C.text }}>{formatPrice(row.value)}</span>
+                    </div>
+                ))}
             </div>
         </div>
     );
-};
-
-function formatChartDateLabel(date) {
-    return typeof date === "string" ? date.slice(5) : date;
 }
 
-function formatMetaLabel(value) {
-    if (!value) return "—";
-    return String(value)
-        .replaceAll("_", " ")
-        .replaceAll("-", " ")
-        .replace(/\b\w/g, m => m.toUpperCase());
+function ForecastChart({ priceData, forecastPoints, selectedModel }) {
+    const { chartData, todayDate } = useMemo(() => {
+        const history = (priceData?.bars || []).slice(-60);
+        const rows = [];
+        let boundary = null;
+
+        history.forEach((bar, index) => {
+            const isLast = index === history.length - 1;
+            if (isLast) boundary = bar.date;
+            rows.push({
+                date: bar.date,
+                historical: bar.close,
+                ensemble: isLast && forecastPoints.length ? bar.close : null,
+                lstm: isLast && forecastPoints.length ? bar.close : null,
+                xgboost: isLast && forecastPoints.length ? bar.close : null,
+                random_forest: isLast && forecastPoints.length ? bar.close : null,
+                upper_90: isLast && forecastPoints.length ? bar.close : null,
+                lower_90: isLast && forecastPoints.length ? bar.close : null,
+            });
+        });
+
+        forecastPoints.forEach((point) => {
+            rows.push({
+                date: point.date,
+                historical: null,
+                ensemble: point.ensemble,
+                lstm: point.lstm,
+                xgboost: point.xgboost,
+                random_forest: point.random_forest,
+                upper_90: point.upper_90,
+                lower_90: point.lower_90,
+            });
+        });
+
+        return { chartData: rows, todayDate: boundary };
+    }, [priceData, forecastPoints]);
+
+    const show = (model) => selectedModel === "all" || selectedModel === model;
+
+    return (
+        <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 12, color: C.textMid }}>
+                {[
+                    ["historical", "Historical", null],
+                    ["ensemble", "Ensemble", null],
+                    ["lstm", "LSTM", "5 5"],
+                    ["xgboost", "XGBoost", "5 5"],
+                    ["random_forest", "Random Forest", "5 5"],
+                ].map(([key, label, dash]) => (
+                    <div key={key} style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+                        <span style={{ width: 18, height: 0, borderTop: `3px ${dash ? "dashed" : "solid"} ${COLORS[key]}` }} />
+                        <span>{label}</span>
+                    </div>
+                ))}
+            </div>
+            <ResponsiveContainer width="100%" height={366}>
+                <ComposedChart data={chartData} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+                    <CartesianGrid stroke={C.border} strokeDasharray="3 3" opacity={0.28} vertical={false} />
+                    <XAxis
+                        dataKey="date"
+                        tick={{ fill: C.textDim, fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={formatDateLabel}
+                        minTickGap={22}
+                    />
+                    <YAxis
+                        orientation="right"
+                        tick={{ fill: C.textDim, fontSize: 11 }}
+                        domain={["auto", "auto"]}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `$${Number(value).toFixed(0)}`}
+                    />
+                    <Tooltip content={<TooltipContent />} />
+                    <Area
+                        type="monotone"
+                        dataKey="upper_90"
+                        stroke="none"
+                        fill={COLORS.band}
+                        fillOpacity={0.09}
+                        connectNulls
+                        isAnimationActive={false}
+                        tooltipType="none"
+                    />
+                    <Area
+                        type="monotone"
+                        dataKey="lower_90"
+                        stroke="none"
+                        fill={COLORS.panel}
+                        fillOpacity={1}
+                        connectNulls
+                        isAnimationActive={false}
+                        tooltipType="none"
+                    />
+                    {todayDate && (
+                        <ReferenceLine
+                            x={todayDate}
+                            stroke={C.textDim}
+                            strokeDasharray="4 4"
+                            label={{ value: "Today", position: "top", fill: C.textMid, fontSize: 11 }}
+                        />
+                    )}
+                    <Line type="monotone" dataKey="historical" stroke={COLORS.historical} strokeWidth={2} dot={false} isAnimationActive={false} />
+                    <Line hide={!show("lstm")} type="monotone" dataKey="lstm" stroke={COLORS.lstm} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
+                    <Line hide={!show("xgboost")} type="monotone" dataKey="xgboost" stroke={COLORS.xgboost} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
+                    <Line hide={!show("random_forest")} type="monotone" dataKey="random_forest" stroke={COLORS.random_forest} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
+                    <Line hide={!show("ensemble")} type="monotone" dataKey="ensemble" stroke={COLORS.ensemble} strokeWidth={4} dot={false} connectNulls isAnimationActive={false} />
+                </ComposedChart>
+            </ResponsiveContainer>
+        </div>
+    );
+}
+
+function WeightsPanel({ weights, consensus, signal, reliability }) {
+    const resolved = {
+        lstm: Number(weights?.lstm ?? 0.4),
+        xgboost: Number(weights?.xgboost ?? 0.35),
+        random_forest: Number(weights?.random_forest ?? 0.25),
+    };
+    const signalColor = signal === "Bearish" ? C.red : signal === "Neutral" ? C.amber : C.green;
+
+    return (
+        <div style={{ background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: C.text, marginBottom: 16 }}>Ensemble Weights</div>
+            <div style={{ display: "grid", gap: 13 }}>
+                {["lstm", "xgboost", "random_forest"].map((key) => {
+                    const pct = Math.round(resolved[key] * 100);
+                    return (
+                        <div key={key} style={{ display: "grid", gridTemplateColumns: "128px 1fr 44px", alignItems: "center", gap: 12 }}>
+                            <div style={{ color: C.textMid, fontSize: 12, fontWeight: 700 }}>{WEIGHT_LABELS[key]}</div>
+                            <div style={{ height: 10, background: "#0A0F18", borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.05)" }}>
+                                <div style={{ width: `${pct}%`, height: "100%", background: COLORS[key] }} />
+                            </div>
+                            <div style={{ color: C.text, fontSize: 12, fontWeight: 800, textAlign: "right" }}>{pct}%</div>
+                        </div>
+                    );
+                })}
+            </div>
+            <div style={{ marginTop: 18, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
+                <div style={{ color: signalColor, fontSize: 13, fontWeight: 800 }}>
+                    {consensus || `${reliability || "Medium"} reliability`}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function ForecastTable({ rows }) {
+    const tableRows = (rows || []).slice(0, 7);
+    return (
+        <div style={{ background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620, fontSize: 12 }}>
+                <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <th style={{ color: C.textDim, textAlign: "left", padding: "0 10px 10px 0", fontWeight: 800 }}>DATE</th>
+                        <th style={{ color: COLORS.ensemble, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>ENSEMBLE</th>
+                        <th style={{ color: COLORS.lstm, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>LSTM</th>
+                        <th style={{ color: COLORS.xgboost, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>XGBOOST</th>
+                        <th style={{ color: COLORS.random_forest, textAlign: "right", padding: "0 0 10px 10px", fontWeight: 800 }}>RF</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {tableRows.map((row) => (
+                        <tr key={row.date} style={{ borderBottom: "1px solid rgba(255,255,255,.055)" }}>
+                            <td style={{ color: C.textMid, padding: "10px 10px 10px 0", fontVariantNumeric: "tabular-nums" }}>{row.date}</td>
+                            <td style={{ color: COLORS.ensemble, textAlign: "right", padding: "10px", fontWeight: 800 }}>{formatPrice(row.ensemble)}</td>
+                            <td style={{ color: COLORS.lstm, textAlign: "right", padding: "10px" }}>{formatPrice(row.lstm)}</td>
+                            <td style={{ color: COLORS.xgboost, textAlign: "right", padding: "10px" }}>{formatPrice(row.xgboost)}</td>
+                            <td style={{ color: COLORS.random_forest, textAlign: "right", padding: "10px 0 10px 10px" }}>{formatPrice(row.random_forest)}</td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
 }
 
 export default function PredictionsTab({ selectedTicker, apiConnected, priceData }) {
-    const [showDetails, setShowDetails] = useState(false);
     const [horizon, setHorizon] = useState(30);
-    const [modelType, setModelType] = useState("xgboost");
-    const [predData, setPredData] = useState(null);
+    const [selectedModel, setSelectedModel] = useState("all");
+    const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
-    const [showScenarios, setShowScenarios] = useState(true);
-    const [trainingState, setTrainingState] = useState({ loading: false, message: null, error: null });
+    const [refreshKey, setRefreshKey] = useState(0);
 
     useEffect(() => {
         if (!apiConnected) return;
-        setLoading(true); setError(null);
-        setTrainingState(prev => ({ ...prev, error: null }));
-        fetchPredictions(selectedTicker, modelType, horizon)
-            .then(d => { setPredData(d); setLoading(false); })
-            .catch(e => { setError(e.message); setLoading(false); });
-    }, [selectedTicker, modelType, horizon, apiConnected]);
-
-    async function handleTrainModel() {
-        setTrainingState({ loading: true, message: null, error: null });
-        try {
-            const result = await triggerTraining({
-                symbol: selectedTicker,
-                model_type: modelType,
-                horizons: [1, 7, 15, 30, 60],
+        setLoading(true);
+        setError(null);
+        fetchEnsemblePrediction(selectedTicker, horizon)
+            .then((payload) => {
+                setData(payload);
+                setLoading(false);
+            })
+            .catch((err) => {
+                setError(err?.message || "Forecast request failed.");
+                setLoading(false);
             });
-            setTrainingState({
-                loading: false,
-                message: result?.message || `Training started for ${selectedTicker} ${modelType}.`,
-                error: null,
-            });
-        } catch (trainError) {
-            setTrainingState({
-                loading: false,
-                message: null,
-                error: trainError?.message || "Unable to start training.",
-            });
-        }
-    }
+    }, [selectedTicker, horizon, apiConnected, refreshKey]);
 
     if (!apiConnected) {
-        return <div style={{ textAlign: "center", padding: 60, color: C.textDim }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>🔌</div>
-            <div>Connect to API server for predictions</div>
-        </div>;
-    }
-    if (loading) return <div style={{ textAlign: "center", padding: 60, color: C.textDim }}>Loading predictions...</div>;
-
-    const forecasts = predData?.forecasts || [];
-    const currentPrice = predData?.current_price || 0;
-    const lastPred = forecasts[forecasts.length - 1] || {};
-    const predChange = lastPred.predicted ? ((lastPred.predicted - currentPrice) / currentPrice * 100) : 0;
-    const modelInfo = predData?.model_info || {};
-    const scenarioPaths = predData?.scenario_paths || [];
-    const hasForecasts = forecasts.length > 0;
-    const canTrain = Boolean(predData?.can_train ?? modelInfo.can_train);
-    const requestedModelLabel = formatMetaLabel(modelInfo.requested_model || modelType);
-    const servingModelLabel = formatMetaLabel(modelInfo.serving_model || modelType);
-    const forecastEngineLabel = formatMetaLabel(modelInfo.forecast_engine || modelInfo.method);
-    const uncertaintyLabel = formatMetaLabel(modelInfo.uncertainty_method);
-    const artifactSourceLabel = formatMetaLabel(modelInfo.artifact_source || modelInfo.source);
-    const unavailableMessage = !error && !hasForecasts && modelInfo.status === "unavailable"
-        ? (predData?.message || modelInfo.message || `No trained ${modelType} bundle found for ${selectedTicker}.`)
-        : null;
-
-    // Build seamless chart dataset
-    // 1. Take last 60 historical bars if available
-    // 2. Append forecasts with scenario path data merged in
-    const historyBars = priceData?.bars?.slice(-60) || [];
-    const chartData = [];
-
-    let forecastBoundaryDate = null;
-
-    // Process history
-    historyBars.forEach((b, index) => {
-        const isLastHistoryBar = index === historyBars.length - 1;
-        const shouldBridgeForecast = isLastHistoryBar && forecasts.length > 0;
-        const point = {
-            date: b.date,
-            historical: b.close,
-            predicted: shouldBridgeForecast ? b.close : null,
-            upper95: shouldBridgeForecast ? b.close : null,
-            lower95: shouldBridgeForecast ? b.close : null,
-            upper68: shouldBridgeForecast ? b.close : null,
-            lower68: shouldBridgeForecast ? b.close : null,
-        };
-        // Scenario paths: set starting price at bridge point
-        if (shouldBridgeForecast && scenarioPaths.length > 0) {
-            scenarioPaths.forEach((_, si) => {
-                point[`s${si}`] = b.close;
-            });
-        }
-        chartData.push(point);
-    });
-
-    // Keep a boundary marker
-    if (historyBars.length > 0 && forecasts.length > 0) {
-        const lastHist = historyBars[historyBars.length - 1];
-        forecastBoundaryDate = lastHist.date;
+        return (
+            <div style={{ padding: 48, color: C.textDim, textAlign: "center" }}>
+                Connect to the API server to view predictions.
+            </div>
+        );
     }
 
-    // Process forecast — merge scenario path values into chart data
-    forecasts.forEach((f, i) => {
-        const fd = f.date || `forecast-${i + 1}`;
-        if (!forecastBoundaryDate && i === 0) forecastBoundaryDate = fd;
-        const point = {
-            date: fd,
-            historical: null,
-            predicted: f.predicted,
-            upper95: f.upper95,
-            lower95: f.lower95,
-            upper68: f.upper68,
-            lower68: f.lower68,
-        };
-        // Scenario paths: each path[si] has values [startPrice, step1, step2, ...]
-        // so path index i+1 corresponds to step i (index 0 is the starting price)
-        if (scenarioPaths.length > 0) {
-            scenarioPaths.forEach((path, si) => {
-                point[`s${si}`] = path[i + 1] != null ? path[i + 1] : null;
-            });
-        }
-        chartData.push(point);
-    });
-
-    if (showDetails) {
-        return <TradingViewDetail symbol={selectedTicker} mode="prediction" predictionData={predData} onClose={() => setShowDetails(false)} />;
-    }
+    const currentPrice = data?.current_price ?? priceData?.bars?.[priceData.bars.length - 1]?.close;
+    const ensemble = data?.ensemble;
+    const modelUnavailable = data?.status === "unavailable" || data?.model_available === false;
+    const bullish = Number(ensemble?.change_pct || 0) >= 0;
+    const reliabilityColor = ensemble?.reliability === "Low" ? C.red : ensemble?.reliability === "Medium" ? C.amber : C.green;
 
     return (
-        <div className="fade-up">
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-                <div>
-                    <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text }}>
-                        🤖 AI Price Forecast — {selectedTicker}
-                    </h1>
-                    <div style={{ fontSize: 11, color: C.textDim, marginTop: 4 }}>
-                        Requested: {requestedModelLabel} · Serving: {servingModelLabel} · Source: {artifactSourceLabel}
-                        {modelInfo.n_scenarios ? ` · ${modelInfo.n_scenarios} scenarios` : ""}
-                    </div>
+        <div style={{ display: "grid", gap: 18, paddingBottom: 36 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "end" }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ color: C.textDim, fontSize: 12, fontWeight: 800, letterSpacing: "0.06em", textTransform: "uppercase" }}>Predictions</div>
+                    <div style={{ color: C.text, fontSize: 25, fontWeight: 900, lineHeight: 1 }}>{selectedTicker}</div>
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                    <select value={modelType} onChange={e => setModelType(e.target.value)} style={{
-                        background: C.bg2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6,
-                        padding: "6px 12px", fontSize: 11, fontFamily: "'DM Mono',monospace",
-                    }}>
-                        <option value="xgboost">XGBoost</option>
-                        <option value="random_forest">Random Forest</option>
-                        <option value="lstm">LSTM (PyTorch)</option>
-                    </select>
-                    {[7, 15, 30, 60].map(h => (
-                        <button key={h} onClick={() => setHorizon(h)} style={{
-                            background: horizon === h ? C.amber : C.bg2, color: horizon === h ? "#000" : C.textMid,
-                            border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11, cursor: "pointer", fontWeight: 700,
-                        }}>{h}D</button>
-                    ))}
-
-                    {/* Scenario paths toggle */}
-                    {scenarioPaths.length > 0 && (
-                        <button
-                            onClick={() => setShowScenarios(!showScenarios)}
-                            style={{
-                                background: showScenarios ? C.amber + "33" : C.bg2,
-                                color: showScenarios ? C.amber : C.textMid,
-                                border: `1px solid ${showScenarios ? C.amber + "66" : C.border}`,
-                                borderRadius: 6, padding: "6px 12px", fontSize: 10, cursor: "pointer",
-                                fontWeight: 600, fontFamily: "'DM Mono',monospace",
-                            }}
-                        >
-                            {showScenarios ? "◉" : "○"} Scenarios
-                        </button>
-                    )}
-
-                    <button
-                        onClick={() => setShowDetails(true)}
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                    <select
+                        value={selectedModel}
+                        onChange={(event) => setSelectedModel(event.target.value)}
                         style={{
-                            background: C.bg3, color: C.text, border: `1px solid ${C.border}`,
-                            borderRadius: 6, padding: "6px 14px", cursor: "pointer", marginLeft: 16,
-                            fontWeight: 700, fontSize: 11, fontFamily: "'Syne',sans-serif",
-                            display: "flex", alignItems: "center", gap: 6, transition: "all .15s"
+                            background: COLORS.surface,
+                            color: C.text,
+                            border: `1px solid ${C.border}`,
+                            borderRadius: 8,
+                            padding: "8px 10px",
+                            fontSize: 13,
+                            fontWeight: 700,
+                            outline: "none",
                         }}
                     >
-                        <span>📈</span> Chart Details
-                    </button>
-                </div>
-            </div>
-
-            {error && <div style={{ background: C.red + "22", color: C.red, padding: 12, borderRadius: 8, marginBottom: 16, fontSize: 12 }}>{error}</div>}
-            {unavailableMessage && (
-                <div style={{
-                    background: C.amber + "15",
-                    border: `1px solid ${C.amber}44`,
-                    color: C.amber,
-                    padding: 12,
-                    borderRadius: 8,
-                    marginBottom: 16,
-                    fontSize: 12,
-                }}>
-                    <div>{unavailableMessage}</div>
-                    {canTrain && (
-                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                        {MODEL_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                    </select>
+                    <div style={{ display: "inline-flex", background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 3, gap: 3 }}>
+                        {HORIZONS.map((days) => (
                             <button
-                                onClick={handleTrainModel}
-                                disabled={trainingState.loading}
+                                key={days}
+                                type="button"
+                                onClick={() => setHorizon(days)}
                                 style={{
-                                    background: C.amber,
-                                    color: "#000",
+                                    background: horizon === days ? COLORS.ensemble : "transparent",
+                                    color: horizon === days ? "#10131A" : C.textMid,
                                     border: "none",
                                     borderRadius: 6,
                                     padding: "7px 12px",
-                                    fontSize: 11,
-                                    cursor: trainingState.loading ? "default" : "pointer",
-                                    fontWeight: 700,
+                                    minWidth: 42,
+                                    fontSize: 12,
+                                    fontWeight: 900,
+                                    cursor: "pointer",
                                 }}
                             >
-                                {trainingState.loading ? "Starting Training..." : `Train ${requestedModelLabel}`}
+                                {days}D
                             </button>
-                            {trainingState.message && <span style={{ color: C.textMid }}>{trainingState.message}</span>}
-                            {trainingState.error && <span style={{ color: C.red }}>{trainingState.error}</span>}
-                        </div>
-                    )}
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            {loading && (
+                <div style={{ padding: 46, color: C.textDim, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, textAlign: "center" }}>
+                    Loading forecast...
                 </div>
             )}
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
-                <StatCard
-                    label="REQUESTED MODEL"
-                    value={requestedModelLabel}
-                    sub={`Serving ${servingModelLabel}`}
-                    color={C.text}
-                />
-                <StatCard
-                    label="FORECAST ENGINE"
-                    value={forecastEngineLabel}
-                    sub={uncertaintyLabel}
-                    color={C.amber}
-                />
-                <StatCard
-                    label="ARTIFACT SOURCE"
-                    value={artifactSourceLabel}
-                    sub={modelInfo.bundle_version || "No bundle version"}
-                    color={C.textMid}
-                />
-                <StatCard
-                    label="BUNDLE STATUS"
-                    value={modelInfo.model_available === false ? "Missing" : "Ready"}
-                    sub={modelInfo.trained_at ? `Trained ${String(modelInfo.trained_at).slice(0, 10)}` : "Awaiting bundle"}
-                    color={modelInfo.model_available === false ? C.red : C.green}
-                />
-            </div>
-
-            {/* Stats */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginBottom: 20 }}>
-                <StatCard label="CURRENT" value={`$${currentPrice.toFixed(2)}`} sub="Last close" color={C.text} />
-                <StatCard label={`${horizon}D TARGET`} value={lastPred.predicted ? `$${lastPred.predicted.toFixed(2)}` : "—"}
-                    sub={`${predChange >= 0 ? "+" : ""}${predChange.toFixed(2)}%`} color={predChange >= 0 ? C.green : C.red} />
-                <StatCard label="UPPER 95%" value={lastPred.upper95 ? `$${lastPred.upper95.toFixed(2)}` : "—"} sub="Bull case" color={C.green} />
-                <StatCard label="LOWER 95%" value={lastPred.lower95 ? `$${lastPred.lower95.toFixed(2)}` : "—"} sub="Bear case" color={C.red} />
-            </div>
-
-            {/* Forecast chart */}
-            <Section title={`FORECAST — ${horizon} Day Horizon`}>
-                <ResponsiveContainer width="100%" height={400}>
-                    <ComposedChart data={chartData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                        <XAxis dataKey="date" tick={{ fill: C.textDim, fontSize: 10 }} tickFormatter={formatChartDateLabel} />
-                        <YAxis tick={{ fill: C.textDim, fontSize: 10 }} domain={["auto", "auto"]} tickFormatter={v => `$${v}`} />
-                        <Tooltip content={<ChartTooltip />} />
-                        <Legend verticalAlign="top" height={36} content={<ForecastLegend />} />
-
-                        {forecastBoundaryDate && (
-                            <ReferenceLine x={forecastBoundaryDate} stroke={C.border} strokeDasharray="3 3"
-                                label={{ value: "Forecast Start", fill: C.textDim, fontSize: 10, position: "insideTopLeft", dy: 10 }} />
-                        )}
-                        {forecastBoundaryDate && (
-                            <ReferenceArea x1={forecastBoundaryDate} fill={C.amber} fillOpacity={0.03} />
-                        )}
-
-                        {/* Confidence band fills */}
-                        <Area type="monotone" dataKey="upper95" stroke="none" fill={C.amber + "10"} isAnimationActive={false} />
-                        <Area type="monotone" dataKey="lower95" stroke="none" fill={C.bg1} isAnimationActive={false} />
-                        <Area type="monotone" dataKey="upper68" stroke="none" fill={C.amber + "18"} isAnimationActive={false} />
-                        <Area type="monotone" dataKey="lower68" stroke="none" fill={C.bg1} isAnimationActive={false} />
-
-                        {/* Scenario fan paths — thin semi-transparent lines */}
-                        {showScenarios && scenarioPaths.map((_, si) => (
-                            <Line
-                                key={`scenario-${si}`}
-                                type="monotone"
-                                dataKey={`s${si}`}
-                                stroke={SCENARIO_COLORS[si % SCENARIO_COLORS.length]}
-                                strokeWidth={1}
-                                dot={false}
-                                isAnimationActive={false}
-                                connectNulls={false}
-                            />
-                        ))}
-
-                        {/* Confidence band outlines */}
-                        <Line type="monotone" dataKey="upper95" stroke={C.amber + "44"} strokeWidth={1} dot={false} strokeDasharray="4 4" isAnimationActive={false} />
-                        <Line type="monotone" dataKey="lower95" stroke={C.amber + "44"} strokeWidth={1} dot={false} strokeDasharray="4 4" isAnimationActive={false} />
-
-                        {/* Main lines */}
-                        <Line type="monotone" dataKey="historical" stroke={C.textDim} strokeWidth={2} dot={false} isAnimationActive={false} />
-                        <Line type="monotone" dataKey="predicted" stroke={C.amber} strokeWidth={2.5} dot={false} isAnimationActive={false} />
-                    </ComposedChart>
-                </ResponsiveContainer>
-                {!hasForecasts && (
-                    <div style={{ marginTop: 10, color: C.textDim, fontSize: 11 }}>
-                        No forecast points were returned for this ticker and model selection.
-                    </div>
-                )}
-            </Section>
-
-            {/* Forecast Details Table */}
-            <Section title="FORECAST BREAKDOWN">
-                <div style={{ maxHeight: 300, overflowY: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                        <thead>
-                            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                                {["Date", "Predicted", "Lower 95%", "Upper 95%", "Range"].map(h => (
-                                    <th key={h} style={{ padding: "8px 12px", color: C.textDim, textAlign: "right", fontWeight: 400 }}>{h}</th>
-                                ))}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {!hasForecasts && (
-                                <tr>
-                                    <td colSpan={5} style={{ padding: "16px 12px", color: C.textDim, textAlign: "center" }}>
-                                        No forecast rows returned by the API.
-                                    </td>
-                                </tr>
-                            )}
-                            {forecasts.map((f, i) => (
-                                <tr key={i} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                                    <td style={{ padding: "6px 12px", color: C.textMid }}>{f.date}</td>
-                                    <td style={{ padding: "6px 12px", color: C.amber, textAlign: "right", fontWeight: 700 }}>${f.predicted.toFixed(2)}</td>
-                                    <td style={{ padding: "6px 12px", color: C.red, textAlign: "right" }}>${f.lower95.toFixed(2)}</td>
-                                    <td style={{ padding: "6px 12px", color: C.green, textAlign: "right" }}>${f.upper95.toFixed(2)}</td>
-                                    <td style={{ padding: "6px 12px", color: C.textDim, textAlign: "right" }}>
-                                        ${(f.upper95 - f.lower95).toFixed(2)}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+            {!loading && error && (
+                <div style={{ padding: 18, color: C.red, background: "rgba(244,63,94,.08)", border: "1px solid rgba(244,63,94,.35)", borderRadius: 8 }}>
+                    {error}
                 </div>
-            </Section>
+            )}
+
+            {!loading && !error && modelUnavailable && (
+                <div style={{ padding: 28, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, display: "grid", gap: 16 }}>
+                    <div>
+                        <div style={{ color: C.text, fontSize: 18, fontWeight: 900, marginBottom: 6 }}>Ensemble models not trained</div>
+                        <div style={{ color: C.textMid, fontSize: 13 }}>{data?.message || `Train the LSTM, XGBoost, and Random Forest ensemble for ${selectedTicker}.`}</div>
+                    </div>
+                    <TrainButton symbol={selectedTicker} onComplete={() => setRefreshKey((key) => key + 1)} />
+                </div>
+            )}
+
+            {!loading && !error && !modelUnavailable && ensemble && (
+                <>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                        <MetricCard label="Current" value={formatPrice(currentPrice)} />
+                        <MetricCard
+                            label="Ensemble Forecast"
+                            value={formatPrice(ensemble.target)}
+                            sub={`${formatPct(ensemble.change_pct)} ${ensemble.signal || ""} | ${ensemble.reliability} reliability`}
+                            color={bullish ? COLORS.ensemble : C.red}
+                        />
+                        <MetricCard label="Bull 90%" value={formatPrice(ensemble.upper_90)} color={C.green} />
+                        <MetricCard label="Bear 90%" value={formatPrice(ensemble.lower_90)} color={C.red} />
+                    </div>
+
+                    <ForecastChart
+                        priceData={priceData}
+                        forecastPoints={(data.forecast_points || []).slice(0, horizon)}
+                        selectedModel={selectedModel}
+                    />
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14, alignItems: "start" }}>
+                        <WeightsPanel
+                            weights={data.weights}
+                            consensus={ensemble.consensus}
+                            signal={ensemble.signal}
+                            reliability={ensemble.reliability}
+                        />
+                        <div style={{ display: "grid", gap: 10 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                                <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>Forecast Table</div>
+                                <div style={{ color: reliabilityColor, fontSize: 12, fontWeight: 800 }}>
+                                    {ensemble.reliability} Reliability
+                                </div>
+                            </div>
+                            <ForecastTable rows={data.forecast_points || []} />
+                        </div>
+                    </div>
+                </>
+            )}
         </div>
     );
 }
-

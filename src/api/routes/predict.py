@@ -15,7 +15,29 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
-from src.api.schemas.schemas import ForecastPoint, HistoricalSignal, PredictRequest, PredictResponse
+from src.api.schemas.schemas import (
+    ForecastPoint,
+    HistoricalSignal,
+    PredictRequest,
+    PredictResponse,
+    EnsemblePredictRequest,
+    EnsemblePredictResponse,
+    EnsembleTrainRequest,
+    EnsembleSummary,
+    EnsembleForecastPoint,
+)
+from src.models.ensemble_predictor import EnsemblePricePredictor, ensemble_bundles_available
+from src.api.schemas.schemas import BaseModel
+class TrainStatus(BaseModel):
+    job_id: str
+    status: str
+    error: Optional[str] = None
+    progress: float = 0.0
+    metrics: Optional[Dict] = None
+
+import threading
+import uuid
+_ensemble_jobs: Dict[str, TrainStatus] = {}
 from src.features.feature_engineering import build_feature_frame, transform_feature_frame
 from src.models.direction_utils import (
     BUY_PROBABILITY_THRESHOLD,
@@ -33,7 +55,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 
-LOOKBACK_DAYS = 900
+LOOKBACK_DAYS = 1825
 N_SCENARIOS = 50       # Monte Carlo paths
 N_DISPLAY_PATHS = 12   # scenario lines sent to the frontend
 
@@ -47,10 +69,17 @@ def _download_prediction_data(symbol: str) -> pd.DataFrame:
 
     end = pd.Timestamp.utcnow().tz_localize(None).normalize()
     start = end - pd.Timedelta(days=LOOKBACK_DAYS)
-    df = yf.download(symbol, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"), progress=False)
+    df = yf.download(
+        symbol,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        auto_adjust=False,
+        progress=False,
+        prepost=True,
+    )
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df = df.sort_index()
+    df = df.sort_index().ffill().dropna().ffill().dropna()
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
     return df
@@ -275,7 +304,7 @@ def _make_forecast_point(date: pd.Timestamp, predicted_price: float, price_uncer
 
 
 # ---------------------------------------------------------------------------
-# Monte Carlo recursive forecast  (NEW — replaces old single-path approach)
+# Monte Carlo recursive forecast  (NEW â€” replaces old single-path approach)
 # ---------------------------------------------------------------------------
 
 def _monte_carlo_recursive_forecast(
@@ -311,17 +340,17 @@ def _monte_carlo_recursive_forecast(
     forecasts: List[ForecastPoint] = []
 
     for step_idx, forecast_date in enumerate(forecast_dates):
-        # 1 — Run the model ONCE on the current rolling history
+        # 1 â€” Run the model ONCE on the current rolling history
         feature_frame = build_feature_frame(rolling_history, feature_config=bundle.feature_config)
         pred_return, step_rmse = _predict_return_from_bundle(bundle, feature_frame)
 
-        # 2 — Sample per-scenario noise and advance each path
+        # 2 â€” Sample per-scenario noise and advance each path
         noise = rng.normal(0, step_rmse, size=n_scenarios)
         scenario_returns = pred_return + noise
         scenario_prices = scenario_prices * (1 + scenario_returns)
         price_paths[:, step_idx] = scenario_prices
 
-        # 3 — Compute percentile-based statistics across all scenarios
+        # 3 â€” Compute percentile-based statistics across all scenarios
         p5 = float(np.percentile(scenario_prices, 5))
         p25 = float(np.percentile(scenario_prices, 25))
         p50 = float(np.percentile(scenario_prices, 50))  # median
@@ -337,7 +366,7 @@ def _monte_carlo_recursive_forecast(
             lower68=round(p25, 2),
         ))
 
-        # 4 — Use the median price to grow the rolling history for the next step
+        # 4 â€” Use the median price to grow the rolling history for the next step
         median_price = p50
         future_row = _synthetic_future_row(rolling_history, forecast_date, median_price)
         rolling_history = pd.concat([rolling_history, future_row])
@@ -365,39 +394,28 @@ async def predict(req: PredictRequest):
     """Run next-day direction inference using trained symbol/model bundles."""
     symbol = req.symbol.upper()
     model_type = req.model_type.value
+    requested_horizon = int(req.horizon)
     raw_df = _download_prediction_data(symbol)
     current_price = float(raw_df["Close"].iloc[-1])
 
     bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+
     if bundle is None:
-        message = f"No trained {model_type} bundle found for {symbol}"
-        model_info = _build_model_info(
-            symbol=symbol,
-            requested_model=model_type,
-            bundle=None,
-            available=False,
-            reason="missing_bundle",
-            message=message,
-        )
-        return PredictResponse(
-            symbol=symbol,
-            model_type=model_type,
-            horizon=NEXT_DAY_HORIZON,
-            current_price=round(current_price, 2),
-            direction=None,
-            signal=None,
-            confidence=None,
-            probability_up=None,
-            probability_down=None,
-            expected_move=None,
-            prediction_date=None,
-            model_info=model_info,
-            status="unavailable",
-            model_available=False,
-            reason="missing_bundle",
-            message=message,
-            can_train=True,
-        )
+        logger.info(f"Missing bundle for {symbol} ({model_type}). Attempting auto-retrain...")
+        try:
+            from src.models.ensemble_training import train_ensemble_for_symbol
+            train_ensemble_for_symbol(
+                symbol=symbol,
+                horizons=[NEXT_DAY_HORIZON],
+                model_types=[model_type],
+                lookback_days=1825,
+            )
+            bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+        except Exception as e:
+            logger.error(f"Auto-retrain failed: {e}")
+
+    if bundle is None:
+        raise HTTPException(status_code=400, detail="Prediction model not available. Please train or load model bundle.")
 
     legacy_message = _validate_bundle_objective(bundle)
     if legacy_message:
@@ -412,7 +430,7 @@ async def predict(req: PredictRequest):
         return PredictResponse(
             symbol=symbol,
             model_type=model_type,
-            horizon=NEXT_DAY_HORIZON,
+            horizon=requested_horizon,
             current_price=round(current_price, 2),
             direction=None,
             signal=None,
@@ -435,34 +453,57 @@ async def predict(req: PredictRequest):
         probabilities = _predict_bundle_probabilities(bundle, feature_frame)
         prob_up = float(probability_up(probabilities)[0])
     except ValueError as exc:
-        message = str(exc)
-        model_info = _build_model_info(
-            symbol=symbol,
-            requested_model=model_type,
-            bundle=bundle,
-            available=False,
-            reason="insufficient_inference_history",
-            message=message,
-        )
-        return PredictResponse(
-            symbol=symbol,
-            model_type=model_type,
-            horizon=NEXT_DAY_HORIZON,
-            current_price=round(current_price, 2),
-            direction=None,
-            signal=None,
-            confidence=None,
-            probability_up=None,
-            probability_down=None,
-            expected_move=None,
-            prediction_date=None,
-            model_info=model_info,
-            status="unavailable",
-            model_available=False,
-            reason="insufficient_inference_history",
-            message=message,
-            can_train=True,
-        )
+        # Legacy bundle feature mismatch. Auto-retrain!
+        logger.info(f"Feature mismatch for {symbol} ({model_type}): {exc}. Attempting auto-retrain...")
+        try:
+            from src.models.bundle_training import train_model_bundles
+            import shutil
+            import os
+            bundle_path = os.path.join("models", "bundles", symbol, model_type)
+            if os.path.exists(bundle_path):
+                shutil.rmtree(bundle_path)
+            
+            train_model_bundles(
+                symbol=symbol,
+                model_type=model_type,
+                horizons=[NEXT_DAY_HORIZON],
+                lookback_days=1825,
+            )
+            bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+            if bundle is None:
+                raise ValueError("Retrained bundle failed to load")
+            feature_frame = build_feature_frame(raw_df, feature_config=bundle.feature_config)
+            probabilities = _predict_bundle_probabilities(bundle, feature_frame)
+            prob_up = float(probability_up(probabilities)[0])
+        except Exception as retry_exc:
+            message = str(retry_exc)
+            model_info = _build_model_info(
+                symbol=symbol,
+                requested_model=model_type,
+                bundle=bundle,
+                available=False,
+                reason="insufficient_inference_history",
+                message=message,
+            )
+            return PredictResponse(
+                symbol=symbol,
+                model_type=model_type,
+                horizon=requested_horizon,
+                current_price=round(current_price, 2),
+                direction=None,
+                signal=None,
+                confidence=None,
+                probability_up=None,
+                probability_down=None,
+                expected_move=None,
+                prediction_date=None,
+                model_info=model_info,
+                status="unavailable",
+                model_available=False,
+                reason="insufficient_inference_history",
+                message=message,
+                can_train=True,
+            )
 
     model_info = _build_model_info(
         symbol=symbol,
@@ -472,11 +513,22 @@ async def predict(req: PredictRequest):
     )
 
     prob_down = float(1.0 - prob_up)
+    forecasts: List[ForecastPoint] = []
+    scenario_paths: Optional[List[List[float]]] = None
+    try:
+        forecasts, scenario_paths = _monte_carlo_recursive_forecast(
+            bundle,
+            raw_df,
+            requested_horizon,
+            current_price,
+        )
+    except Exception as exc:
+        logger.warning("Could not build recursive forecast for %s %s: %s", symbol, model_type, exc)
 
     return PredictResponse(
         symbol=symbol,
         model_type=model_type,
-        horizon=NEXT_DAY_HORIZON,
+        horizon=requested_horizon,
         current_price=round(current_price, 2),
         direction=direction_from_probability(prob_up),
         signal=signal_from_probability(prob_up),
@@ -485,10 +537,12 @@ async def predict(req: PredictRequest):
         probability_down=round(prob_down, 4),
         expected_move=expected_move_from_probability(prob_up),
         prediction_date=_next_business_date(raw_df.index[-1]),
+        forecasts=forecasts,
         model_info=model_info,
         status="ok",
         model_available=True,
         can_train=True,
+        scenario_paths=scenario_paths,
     )
 
 
@@ -536,3 +590,133 @@ async def get_historical_signals(
         )
 
     return signals
+
+# ---------------------------------------------------------------------------
+# POST /api/predict/ensemble  â€” weighted ensemble price regression forecast
+# ---------------------------------------------------------------------------
+
+@router.post("/ensemble", response_model=EnsemblePredictResponse)
+async def ensemble_predict(req: EnsemblePredictRequest):
+    """
+    Run the weighted ensemble price-regression forecast.
+    """
+    symbol = req.symbol.upper()
+    horizon = req.horizon
+
+    try:
+        raw_df = _download_prediction_data(symbol)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to download data for {symbol}: {exc}")
+
+    current_price = float(raw_df["Close"].iloc[-1])
+
+    if not ensemble_bundles_available(symbol, horizon):
+        return EnsemblePredictResponse(
+            symbol=symbol,
+            current_price=round(current_price, 2),
+            horizon=horizon,
+            status="unavailable",
+            model_available=False,
+            message=f"No complete XGBoost + Random Forest + LSTM ensemble is trained for {symbol}.",
+        )
+
+    predictor = EnsemblePricePredictor()
+    forecast = predictor.predict(symbol=symbol, horizon=horizon, raw_df=raw_df)
+
+    if forecast is None:
+        return EnsemblePredictResponse(
+            symbol=symbol,
+            current_price=round(current_price, 2),
+            horizon=horizon,
+            status="error",
+            model_available=False,
+            message="Ensemble prediction failed - check server logs.",
+        )
+
+    points = []
+    for p in forecast.forecast_points:
+        points.append(
+            EnsembleForecastPoint(
+                date=p["date"],
+                ensemble=p.get("predicted", 0.0),
+                lstm=p.get("lstm"),
+                xgboost=p.get("xgboost"),
+                random_forest=p.get("random_forest"),
+                upper_90=p.get("upper", 0.0),
+                lower_90=p.get("lower", 0.0)
+            )
+        )
+
+    summary = EnsembleSummary(
+        target=forecast.predicted_price,
+        change_pct=forecast.expected_change_pct,
+        upper_90=forecast.confidence_interval["upper"] if forecast.confidence_interval else forecast.predicted_price,
+        lower_90=forecast.confidence_interval["lower"] if forecast.confidence_interval else forecast.predicted_price,
+        reliability=forecast.reliability,
+        consensus=forecast.reason,
+        signal=forecast.signal,
+    )
+
+    weights_dict = {r.model_type: r.weight for r in forecast.model_predictions}
+
+    return EnsemblePredictResponse(
+        symbol=forecast.symbol,
+        current_price=forecast.current_price,
+        horizon=forecast.horizon,
+        ensemble=summary,
+        weights=weights_dict,
+        forecast_points=points,
+        status="ok",
+        model_available=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/predict/ensemble/train  â€” async ensemble training trigger
+# ---------------------------------------------------------------------------
+
+def _run_ensemble_training(job_id: str, req: EnsembleTrainRequest):
+    from src.models.ensemble_training import train_ensemble_for_symbol
+    job = _ensemble_jobs[job_id]
+    job.status = "running"
+    job.progress = 0.05
+    try:
+        def _cb(done, total):
+            job.progress = 0.05 + 0.9 * (done / max(total, 1))
+
+        result = train_ensemble_for_symbol(
+            symbol=req.symbol,
+            horizons=req.horizons,
+            model_types=req.model_types,
+            lookback_days=req.lookback_days,
+            progress_callback=_cb,
+        )
+        job.status = "completed"
+        job.progress = 1.0
+        job.metrics = result
+    except Exception as exc:
+        logger.exception("Ensemble training failed for %s", req.symbol)
+        job.status = "failed"
+        job.error = str(exc)
+
+@router.post("/ensemble/train")
+async def train_ensemble(req: EnsembleTrainRequest):
+    job_id = str(uuid.uuid4())
+    _ensemble_jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
+    thread = threading.Thread(target=_run_ensemble_training, args=(job_id, req), daemon=True)
+    thread.start()
+    return {
+        "job_id": job_id,
+        "status": "pending",
+        "symbol": req.symbol.upper(),
+        "horizons": req.horizons,
+        "model_types": req.model_types,
+    }
+
+@router.get("/ensemble/train/status/{job_id}")
+async def get_ensemble_training_status(job_id: str):
+    if job_id not in _ensemble_jobs:
+        raise HTTPException(404, f"Ensemble job {job_id} not found")
+    return _ensemble_jobs[job_id]

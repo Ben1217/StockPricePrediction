@@ -1,0 +1,109 @@
+{
+  "version_id": "lstm_MSFT_price_h7_20260425_235325",
+  "model_type": "lstm",
+  "symbol": "MSFT",
+  "horizon": 7,
+  "training_horizon": 7,
+  "horizons": [
+    7
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_7d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-25T23:53:25.168614",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": 60,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 840,
+    "val": 120,
+    "test": 240
+  },
+  "training_rows": 1200,
+  "val_metrics": {
+    "mae": 0.03735325485467911,
+    "rmse": 0.04970991242458113,
+    "mape": 3.7353254854679108,
+    "directional_accuracy": 0.49166666666666664
+  },
+  "test_metrics": {
+    "mae": 0.036808546632528305,
+    "rmse": 0.04742580151288456,
+    "mape": 3.6808546632528305,
+    "directional_accuracy": 0.4
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.03735325485467911,
+      "rmse": 0.04970991242458113,
+      "mape": 3.7353254854679108,
+      "directional_accuracy": 0.49166666666666664
+    },
+    "test": {
+      "mae": 0.036808546632528305,
+      "rmse": 0.04742580151288456,
+      "mape": 3.6808546632528305,
+      "directional_accuracy": 0.4
+    }
+  },
+  "params": {
+    "sequence_length": 60
+  },
+  "oob_error": null,
+  "model_path": "models\\bundles\\MSFT\\lstm\\7\\model.pt",
+  "scaler_path": "models\\bundles\\MSFT\\lstm\\7\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\MSFT\\lstm\\7\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\MSFT\\lstm\\7"
+}

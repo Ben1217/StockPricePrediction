@@ -1,0 +1,107 @@
+{
+  "version_id": "xgboost_AMD_price_h15_20260425_233105",
+  "model_type": "xgboost",
+  "symbol": "AMD",
+  "horizon": 15,
+  "training_horizon": 15,
+  "horizons": [
+    15
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_15d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-25T23:31:05.736297",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 835,
+    "val": 119,
+    "test": 238
+  },
+  "training_rows": 1192,
+  "val_metrics": {
+    "mae": 0.11833011358976364,
+    "rmse": 0.1321380403438884,
+    "mape": 11.833011358976364,
+    "directional_accuracy": 0.3025210084033613
+  },
+  "test_metrics": {
+    "mae": 0.14955805242061615,
+    "rmse": 0.2043907453147173,
+    "mape": 14.955805242061615,
+    "directional_accuracy": 0.5
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.11833011358976364,
+      "rmse": 0.1321380403438884,
+      "mape": 11.833011358976364,
+      "directional_accuracy": 0.3025210084033613
+    },
+    "test": {
+      "mae": 0.14955805242061615,
+      "rmse": 0.2043907453147173,
+      "mape": 14.955805242061615,
+      "directional_accuracy": 0.5
+    }
+  },
+  "params": {},
+  "oob_error": null,
+  "model_path": "models\\bundles\\AMD\\xgboost\\15\\model.json",
+  "scaler_path": "models\\bundles\\AMD\\xgboost\\15\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\AMD\\xgboost\\15\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\AMD\\xgboost\\15"
+}

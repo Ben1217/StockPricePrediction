@@ -39,8 +39,14 @@ def download_stock_data(
         Historical OHLCV data, or None if download fails
     """
     try:
-        data = yf.download(ticker, start=start_date, end=end_date, 
-                          interval=interval, progress=False)
+        data = yf.download(
+            ticker,
+            start=start_date,
+            end=end_date,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+        )
         
         # Fix MultiIndex columns if present
         if isinstance(data.columns, pd.MultiIndex):

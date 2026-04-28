@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 
 from src.api.schemas.schemas import BacktestRequest, BacktestResponse
 from src.backtesting.backtest_engine import BacktestEngine
+from src.backtesting.backtest_service import run_backtest as run_simple_backtest
 from src.defaults import DEFAULT_INDEX_SYMBOL
 from src.features.feature_engineering import (
     build_feature_frame,
@@ -43,6 +44,11 @@ _backtest_results = {}
 STRATEGY_HYBRID = "hybrid_ml_ta"
 STRATEGY_TECHNICAL = "technical_only"
 STRATEGY_HOLD = "buy_and_hold"
+SIMPLE_STRATEGY_LABELS = {
+    "ta_only": "Technical Analysis",
+    "ml_hybrid": "Hybrid ML + Technical Analysis",
+    "buy_hold": "Buy-and-Hold",
+}
 MODEL_TYPES = ["xgboost", "random_forest", "lstm"]
 MIN_SIGNAL_HISTORY = 60
 
@@ -682,10 +688,113 @@ def _run_walk_forward_validation(symbol: str, df: pd.DataFrame, model_type: str,
     }
 
 
+def _benchmark_notice(symbol: str, strategy_label: str, metrics: Dict[str, Any]) -> str:
+    strategy_return = float(metrics.get("total_return", 0.0))
+    bh_return = float(metrics.get("bh_return", 0.0))
+    comparison = "outperforms" if strategy_return >= bh_return else "underperforms"
+    return (
+        f"Buy-and-hold for {symbol} returned {bh_return:.2f}% over the same period; "
+        f"{strategy_label} returned {strategy_return:.2f}% and {comparison} the benchmark."
+    )
+
+
+def _simple_markers(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "date": trade["date"],
+            "type": trade["type"],
+            "price": trade["price"],
+            "label": trade["type"],
+            "reason": trade.get("reason", ""),
+        }
+        for trade in trades
+    ]
+
+
+def _run_simple_backtest(req: BacktestRequest, symbol: str) -> BacktestResponse:
+    strategy = req.strategy or "ta_only"
+    strategy_label = SIMPLE_STRATEGY_LABELS[strategy]
+
+    try:
+        result = run_simple_backtest(
+            symbol=symbol,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            strategy=strategy,
+            model_type=req.model_type.value,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}")
+
+    metrics = result["metrics"]
+    benchmark_metrics = result.get("benchmark_metrics", {})
+    benchmark_notice = _benchmark_notice(symbol, strategy_label, metrics)
+    backtest_id = str(uuid.uuid4())[:8]
+
+    primary_run = {
+        "key": strategy,
+        "label": strategy_label,
+        "strategy": strategy,
+        "model_type": req.model_type.value if strategy == "ml_hybrid" else None,
+        "status": "ok",
+        "message": "Completed",
+        "metrics": metrics,
+        "equity_curve": result["equity_curve"],
+        "trades": result["trades"],
+        "markers": _simple_markers(result["trades"]),
+        "signal_summary": {},
+    }
+    benchmark_run = {
+        "key": "buy_hold_benchmark",
+        "label": f"{symbol} Buy-and-Hold Benchmark",
+        "strategy": "buy_hold",
+        "model_type": None,
+        "benchmark_type": "selected_symbol",
+        "status": "ok",
+        "message": "Completed",
+        "metrics": benchmark_metrics,
+        "equity_curve": result["bh_curve"],
+        "trades": [],
+        "markers": [],
+        "signal_summary": {},
+    }
+
+    response = {
+        "backtest_id": backtest_id,
+        "summary": result.get("summary", {}),
+        "price_series": result.get("price_series", []),
+        "primary_run": primary_run,
+        "strategy_runs": [primary_run],
+        "model_runs": [],
+        "benchmarks": [benchmark_run],
+        "validation": {
+            "mode": "single_period",
+            "status": "skipped",
+            "message": "Simplified single-period backtest.",
+        },
+        "metrics": metrics,
+        "equity_curve": result["equity_curve"],
+        "bh_curve": result["bh_curve"],
+        "trades": result["trades"],
+        "benchmark_notice": benchmark_notice,
+        "message": f"Backtest completed for {symbol} using {strategy_label}.",
+    }
+
+    response = _json_safe(response)
+    _backtest_results[backtest_id] = response
+    return BacktestResponse(**response)
+
+
 @router.post("/run", response_model=BacktestResponse)
 async def run_backtest(req: BacktestRequest):
     """Run comparison-focused backtests for the requested symbol."""
     symbol = req.symbol.upper()
+    if req.strategy is not None:
+        return _run_simple_backtest(req, symbol)
+
     primary_model = (req.primary_model or req.model_type).value
     benchmark_symbol = (req.benchmark_symbol or DEFAULT_INDEX_SYMBOL).upper()
 

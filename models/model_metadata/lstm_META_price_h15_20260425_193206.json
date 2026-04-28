@@ -1,0 +1,101 @@
+{
+  "version_id": "lstm_META_price_h15_20260425_193206",
+  "model_type": "lstm",
+  "symbol": "META",
+  "horizon": 15,
+  "training_horizon": 15,
+  "horizons": [
+    15
+  ],
+  "objective": "future_close_price",
+  "target_type": "price_regression",
+  "target_col": "target_15d",
+  "target_columns": [
+    "target_7d",
+    "target_15d",
+    "target_30d",
+    "target_60d"
+  ],
+  "trained_at": "2026-04-25T19:32:06.450562",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": 60,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 835,
+    "val": 119,
+    "test": 238
+  },
+  "training_rows": 1192,
+  "val_metrics": {
+    "mae": 55.715572357177734,
+    "rmse": 69.37458122058287,
+    "mape": 8.793725967407227,
+    "directional_accuracy": 0.6722689075630253
+  },
+  "test_metrics": {
+    "mae": 114.25874328613281,
+    "rmse": 125.77262781006844,
+    "mape": 16.302780151367188,
+    "directional_accuracy": 0.4789915966386555
+  },
+  "metrics": {
+    "validation": {
+      "mae": 55.715572357177734,
+      "rmse": 69.37458122058287,
+      "mape": 8.793725967407227,
+      "directional_accuracy": 0.6722689075630253
+    },
+    "test": {
+      "mae": 114.25874328613281,
+      "rmse": 125.77262781006844,
+      "mape": 16.302780151367188,
+      "directional_accuracy": 0.4789915966386555
+    }
+  },
+  "params": {
+    "sequence_length": 60
+  },
+  "model_path": "models\\bundles\\META\\lstm\\15\\model.pt",
+  "scaler_path": "models\\bundles\\META\\lstm\\15\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\META\\lstm\\15\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\META\\lstm\\15"
+}

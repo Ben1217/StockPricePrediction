@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-04-13T04:59:53.764943",
+  "trained_at": "2026-04-25T04:02:49.702640",
   "objective": "next_day_direction",
   "target_type": "direction",
   "feature_config": {
@@ -32,55 +32,55 @@
     "sequence_length": 60
   },
   "split_sizes": {
-    "train": 223,
+    "train": 224,
     "validation": 32,
     "test": 64
   },
-  "samples": 319,
-  "training_sample_count": 223,
+  "samples": 320,
+  "training_sample_count": 224,
   "features": 59,
   "feature_count": 59,
   "params": {},
   "metrics": {
     "validation": {
-      "accuracy": 0.375,
-      "precision": 0.2727272727272727,
-      "recall": 0.2,
-      "f1": 0.23076923076923078,
-      "directional_accuracy": 0.375,
-      "roc_auc": 0.3921568627450981,
-      "positive_rate": 0.25,
-      "average_probability_up": 0.41857290267944336
+      "accuracy": 0.4375,
+      "precision": 0.41379310344827586,
+      "recall": 0.9230769230769231,
+      "f1": 0.5714285714285714,
+      "directional_accuracy": 0.4375,
+      "roc_auc": 0.49797570850202433,
+      "positive_rate": 0.90625,
+      "average_probability_up": 0.7360599040985107
     },
     "test": {
-      "accuracy": 0.515625,
-      "precision": 0.5517241379310345,
-      "recall": 0.47058823529411764,
-      "f1": 0.5079365079365079,
-      "directional_accuracy": 0.515625,
-      "roc_auc": 0.5,
-      "positive_rate": 0.328125,
-      "average_probability_up": 0.4697745740413666
+      "accuracy": 0.46875,
+      "precision": 0.5,
+      "recall": 0.8235294117647058,
+      "f1": 0.6222222222222222,
+      "directional_accuracy": 0.46875,
+      "roc_auc": 0.37745098039215685,
+      "positive_rate": 0.8125,
+      "average_probability_up": 0.7068222165107727
     }
   },
   "backtest": {
     "validation": {
-      "strategy_return": -0.02618110179901123,
-      "benchmark_return": -0.027079522609710693,
-      "trade_days": 8,
-      "long_ratio": 0.25,
-      "win_rate": 0.25
+      "strategy_return": -0.10281330347061157,
+      "benchmark_return": -0.11026608943939209,
+      "trade_days": 29,
+      "long_ratio": 0.90625,
+      "win_rate": 0.41379310344827586
     },
     "test": {
-      "strategy_return": 0.005704045295715332,
+      "strategy_return": NaN,
       "benchmark_return": NaN,
-      "trade_days": 21,
-      "long_ratio": 0.328125,
-      "win_rate": 0.5714285714285714
+      "trade_days": 52,
+      "long_ratio": 0.8125,
+      "win_rate": 0.4807692307692308
     },
     "rule": "long_when_probability_up_at_least_0.55_else_flat"
   },
-  "version_id": "xgboost_AAPL_h1_20260413_045953",
+  "version_id": "xgboost_AAPL_h1_20260425_040249",
   "model_type": "xgboost",
   "symbol": "AAPL",
   "training_symbol": "AAPL",

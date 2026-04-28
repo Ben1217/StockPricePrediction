@@ -1,0 +1,99 @@
+{
+  "version_id": "xgboost_AAPL_price_h30_20260425_192001",
+  "model_type": "xgboost",
+  "symbol": "AAPL",
+  "horizon": 30,
+  "training_horizon": 30,
+  "horizons": [
+    30
+  ],
+  "objective": "future_close_price",
+  "target_type": "price_regression",
+  "target_col": "target_30d",
+  "target_columns": [
+    "target_7d",
+    "target_15d",
+    "target_30d",
+    "target_60d"
+  ],
+  "trained_at": "2026-04-25T19:20:01.546660",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 824,
+    "val": 118,
+    "test": 235
+  },
+  "training_rows": 1177,
+  "val_metrics": {
+    "mae": 15.417682647705078,
+    "rmse": 18.153546182872148,
+    "mape": 7.036386489868164,
+    "directional_accuracy": 0.635593220338983
+  },
+  "test_metrics": {
+    "mae": 28.728586196899414,
+    "rmse": 32.977033541708046,
+    "mape": 11.15922737121582,
+    "directional_accuracy": 0.4765957446808511
+  },
+  "metrics": {
+    "validation": {
+      "mae": 15.417682647705078,
+      "rmse": 18.153546182872148,
+      "mape": 7.036386489868164,
+      "directional_accuracy": 0.635593220338983
+    },
+    "test": {
+      "mae": 28.728586196899414,
+      "rmse": 32.977033541708046,
+      "mape": 11.15922737121582,
+      "directional_accuracy": 0.4765957446808511
+    }
+  },
+  "params": {},
+  "model_path": "models\\bundles\\AAPL\\xgboost\\30\\model.json",
+  "scaler_path": "models\\bundles\\AAPL\\xgboost\\30\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\AAPL\\xgboost\\30\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\AAPL\\xgboost\\30"
+}

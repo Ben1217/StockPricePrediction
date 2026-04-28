@@ -1,29 +1,29 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     CartesianGrid,
-    ComposedChart,
-    Legend,
     Line,
     LineChart,
     ResponsiveContainer,
-    Scatter,
     Tooltip,
     XAxis,
     YAxis,
 } from "recharts";
-import { C, DEFAULT_INDEX_SYMBOL } from "../utils/data";
-import { runBacktest, getCSVExportURL, getPDFExportURL } from "../utils/api";
-import { StatCard, Section } from "../components/UIComponents";
+import { C } from "../utils/data";
+import { runBacktest } from "../utils/api";
 
-const EQUITY_COLORS = {
-    hybrid_ml_ta: C.amber,
-    technical_only: C.cyan,
-    buy_and_hold: C.green,
-    market: C.red,
-};
+const STRATEGY_OPTIONS = [
+    { value: "ta_only", label: "Technical Analysis" },
+    { value: "ml_hybrid", label: "Hybrid ML + Technical Analysis" },
+    { value: "buy_hold", label: "Buy and Hold" },
+];
+
+function todayISO() {
+    return new Date().toISOString().slice(0, 10);
+}
 
 function formatPct(value, digits = 2) {
-    return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "-";
+    if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+    return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`;
 }
 
 function formatNumber(value, digits = 2) {
@@ -36,374 +36,361 @@ function formatCurrency(value) {
         : "-";
 }
 
-function mergeEquitySeries(runs) {
-    const rows = new Map();
-    runs.forEach((run) => {
-        if (run?.status !== "ok") return;
-        (run.equity_curve || []).forEach((point) => {
-            const current = rows.get(point.date) || { date: point.date };
-            current[run.key] = point.value;
-            rows.set(point.date, current);
-        });
+function monthlyCurve(equityCurve = [], bhCurve = []) {
+    const benchmarkByDate = new Map(bhCurve.map((point) => [point.date, point.value]));
+    const rows = equityCurve
+        .map((point) => ({
+            date: point.date,
+            month: point.date?.slice(0, 7),
+            strategy: point.value,
+            buyHold: benchmarkByDate.get(point.date),
+        }))
+        .filter((point) => point.date && point.strategy != null && point.buyHold != null);
+
+    const sampledByMonth = new Map();
+    rows.forEach((point, index) => {
+        const isLast = index === rows.length - 1;
+        sampledByMonth.set(point.month || point.date, point);
+        if (isLast) sampledByMonth.set(point.date, point);
     });
-    return Array.from(rows.values()).sort((a, b) => a.date.localeCompare(b.date));
+    return Array.from(sampledByMonth.values());
 }
 
-function buildPriceChartData(priceSeries, markers) {
-    const byDate = new Map();
-    (markers || []).forEach((marker) => {
-        byDate.set(marker.date, marker);
-    });
-    return (priceSeries || []).map((point) => {
-        const marker = byDate.get(point.date);
-        return {
-            ...point,
-            buyPrice: marker?.type === "BUY" ? marker.price : null,
-            sellPrice: marker?.type === "SELL" ? marker.price : null,
-            markerReason: marker?.reason || "",
-            markerLabel: marker?.label || "",
-        };
-    });
-}
-
-function SimpleTooltip({ active, payload, label }) {
+function BacktestTooltip({ active, payload, label }) {
     if (!active || !payload?.length) return null;
     return (
-        <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, minWidth: 180 }}>
-            <div style={{ color: C.text, fontWeight: 700, marginBottom: 6 }}>{label}</div>
-            {payload.map((item, index) => (
-                <div key={`${item.dataKey || item.name || "series"}-${index}`} style={{ color: item.color || C.textDim, fontSize: 11, marginBottom: 4 }}>
-                    {item.name || item.dataKey}: {typeof item.value === "number" ? item.value.toFixed(2) : item.value}
+        <div className="tooltip-card">
+            <div style={{ color: C.amber, marginBottom: 6 }}>{label}</div>
+            {payload.map((item) => (
+                <div key={item.dataKey} style={{ display: "flex", gap: 14, justifyContent: "space-between", color: item.color }}>
+                    <span>{item.name}</span>
+                    <span>{formatCurrency(item.value)}</span>
                 </div>
             ))}
-            {payload[0]?.payload?.markerReason && (
-                <div style={{ color: C.textDim, fontSize: 11, lineHeight: 1.45 }}>
-                    {payload[0].payload.markerLabel}: {payload[0].payload.markerReason}
-                </div>
-            )}
         </div>
     );
 }
 
-function ComparisonTable({ title, rows }) {
+function Field({ label, children }) {
     return (
-        <Section title={title} style={{ marginTop: 16 }}>
-            <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, minWidth: 760 }}>
-                    <thead>
-                        <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                            {["Run", "Status", "Return", "CAGR", "Sharpe", "Sortino", "Max DD", "Trades", "Message"].map((header) => (
-                                <th key={header} style={{ padding: "8px 10px", color: C.textDim, textAlign: "left", fontWeight: 500 }}>
-                                    {header}
-                                </th>
-                            ))}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows.map((run) => (
-                            <tr key={run.key} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{run.label}</td>
-                                <td style={{ padding: "8px 10px", color: run.status === "ok" ? C.green : C.red, fontWeight: 700 }}>{run.status}</td>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{formatPct(run.metrics?.total_return)}</td>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{formatPct(run.metrics?.cagr)}</td>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(run.metrics?.sharpe_ratio)}</td>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(run.metrics?.sortino_ratio)}</td>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{formatPct(run.metrics?.max_drawdown)}</td>
-                                <td style={{ padding: "8px 10px", color: C.text }}>{run.metrics?.total_trades ?? "-"}</td>
-                                <td style={{ padding: "8px 10px", color: C.textDim, maxWidth: 280 }}>{run.message || "-"}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+        <label style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
+            <span style={{ color: C.textDim, fontSize: 10, letterSpacing: 1, textTransform: "uppercase" }}>{label}</span>
+            {children}
+        </label>
+    );
+}
+
+function MetricCard({ label, value, sub, tone = "neutral" }) {
+    const toneColor = tone === "green" ? C.green : tone === "red" ? C.red : tone === "cyan" ? C.cyan : C.text;
+    return (
+        <div style={{
+            background: C.bg2,
+            border: `1px solid ${C.border}`,
+            borderRadius: 8,
+            padding: "14px 16px",
+            minWidth: 0,
+        }}>
+            <div style={{ color: C.textDim, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }}>
+                {label}
             </div>
-        </Section>
+            <div style={{ color: toneColor, fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono',monospace", lineHeight: 1.1 }}>
+                {value}
+            </div>
+            {sub && <div style={{ color: C.textMid, fontSize: 11, marginTop: 5 }}>{sub}</div>}
+        </div>
+    );
+}
+
+function TradeTable({ trades = [] }) {
+    if (!trades.length) {
+        return <div style={{ color: C.textDim, fontSize: 12, padding: "18px 0" }}>No trades were generated for this period.</div>;
+    }
+
+    return (
+        <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, minWidth: 780 }}>
+                <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                        {["Date", "Type", "Shares", "Price", "P&L", "Return", "Reason"].map((header) => (
+                            <th key={header} style={{ padding: "8px 10px", color: C.textDim, textAlign: "left", fontWeight: 500 }}>
+                                {header}
+                            </th>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody>
+                    {trades.map((trade, index) => {
+                        const pnl = trade.pnl;
+                        const returnPct = trade.return_pct;
+                        return (
+                            <tr key={`${trade.date}-${trade.type}-${index}`} style={{ borderBottom: `1px solid ${C.border}22` }}>
+                                <td style={{ padding: "9px 10px", color: C.textMid }}>{trade.date}</td>
+                                <td style={{ padding: "9px 10px" }}>
+                                    <span style={{
+                                        color: trade.type === "BUY" ? C.green : C.red,
+                                        border: `1px solid ${(trade.type === "BUY" ? C.green : C.red)}55`,
+                                        background: `${trade.type === "BUY" ? C.green : C.red}18`,
+                                        borderRadius: 4,
+                                        padding: "2px 8px",
+                                        fontWeight: 700,
+                                    }}>
+                                        {trade.type}
+                                    </span>
+                                </td>
+                                <td style={{ padding: "9px 10px", color: C.text }}>{formatNumber(trade.shares, 4)}</td>
+                                <td style={{ padding: "9px 10px", color: C.text }}>{formatCurrency(trade.price)}</td>
+                                <td style={{ padding: "9px 10px", color: pnl == null ? C.textDim : pnl >= 0 ? C.green : C.red }}>
+                                    {pnl == null ? "-" : formatCurrency(pnl)}
+                                </td>
+                                <td style={{ padding: "9px 10px", color: returnPct == null ? C.textDim : returnPct >= 0 ? C.green : C.red }}>
+                                    {returnPct == null ? "-" : formatPct(returnPct)}
+                                </td>
+                                <td style={{ padding: "9px 10px", color: C.textDim, maxWidth: 340, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={trade.reason}>
+                                    {trade.reason || "-"}
+                                </td>
+                            </tr>
+                        );
+                    })}
+                </tbody>
+            </table>
+        </div>
     );
 }
 
 export default function BacktestTab({ selectedTicker, apiConnected, notify }) {
-    const [symbol, setSymbol] = useState(selectedTicker);
-    const [startDate, setStartDate] = useState("2022-01-01");
-    const [endDate, setEndDate] = useState("2024-12-31");
-    const [capital, setCapital] = useState(100000);
-    const [primaryModel, setPrimaryModel] = useState("xgboost");
-    const [posSize, setPosSize] = useState(0.1);
-    const [commission, setCommission] = useState(0);
-    const [slippage, setSlippage] = useState(0.001);
-    const [includeBenchmark, setIncludeBenchmark] = useState(true);
-    const [benchmarkSymbol, setBenchmarkSymbol] = useState(DEFAULT_INDEX_SYMBOL);
-    const [validationMode, setValidationMode] = useState("single_period");
-    const [running, setRunning] = useState(false);
+    const [form, setForm] = useState({
+        symbol: selectedTicker || "MSFT",
+        start_date: "2022-01-01",
+        end_date: todayISO(),
+        initial_capital: 100000,
+        strategy: "ta_only",
+    });
+    const [status, setStatus] = useState("idle");
     const [result, setResult] = useState(null);
-    const [error, setError] = useState(null);
+    const [error, setError] = useState("");
 
     useEffect(() => {
-        setSymbol(selectedTicker);
+        setForm((current) => ({ ...current, symbol: selectedTicker || current.symbol }));
     }, [selectedTicker]);
 
-    const handleRun = async () => {
-        setRunning(true);
-        setError(null);
-        try {
-            const res = await runBacktest({
-                symbol,
-                start_date: startDate,
-                end_date: endDate,
-                initial_capital: capital,
-                model_type: primaryModel,
-                primary_model: primaryModel,
-                position_size: posSize,
-                commission_rate: commission,
-                slippage_rate: slippage,
-                include_market_benchmark: includeBenchmark,
-                benchmark_symbol: benchmarkSymbol,
-                validation_mode: validationMode,
-            });
-            setResult(res);
-            notify?.(`Backtest complete: ${res.primary_run?.label || res.message}`);
-        } catch (e) {
-            setError(e.message);
-        }
-        setRunning(false);
-    };
-
-    if (!apiConnected) return <div style={{ textAlign: "center", padding: 60, color: C.textDim }}>Connect to API</div>;
-
-    const metrics = result?.metrics || {};
-    const primaryRun = result?.primary_run || {};
-    const trades = result?.trades || [];
-    const priceChartData = buildPriceChartData(result?.price_series || [], primaryRun?.markers || []);
-    const marketBenchmark = (result?.benchmarks || []).find((run) => run.benchmark_type === "market");
-    const equityRuns = [...(result?.strategy_runs || [])];
-    if (marketBenchmark) {
-        equityRuns.push({ ...marketBenchmark, key: "market" });
-    }
-    const equityChartData = mergeEquitySeries(equityRuns);
+    const chartData = useMemo(
+        () => monthlyCurve(result?.equity_curve || [], result?.bh_curve || []),
+        [result]
+    );
 
     const inputStyle = {
         background: C.bg2,
         color: C.text,
         border: `1px solid ${C.border}`,
         borderRadius: 6,
-        padding: "8px 12px",
+        padding: "9px 11px",
         fontSize: 12,
         fontFamily: "'DM Mono',monospace",
         width: "100%",
+        outline: "none",
+        minHeight: 36,
     };
+
+    const canRun = apiConnected
+        && status !== "running"
+        && form.symbol.trim()
+        && form.start_date
+        && form.end_date
+        && Number(form.initial_capital) > 0;
+    const isRunning = status === "running";
+    const metrics = result?.metrics || {};
+
+    const handleRun = async () => {
+        setStatus("running");
+        setError("");
+        try {
+            const response = await runBacktest({
+                symbol: form.symbol.trim().toUpperCase(),
+                start_date: form.start_date,
+                end_date: form.end_date,
+                initial_capital: Number(form.initial_capital),
+                strategy: form.strategy,
+            });
+            setResult(response);
+            setStatus("done");
+            notify?.(`Backtest complete for ${response.summary?.symbol || form.symbol.toUpperCase()}`);
+        } catch (err) {
+            setError(err.message || "Backtest failed");
+            setStatus("error");
+        }
+    };
+
+    if (!apiConnected) {
+        return <div style={{ textAlign: "center", padding: 60, color: C.textDim }}>Connect to API</div>;
+    }
 
     return (
         <div className="fade-up">
-            <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text, marginBottom: 20 }}>
+            <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 28, color: C.text, marginBottom: 6 }}>
                 Backtesting Validation
             </h1>
+            <div style={{ color: C.textDim, fontSize: 12, marginBottom: 18 }}>
+                Test a selected strategy against historical buy-and-hold performance.
+            </div>
 
-            <Section title="CONFIGURATION">
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Symbol</label>
-                        <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Start Date</label>
-                        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>End Date</label>
-                        <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Capital ($)</label>
-                        <input type="number" value={capital} onChange={(e) => setCapital(+e.target.value)} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Primary Model</label>
-                        <select value={primaryModel} onChange={(e) => setPrimaryModel(e.target.value)} style={inputStyle}>
-                            <option value="xgboost">XGBoost</option>
-                            <option value="random_forest">Random Forest</option>
-                            <option value="lstm">LSTM</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Position %</label>
-                        <input type="number" value={posSize} step={0.05} min={0.01} max={1} onChange={(e) => setPosSize(+e.target.value)} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Commission</label>
-                        <input type="number" value={commission} step={0.0005} min={0} onChange={(e) => setCommission(+e.target.value)} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Slippage</label>
-                        <input type="number" value={slippage} step={0.0005} min={0} onChange={(e) => setSlippage(+e.target.value)} style={inputStyle} />
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Validation</label>
-                        <select value={validationMode} onChange={(e) => setValidationMode(e.target.value)} style={inputStyle}>
-                            <option value="single_period">Single Period</option>
-                            <option value="walk_forward">Walk Forward</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Market Benchmark</label>
-                        <label style={{ display: "flex", alignItems: "center", gap: 8, color: C.text, fontSize: 12 }}>
-                            <input type="checkbox" checked={includeBenchmark} onChange={(e) => setIncludeBenchmark(e.target.checked)} />
-                            Include benchmark
-                        </label>
-                    </div>
-                    <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Benchmark Symbol</label>
-                        <input value={benchmarkSymbol} disabled={!includeBenchmark} onChange={(e) => setBenchmarkSymbol(e.target.value.toUpperCase())} style={{ ...inputStyle, opacity: includeBenchmark ? 1 : 0.5 }} />
-                    </div>
-                </div>
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                    <button onClick={handleRun} disabled={running} style={{
-                        background: running ? C.bg2 : `linear-gradient(135deg, ${C.amber}, #f97316)`,
-                        color: running ? C.textDim : "#000",
-                        border: "none",
-                        borderRadius: 8,
-                        padding: "12px 28px",
-                        fontSize: 14,
-                        fontWeight: 700,
-                        cursor: running ? "not-allowed" : "pointer",
-                        fontFamily: "'Syne',sans-serif",
-                    }}>{running ? "Running..." : "Run Comparison Backtest"}</button>
-                    {result && <>
-                        <a href={getCSVExportURL("backtest", symbol)} style={{
-                            background: C.bg2,
-                            color: C.amber,
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 8,
-                            padding: "12px 18px",
-                            fontSize: 12,
-                            textDecoration: "none",
-                        }}>CSV</a>
-                        <a href={getPDFExportURL("backtest", symbol)} style={{
-                            background: C.bg2,
-                            color: C.amber,
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 8,
-                            padding: "12px 18px",
-                            fontSize: 12,
-                            textDecoration: "none",
-                        }}>PDF Report</a>
-                    </>}
-                </div>
-            </Section>
-
-            {error && <div style={{ background: `${C.red}22`, color: C.red, padding: 12, borderRadius: 8, marginTop: 16, fontSize: 12 }}>{error}</div>}
-
-            {result && <>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginTop: 20 }}>
-                    <StatCard label="PRIMARY RETURN" value={formatPct(metrics.total_return)} sub={formatCurrency(metrics.final_value)} color={(metrics.total_return || 0) >= 0 ? C.green : C.red} />
-                    <StatCard label="CAGR" value={formatPct(metrics.cagr)} sub="Annualized growth" color={C.amber} />
-                    <StatCard label="SHARPE" value={formatNumber(metrics.sharpe_ratio)} sub="Risk-adjusted" color={C.cyan} />
-                    <StatCard label="SORTINO" value={formatNumber(metrics.sortino_ratio)} sub="Downside risk" color={C.green} />
-                    <StatCard label="CALMAR" value={formatNumber(metrics.calmar_ratio)} sub="Return vs drawdown" color={C.amber} />
-                    <StatCard label="PROFIT FACTOR" value={formatNumber(metrics.profit_factor)} sub={`Expectancy ${formatPct(metrics.expectancy)}`} color={C.text} />
-                    <StatCard label="MAX DD" value={formatPct(metrics.max_drawdown)} sub={`Wins ${metrics.max_consecutive_wins || 0} / Losses ${metrics.max_consecutive_losses || 0}`} color={C.red} />
-                    <StatCard label="TRADES" value={metrics.total_trades || 0} sub={`Avg win ${formatCurrency(metrics.average_win)} / Avg loss ${formatCurrency(metrics.average_loss)}`} color={C.amber} />
-                </div>
-
-                <ComparisonTable title="BENCHMARK COMPARISON" rows={result.benchmarks || []} />
-                <ComparisonTable title="STRATEGY COMPARISON" rows={result.strategy_runs || []} />
-                <ComparisonTable title="MODEL COMPARISON" rows={result.model_runs || []} />
-
-                <Section title="EQUITY COMPARISON" style={{ marginTop: 16 }}>
-                    <ResponsiveContainer width="100%" height={320}>
-                        <LineChart data={equityChartData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                            <XAxis dataKey="date" tick={{ fill: C.textDim, fontSize: 9 }} tickFormatter={(d) => d?.slice(5) || d} />
-                            <YAxis tick={{ fill: C.textDim, fontSize: 9 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
-                            <Tooltip content={<SimpleTooltip />} />
-                            <Legend />
-                            {(result.strategy_runs || []).map((run) => (
-                                run.status === "ok" && (
-                                    <Line key={run.key} type="monotone" dataKey={run.key} name={run.label} stroke={EQUITY_COLORS[run.key] || C.text} strokeWidth={2} dot={false} />
-                                )
+            <div style={{
+                background: C.bg1,
+                border: `1px solid ${C.border}`,
+                borderRadius: 8,
+                padding: 16,
+                marginBottom: 18,
+            }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, alignItems: "end" }}>
+                    <Field label="Symbol">
+                        <input
+                            value={form.symbol}
+                            onChange={(event) => setForm((current) => ({ ...current, symbol: event.target.value.toUpperCase() }))}
+                            placeholder="MSFT"
+                            style={inputStyle}
+                        />
+                    </Field>
+                    <Field label="Start date">
+                        <input
+                            type="date"
+                            value={form.start_date}
+                            onChange={(event) => setForm((current) => ({ ...current, start_date: event.target.value }))}
+                            style={inputStyle}
+                        />
+                    </Field>
+                    <Field label="End date">
+                        <input
+                            type="date"
+                            value={form.end_date}
+                            onChange={(event) => setForm((current) => ({ ...current, end_date: event.target.value }))}
+                            style={inputStyle}
+                        />
+                    </Field>
+                    <Field label="Initial capital">
+                        <input
+                            type="number"
+                            min="1"
+                            value={form.initial_capital}
+                            onChange={(event) => setForm((current) => ({ ...current, initial_capital: event.target.value }))}
+                            style={inputStyle}
+                        />
+                    </Field>
+                    <Field label="Strategy">
+                        <select
+                            value={form.strategy}
+                            onChange={(event) => setForm((current) => ({ ...current, strategy: event.target.value }))}
+                            style={inputStyle}
+                        >
+                            {STRATEGY_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
                             ))}
-                            {marketBenchmark?.status === "ok" && (
-                                <Line type="monotone" dataKey="market" name={marketBenchmark.label} stroke={EQUITY_COLORS.market} strokeWidth={2} dot={false} strokeDasharray="6 3" />
-                            )}
-                        </LineChart>
-                    </ResponsiveContainer>
-                </Section>
+                        </select>
+                    </Field>
+                    <button
+                        onClick={handleRun}
+                        disabled={isRunning || !canRun}
+                        style={{
+                            background: isRunning || !canRun ? C.bg2 : `linear-gradient(135deg, ${C.amber}, #f97316)`,
+                            color: isRunning || !canRun ? C.textDim : "#000",
+                            border: "none",
+                            borderRadius: 8,
+                            padding: "10px 18px",
+                            minHeight: 38,
+                            cursor: isRunning || !canRun ? "not-allowed" : "pointer",
+                            fontWeight: 800,
+                            fontSize: 13,
+                            fontFamily: "'Syne',sans-serif",
+                            whiteSpace: "nowrap",
+                        }}
+                    >
+                        {isRunning ? "Running..." : "Run backtest"}
+                    </button>
+                </div>
+            </div>
 
-                <Section title="PRIMARY PRICE CHART" style={{ marginTop: 16 }}>
-                    <ResponsiveContainer width="100%" height={320}>
-                        <ComposedChart data={priceChartData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-                            <XAxis dataKey="date" tick={{ fill: C.textDim, fontSize: 9 }} tickFormatter={(d) => d?.slice(5) || d} />
-                            <YAxis tick={{ fill: C.textDim, fontSize: 9 }} tickFormatter={(v) => `$${v.toFixed(0)}`} />
-                            <Tooltip content={<SimpleTooltip />} />
-                            <Legend />
-                            <Line type="monotone" dataKey="close" name="Close" stroke={C.text} strokeWidth={2} dot={false} />
-                            <Scatter name="Buy" dataKey="buyPrice" fill={C.green} />
-                            <Scatter name="Sell" dataKey="sellPrice" fill={C.red} />
-                        </ComposedChart>
-                    </ResponsiveContainer>
-                </Section>
+            {status === "error" && (
+                <div style={{ background: `${C.red}18`, border: `1px solid ${C.red}55`, color: C.red, padding: 12, borderRadius: 8, marginBottom: 16, fontSize: 12 }}>
+                    Backtest error: {error}
+                </div>
+            )}
 
-                {result.validation?.mode === "walk_forward" && (
-                    <Section title="WALK-FORWARD VALIDATION" style={{ marginTop: 16 }}>
-                        <div style={{ color: result.validation.status === "ok" ? C.text : C.red, fontSize: 12, marginBottom: 12 }}>
-                            {result.validation.status === "ok"
-                                ? `Completed ${result.validation.n_splits} folds with gap ${result.validation.gap}.`
-                                : result.validation.message}
-                        </div>
-                        {result.validation.status === "ok" && (
-                            <div style={{ overflowX: "auto" }}>
-                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-                                    <thead>
-                                        <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                                            {["Fold", "RMSE", "MAE", "R2", "Directional Accuracy", "Sharpe"].map((header) => (
-                                                <th key={header} style={{ padding: "8px 10px", color: C.textDim, textAlign: "left", fontWeight: 500 }}>{header}</th>
-                                            ))}
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {(result.validation.folds || []).map((fold) => (
-                                            <tr key={fold.fold} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                                                <td style={{ padding: "8px 10px", color: C.text }}>{fold.fold}</td>
-                                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(fold.rmse, 4)}</td>
-                                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(fold.mae, 4)}</td>
-                                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(fold.r2, 4)}</td>
-                                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(fold.directional_accuracy, 4)}</td>
-                                                <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(fold.sharpe_ratio, 4)}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        )}
-                    </Section>
-                )}
+            {isRunning && (
+                <div style={{ color: C.textDim, textAlign: "center", padding: 36, fontSize: 12 }}>
+                    Running backtest for {form.symbol.toUpperCase()}...
+                </div>
+            )}
 
-                <Section title={`TRADE LOG (${trades.length} trades)`} style={{ marginTop: 16 }}>
-                    <div style={{ maxHeight: 360, overflowY: "auto", overflowX: "auto" }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, minWidth: 860 }}>
-                            <thead>
-                                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                                    {["Date", "Type", "Qty", "Price", "Commission", "PnL", "Return", "Reason"].map((header) => (
-                                        <th key={header} style={{ padding: "8px 10px", color: C.textDim, textAlign: "left", fontWeight: 500 }}>{header}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {trades.slice(0, 120).map((trade, index) => (
-                                    <tr key={`${trade.date}-${trade.type}-${index}`} style={{ borderBottom: `1px solid ${C.border}22` }}>
-                                        <td style={{ padding: "8px 10px", color: C.textMid }}>{trade.date}</td>
-                                        <td style={{ padding: "8px 10px", color: trade.type === "BUY" ? C.green : C.red, fontWeight: 700 }}>{trade.type}</td>
-                                        <td style={{ padding: "8px 10px", color: C.text }}>{formatNumber(trade.quantity, 2)}</td>
-                                        <td style={{ padding: "8px 10px", color: C.text }}>{formatCurrency(trade.price)}</td>
-                                        <td style={{ padding: "8px 10px", color: C.text }}>{formatCurrency(trade.commission)}</td>
-                                        <td style={{ padding: "8px 10px", color: trade.realized_pnl >= 0 ? C.green : C.red }}>{trade.realized_pnl == null ? "-" : formatCurrency(trade.realized_pnl)}</td>
-                                        <td style={{ padding: "8px 10px", color: C.text }}>{trade.return_pct == null ? "-" : formatPct(trade.return_pct)}</td>
-                                        <td style={{ padding: "8px 10px", color: C.textDim, maxWidth: 420 }}>{trade.reason || "-"}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
+            {status === "done" && result && (
+                <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, color: C.textDim, fontSize: 11, marginBottom: 14 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, display: "inline-block" }} />
+                        Backtest complete - {result.summary?.symbol || form.symbol.toUpperCase()} from {form.start_date} to {form.end_date}
                     </div>
-                </Section>
-            </>}
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 16 }}>
+                        <MetricCard label="Total return" value={formatPct(metrics.total_return)} sub={formatCurrency(metrics.final_value)} tone={(metrics.total_return || 0) >= 0 ? "green" : "red"} />
+                        <MetricCard label="CAGR" value={formatPct(metrics.cagr)} tone={(metrics.cagr || 0) >= 0 ? "green" : "red"} />
+                        <MetricCard label="Sharpe ratio" value={formatNumber(metrics.sharpe)} tone={(metrics.sharpe || 0) >= 0 ? "cyan" : "red"} />
+                        <MetricCard label="Max drawdown" value={formatPct(metrics.max_drawdown)} tone="red" />
+                        <MetricCard label="Win rate" value={typeof metrics.win_rate === "number" ? `${metrics.win_rate.toFixed(1)}%` : "-"} tone={(metrics.win_rate || 0) >= 50 ? "green" : "red"} />
+                        <MetricCard label="Total trades" value={metrics.n_trades ?? 0} tone="neutral" />
+                    </div>
+
+                    <div style={{
+                        background: C.amberLow,
+                        border: `1px solid ${C.amber}44`,
+                        borderRadius: 8,
+                        color: C.textMid,
+                        padding: "11px 14px",
+                        fontSize: 12,
+                        marginBottom: 16,
+                        lineHeight: 1.5,
+                    }}>
+                        {result.benchmark_notice || (
+                            <>Buy-and-hold returned {formatPct(metrics.bh_return)} over the same period; the selected strategy returned {formatPct(metrics.total_return)}.</>
+                        )}
+                    </div>
+
+                    <div style={{
+                        background: C.bg1,
+                        border: `1px solid ${C.border}`,
+                        borderRadius: 8,
+                        padding: 16,
+                        marginBottom: 16,
+                    }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+                            <div style={{ color: C.text, fontSize: 14, fontWeight: 700, fontFamily: "'Syne',sans-serif" }}>
+                                Equity Curve
+                            </div>
+                            <div style={{ display: "flex", gap: 14, color: C.textDim, fontSize: 11 }}>
+                                <span><span style={{ display: "inline-block", width: 22, height: 2, background: C.green, marginRight: 6, verticalAlign: "middle" }} />Strategy</span>
+                                <span><span style={{ display: "inline-block", width: 22, borderTop: `2px dashed ${C.textDim}`, marginRight: 6, verticalAlign: "middle" }} />Buy and hold</span>
+                            </div>
+                        </div>
+                        <ResponsiveContainer width="100%" height={280}>
+                            <LineChart data={chartData} margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+                                <XAxis dataKey="month" tick={{ fill: C.textDim, fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+                                <YAxis tick={{ fill: C.textDim, fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`} />
+                                <Tooltip content={<BacktestTooltip />} />
+                                <Line type="monotone" dataKey="strategy" name="Strategy" stroke={C.green} strokeWidth={2.5} dot={false} />
+                                <Line type="monotone" dataKey="buyHold" name="Buy and hold" stroke={C.textDim} strokeWidth={2} strokeDasharray="6 4" dot={false} />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+
+                    <div style={{
+                        background: C.bg1,
+                        border: `1px solid ${C.border}`,
+                        borderRadius: 8,
+                        padding: 16,
+                    }}>
+                        <div style={{ color: C.text, fontSize: 14, fontWeight: 700, fontFamily: "'Syne',sans-serif", marginBottom: 12 }}>
+                            Trade History
+                        </div>
+                        <TradeTable trades={result.trades || []} />
+                    </div>
+                </>
+            )}
         </div>
     );
 }

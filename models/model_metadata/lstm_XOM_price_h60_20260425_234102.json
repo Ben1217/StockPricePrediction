@@ -1,0 +1,109 @@
+{
+  "version_id": "lstm_XOM_price_h60_20260425_234102",
+  "model_type": "lstm",
+  "symbol": "XOM",
+  "horizon": 60,
+  "training_horizon": 60,
+  "horizons": [
+    60
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_60d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-25T23:41:02.221728",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": 60,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 803,
+    "val": 115,
+    "test": 229
+  },
+  "training_rows": 1147,
+  "val_metrics": {
+    "mae": 0.045214053243398666,
+    "rmse": 0.05152491135040118,
+    "mape": 4.521405324339867,
+    "directional_accuracy": 0.7304347826086957
+  },
+  "test_metrics": {
+    "mae": 0.12296389043331146,
+    "rmse": 0.17639710836823375,
+    "mape": 12.296389043331146,
+    "directional_accuracy": 0.537117903930131
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.045214053243398666,
+      "rmse": 0.05152491135040118,
+      "mape": 4.521405324339867,
+      "directional_accuracy": 0.7304347826086957
+    },
+    "test": {
+      "mae": 0.12296389043331146,
+      "rmse": 0.17639710836823375,
+      "mape": 12.296389043331146,
+      "directional_accuracy": 0.537117903930131
+    }
+  },
+  "params": {
+    "sequence_length": 60
+  },
+  "oob_error": null,
+  "model_path": "models\\bundles\\XOM\\lstm\\60\\model.pt",
+  "scaler_path": "models\\bundles\\XOM\\lstm\\60\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\XOM\\lstm\\60\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\XOM\\lstm\\60"
+}

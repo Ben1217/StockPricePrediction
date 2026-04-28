@@ -1,0 +1,107 @@
+{
+  "version_id": "random_forest_GOOGL_price_h30_20260425_235110",
+  "model_type": "random_forest",
+  "symbol": "GOOGL",
+  "horizon": 30,
+  "training_horizon": 30,
+  "horizons": [
+    30
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_30d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-25T23:51:10.664613",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 824,
+    "val": 118,
+    "test": 235
+  },
+  "training_rows": 1177,
+  "val_metrics": {
+    "mae": 0.053496915847063065,
+    "rmse": 0.06917715360393975,
+    "mape": 5.3496915847063065,
+    "directional_accuracy": 0.8559322033898306
+  },
+  "test_metrics": {
+    "mae": 0.1653621941804886,
+    "rmse": 0.20445624931085202,
+    "mape": 16.53621941804886,
+    "directional_accuracy": 0.4297872340425532
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.053496915847063065,
+      "rmse": 0.06917715360393975,
+      "mape": 5.3496915847063065,
+      "directional_accuracy": 0.8559322033898306
+    },
+    "test": {
+      "mae": 0.1653621941804886,
+      "rmse": 0.20445624931085202,
+      "mape": 16.53621941804886,
+      "directional_accuracy": 0.4297872340425532
+    }
+  },
+  "params": {},
+  "oob_error": 0.1582702013378936,
+  "model_path": "models\\bundles\\GOOGL\\random_forest\\30\\model.joblib",
+  "scaler_path": "models\\bundles\\GOOGL\\random_forest\\30\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\GOOGL\\random_forest\\30\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\GOOGL\\random_forest\\30"
+}

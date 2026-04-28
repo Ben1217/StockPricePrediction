@@ -1,0 +1,99 @@
+{
+  "version_id": "xgboost_META_price_h7_20260425_192225",
+  "model_type": "xgboost",
+  "symbol": "META",
+  "horizon": 7,
+  "training_horizon": 7,
+  "horizons": [
+    7
+  ],
+  "objective": "future_close_price",
+  "target_type": "price_regression",
+  "target_col": "target_7d",
+  "target_columns": [
+    "target_7d",
+    "target_15d",
+    "target_30d",
+    "target_60d"
+  ],
+  "trained_at": "2026-04-25T19:22:25.414467",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 840,
+    "val": 120,
+    "test": 240
+  },
+  "training_rows": 1200,
+  "val_metrics": {
+    "mae": 50.688697814941406,
+    "rmse": 64.65417695444162,
+    "mape": 8.003832817077637,
+    "directional_accuracy": 0.6333333333333333
+  },
+  "test_metrics": {
+    "mae": 108.2231216430664,
+    "rmse": 120.40751118597211,
+    "mape": 15.417948722839355,
+    "directional_accuracy": 0.5166666666666667
+  },
+  "metrics": {
+    "validation": {
+      "mae": 50.688697814941406,
+      "rmse": 64.65417695444162,
+      "mape": 8.003832817077637,
+      "directional_accuracy": 0.6333333333333333
+    },
+    "test": {
+      "mae": 108.2231216430664,
+      "rmse": 120.40751118597211,
+      "mape": 15.417948722839355,
+      "directional_accuracy": 0.5166666666666667
+    }
+  },
+  "params": {},
+  "model_path": "models\\bundles\\META\\xgboost\\7\\model.json",
+  "scaler_path": "models\\bundles\\META\\xgboost\\7\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\META\\xgboost\\7\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\META\\xgboost\\7"
+}

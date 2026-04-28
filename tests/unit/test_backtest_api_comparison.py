@@ -115,3 +115,64 @@ def test_backtest_run_returns_comparison_payload():
     assert payload["summary"]["benchmark_symbol"] == "^GSPC"
     unavailable_models = [run for run in payload["model_runs"] if run["status"] == "unavailable"]
     assert len(unavailable_models) == 2
+
+
+def test_backtest_run_accepts_simplified_strategy_payload():
+    app = FastAPI()
+    app.include_router(backtest_route.router, prefix="/api/backtest")
+    client = TestClient(app)
+
+    simple_result = {
+        "summary": {
+            "symbol": "MSFT",
+            "start_date": "2022-01-01",
+            "end_date": "2022-03-01",
+            "initial_capital": 100000,
+            "strategy": "ta_only",
+        },
+        "metrics": {
+            "total_return": 4.2,
+            "cagr": 9.1,
+            "sharpe": 1.25,
+            "max_drawdown": -3.5,
+            "win_rate": 50.0,
+            "n_trades": 2,
+            "final_value": 104200,
+            "bh_return": 3.1,
+        },
+        "benchmark_metrics": {"total_return": 3.1, "final_value": 103100},
+        "equity_curve": [
+            {"date": "2022-01-01", "value": 100000},
+            {"date": "2022-03-01", "value": 104200},
+        ],
+        "bh_curve": [
+            {"date": "2022-01-01", "value": 100000},
+            {"date": "2022-03-01", "value": 103100},
+        ],
+        "price_series": [{"date": "2022-01-01", "close": 300.0}],
+        "trades": [
+            {"date": "2022-01-10", "type": "BUY", "shares": 30.0, "price": 310.0, "pnl": None, "return_pct": None, "reason": "SMA20 above SMA50"},
+            {"date": "2022-02-10", "type": "SELL", "shares": 30.0, "price": 322.0, "pnl": 360.0, "return_pct": 3.87, "reason": "RSI 76.0"},
+        ],
+    }
+
+    with patch.object(backtest_route, "run_simple_backtest", return_value=simple_result) as run_mock:
+        response = client.post(
+            "/api/backtest/run",
+            json={
+                "symbol": "MSFT",
+                "start_date": "2022-01-01",
+                "end_date": "2022-03-01",
+                "initial_capital": 100000,
+                "strategy": "ta_only",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["metrics"]["total_return"] == 4.2
+    assert payload["bh_curve"] == simple_result["bh_curve"]
+    assert payload["trades"][0]["shares"] == 30.0
+    assert payload["strategy_runs"][0]["key"] == "ta_only"
+    assert "Buy-and-hold for MSFT returned 3.10%" in payload["benchmark_notice"]
+    run_mock.assert_called_once()

@@ -29,6 +29,9 @@ class _ConstantModel:
     def predict_proba(self, X):
         return [[1 - self.probability_up, self.probability_up] for _ in range(len(X))]
 
+    def predict(self, X):
+        return [0.001 for _ in range(len(X))]
+
 
 class _FakeBundle:
     def __init__(self, probability_up: float = 0.72):
@@ -95,10 +98,11 @@ def test_predict_uses_recursive_one_step_bundle_when_available():
     payload = response.json()
     assert payload["model_info"]["artifact_source"] == "canonical_symbol_model_bundle"
     assert payload["model_available"] is True
-    assert payload["horizon"] == 1
+    assert payload["horizon"] == 5
     assert payload["direction"] == "Bullish"
     assert payload["signal"] == "BUY"
     assert payload["probability_up"] == 0.72
     assert payload["probability_down"] == 0.28
     assert payload["confidence"] == 72.0
     assert payload["prediction_date"]
+    assert len(payload["forecasts"]) == 5

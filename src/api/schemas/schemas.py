@@ -2,12 +2,15 @@
 Pydantic schemas for API request/response validation.
 """
 
-from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import Any, Dict, List, Literal, Optional
 from datetime import date, datetime
 from enum import Enum
 
 from src.defaults import DEFAULT_INDEX_SYMBOL
+
+
+SUPPORTED_FORECAST_HORIZONS = [7, 15, 30, 60]
 
 
 # ── Enums ──────────────────────────────────────────────────────
@@ -197,6 +200,86 @@ class HistoricalSignal(BaseModel):
     direction: Optional[str] = None
 
 
+# ── Ensemble Prediction Schemas ────────────────────────────────
+
+class EnsemblePredictRequest(BaseModel):
+    symbol: str = Field(default=DEFAULT_INDEX_SYMBOL)
+    horizon: Literal[7, 15, 30, 60] = Field(default=30)
+
+
+class EnsembleTrainRequest(BaseModel):
+    symbol: str = Field(default=DEFAULT_INDEX_SYMBOL)
+    horizons: List[int] = Field(default_factory=lambda: SUPPORTED_FORECAST_HORIZONS.copy())
+    lookback_days: int = Field(default=1825, ge=365, le=3650)
+    model_types: List[str] = Field(default_factory=lambda: ["xgboost", "random_forest", "lstm"])
+
+    @field_validator("horizons")
+    @classmethod
+    def validate_supported_horizons(cls, value: List[int]) -> List[int]:
+        requested = sorted({int(item) for item in value})
+        unsupported = [item for item in requested if item not in SUPPORTED_FORECAST_HORIZONS]
+        if unsupported:
+            raise ValueError(
+                f"Unsupported forecast horizon(s): {unsupported}. "
+                f"Supported horizons are {SUPPORTED_FORECAST_HORIZONS}."
+            )
+        return requested
+
+    @field_validator("model_types")
+    @classmethod
+    def validate_model_types(cls, value: List[str]) -> List[str]:
+        supported = {"xgboost", "random_forest", "lstm"}
+        requested = [str(item) for item in value]
+        unsupported = [item for item in requested if item not in supported]
+        if unsupported:
+            raise ValueError(
+                f"Unsupported model type(s): {unsupported}. "
+                "Supported model types are xgboost, random_forest, and lstm."
+            )
+        return requested
+
+
+class ModelPredictionDetail(BaseModel):
+    prediction: float
+    weight: float
+    mae: float
+    rmse: float
+    mape: float
+    directional_accuracy: float
+
+
+class EnsembleSummary(BaseModel):
+    target: float
+    change_pct: float
+    upper_90: float
+    lower_90: float
+    reliability: str
+    consensus: str
+    signal: Optional[str] = None
+
+
+class EnsembleForecastPoint(BaseModel):
+    date: str
+    ensemble: float
+    lstm: Optional[float] = None
+    xgboost: Optional[float] = None
+    random_forest: Optional[float] = None
+    upper_90: float
+    lower_90: float
+
+
+class EnsemblePredictResponse(BaseModel):
+    symbol: str
+    current_price: float
+    horizon: int
+    ensemble: Optional[EnsembleSummary] = None
+    weights: Dict[str, float] = Field(default_factory=dict)
+    forecast_points: List[EnsembleForecastPoint] = Field(default_factory=list)
+    status: str = Field(default="ok")
+    model_available: bool = Field(default=True)
+    message: Optional[str] = None
+
+
 # ── Pattern Detection Schemas ──────────────────────────────────
 class KeyLevel(BaseModel):
     date: str
@@ -216,7 +299,6 @@ class MultiTFPatternItem(BaseModel):
     # Path & levels
     key_levels: List[KeyLevel]
     trendlines: Optional[List[List[KeyLevel]]] = None
-
     # Actionable levels
     entry_price: Optional[float] = None
     neckline: Optional[float] = None
@@ -321,6 +403,7 @@ class BacktestRequest(BaseModel):
     start_date: str = Field(default="2022-01-01")
     end_date: str = Field(default="2024-12-31")
     initial_capital: float = Field(default=100000)
+    strategy: Optional[Literal["ta_only", "ml_hybrid", "buy_hold"]] = Field(default=None)
     model_type: ModelTypeEnum = Field(default=ModelTypeEnum.xgboost)
     primary_model: Optional[ModelTypeEnum] = Field(default=None)
     position_size: float = Field(default=0.1, ge=0.01, le=1.0)
@@ -344,7 +427,9 @@ class BacktestResponse(BaseModel):
     validation: Optional[Dict[str, Any]] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
     equity_curve: List[Dict[str, Any]] = Field(default_factory=list)
+    bh_curve: List[Dict[str, Any]] = Field(default_factory=list)
     trades: List[Dict[str, Any]] = Field(default_factory=list)
+    benchmark_notice: Optional[str] = None
     message: str
 
 

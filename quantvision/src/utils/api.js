@@ -128,6 +128,26 @@ export async function fetchHistoricalSignals(symbol, days = 90, modelType = "xgb
     return apiFetch(`/predict/historical-signals/${encodeSymbol(symbol)}?days=${days}&model_type=${modelType}`);
 }
 
+// ── Ensemble Predictions ─────────────────────────────────────
+export async function fetchEnsemblePrediction(symbol, horizon = 30) {
+    return apiFetch("/predict/ensemble", {
+        method: "POST",
+        body: JSON.stringify({ symbol, horizon }),
+    });
+}
+
+export async function triggerEnsembleTraining(symbol, horizons = [7, 15, 30, 60], modelTypes = ["xgboost", "random_forest", "lstm"]) {
+    return apiFetch("/predict/ensemble/train", {
+        method: "POST",
+        body: JSON.stringify({ symbol, horizons, model_types: modelTypes, lookback_days: 1825 }),
+    });
+}
+
+export async function getEnsembleTrainingStatus(jobId) {
+    return apiFetch(`/predict/ensemble/train/status/${jobId}`);
+}
+
+// ── Patterns ─────────────────────────────────────────────────
 export async function fetchPatterns(symbol, tf = "1d") {
     return apiFetch(`/patterns/${encodeSymbol(symbol)}?tf=${tf}`);
 }

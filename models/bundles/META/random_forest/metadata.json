@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-04-13T05:14:04.469432",
+  "trained_at": "2026-04-25T04:09:59.075878",
   "objective": "next_day_direction",
   "target_type": "direction",
   "feature_config": {
@@ -32,55 +32,55 @@
     "sequence_length": 60
   },
   "split_sizes": {
-    "train": 223,
+    "train": 224,
     "validation": 32,
     "test": 64
   },
-  "samples": 319,
-  "training_sample_count": 223,
+  "samples": 320,
+  "training_sample_count": 224,
   "features": 59,
   "feature_count": 59,
   "params": {},
   "metrics": {
     "validation": {
-      "accuracy": 0.46875,
+      "accuracy": 0.53125,
       "precision": 0.5,
-      "recall": 0.5882352941176471,
-      "f1": 0.5405405405405406,
-      "directional_accuracy": 0.46875,
-      "roc_auc": 0.37254901960784315,
-      "positive_rate": 0.34375,
-      "average_probability_up": 0.49882006645202637
+      "recall": 0.8666666666666667,
+      "f1": 0.6341463414634146,
+      "directional_accuracy": 0.53125,
+      "roc_auc": 0.4509803921568628,
+      "positive_rate": 0.65625,
+      "average_probability_up": 0.5895663499832153
     },
     "test": {
-      "accuracy": 0.453125,
-      "precision": 0.4482758620689655,
-      "recall": 0.40625,
-      "f1": 0.4262295081967213,
-      "directional_accuracy": 0.453125,
-      "roc_auc": 0.453125,
-      "positive_rate": 0.296875,
-      "average_probability_up": 0.49513858556747437
+      "accuracy": 0.46875,
+      "precision": 0.5,
+      "recall": 0.7352941176470589,
+      "f1": 0.5952380952380952,
+      "directional_accuracy": 0.46875,
+      "roc_auc": 0.43333333333333335,
+      "positive_rate": 0.578125,
+      "average_probability_up": 0.5763460993766785
     }
   },
   "backtest": {
     "validation": {
-      "strategy_return": -0.04970508813858032,
-      "benchmark_return": 0.09749126434326172,
-      "trade_days": 11,
-      "long_ratio": 0.34375,
-      "win_rate": 0.36363636363636365
+      "strategy_return": -0.03163248300552368,
+      "benchmark_return": -0.02097141742706299,
+      "trade_days": 21,
+      "long_ratio": 0.65625,
+      "win_rate": 0.47619047619047616
     },
     "test": {
-      "strategy_return": -0.0015813112258911133,
+      "strategy_return": NaN,
       "benchmark_return": NaN,
-      "trade_days": 19,
-      "long_ratio": 0.296875,
-      "win_rate": 0.47368421052631576
+      "trade_days": 37,
+      "long_ratio": 0.578125,
+      "win_rate": 0.4864864864864865
     },
     "rule": "long_when_probability_up_at_least_0.55_else_flat"
   },
-  "version_id": "random_forest_META_h1_20260413_051404",
+  "version_id": "random_forest_META_h1_20260425_040959",
   "model_type": "random_forest",
   "symbol": "META",
   "training_symbol": "META",

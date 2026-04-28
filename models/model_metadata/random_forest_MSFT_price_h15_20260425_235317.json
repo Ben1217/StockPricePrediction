@@ -1,0 +1,107 @@
+{
+  "version_id": "random_forest_MSFT_price_h15_20260425_235317",
+  "model_type": "random_forest",
+  "symbol": "MSFT",
+  "horizon": 15,
+  "training_horizon": 15,
+  "horizons": [
+    15
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_15d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-25T23:53:17.330479",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 835,
+    "val": 119,
+    "test": 238
+  },
+  "training_rows": 1192,
+  "val_metrics": {
+    "mae": 0.05686001107096672,
+    "rmse": 0.07776251384251785,
+    "mape": 5.686001107096672,
+    "directional_accuracy": 0.5378151260504201
+  },
+  "test_metrics": {
+    "mae": 0.0852256640791893,
+    "rmse": 0.09774058991545079,
+    "mape": 8.52256640791893,
+    "directional_accuracy": 0.47058823529411764
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.05686001107096672,
+      "rmse": 0.07776251384251785,
+      "mape": 5.686001107096672,
+      "directional_accuracy": 0.5378151260504201
+    },
+    "test": {
+      "mae": 0.0852256640791893,
+      "rmse": 0.09774058991545079,
+      "mape": 8.52256640791893,
+      "directional_accuracy": 0.47058823529411764
+    }
+  },
+  "params": {},
+  "oob_error": 0.3056592536438708,
+  "model_path": "models\\bundles\\MSFT\\random_forest\\15\\model.joblib",
+  "scaler_path": "models\\bundles\\MSFT\\random_forest\\15\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\MSFT\\random_forest\\15\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\MSFT\\random_forest\\15"
+}

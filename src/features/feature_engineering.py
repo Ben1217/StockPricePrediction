@@ -8,7 +8,7 @@ import numpy as np
 from typing import Dict, Tuple, List, Optional
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from .technical_indicators import add_all_technical_indicators
+from .technical_indicators import add_all_technical_indicators, add_price_action_features
 from .candlestick_patterns import detect_candlestick_patterns
 from ..models.regime_detection import MarketRegimeDetector
 from ..utils.logger import get_logger
@@ -25,15 +25,32 @@ DEFAULT_FEATURE_CONFIG: Dict[str, object] = {
 }
 
 MODEL_FEATURE_EXCLUDE_COLUMNS = {
+    "Adj Close",
+    "Target",
+    "Forward_Return",
+}
+
+# Regression target column names for the supported prediction horizons.
+REGRESSION_TARGET_COLUMNS = [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d",
+]
+REGRESSION_HORIZONS = [7, 15, 30, 60]
+CORE_REGRESSION_FEATURE_COLUMNS = [
     "Open",
     "High",
     "Low",
     "Close",
     "Volume",
-    "Adj Close",
-    "Target",
-    "Forward_Return",
-}
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility",
+]
 
 
 def normalize_feature_config(feature_config: Optional[Dict] = None) -> Dict:
@@ -56,76 +73,50 @@ def create_features(
     lag_periods: List[int] = [1, 2, 3, 5, 10]
 ) -> pd.DataFrame:
     """
-    Create all features for model training
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Raw stock data with OHLCV columns
-    include_technical : bool
-        Whether to add technical indicators
-    include_lags : bool
-        Whether to add lagged features
-    lag_periods : list
-        Periods for lag features
-
-    Returns
-    -------
-    pandas.DataFrame
-        Data with all features
+    Create all features for model training.
+    Optimized for the Ensemble predictor: core features only.
     """
+    import ta
     data = df.copy()
-    
-    # Add technical indicators
-    if include_technical:
-        data = add_all_technical_indicators(data)
-    
-    # Calculate returns
-    data['Daily_Return'] = data['Close'].pct_change()
-    data['Log_Return'] = np.log(data['Close'] / data['Close'].shift(1))
-    
-    # Price-based features
-    data['High_Low_Range'] = (data['High'] - data['Low']) / data['Close']
-    data['Open_Close_Range'] = (data['Close'] - data['Open']) / data['Open']
-    
-    # Add lagged features
-    if include_lags:
-        for lag in lag_periods:
-            data[f'Close_Lag_{lag}'] = data['Close'].shift(lag)
-            data[f'Return_Lag_{lag}'] = data['Daily_Return'].shift(lag)
-            data[f'Volume_Lag_{lag}'] = data['Volume'].shift(lag)
-    
-    # Day of week (if datetime index)
-    if isinstance(data.index, pd.DatetimeIndex):
-        data['DayOfWeek'] = data.index.dayofweek
-        data['Month'] = data.index.month
-        data['Quarter'] = data.index.quarter
-    
-    # Market regime detection (HMM)
-    if include_regime:
-        try:
-            returns = data['Close'].pct_change().dropna()
-            if len(returns) > 30:  # need minimum data for HMM
-                detector = MarketRegimeDetector()
-                detector.fit(returns)
-                regime_df = detector.get_regime_features(returns)
-                data = data.join(regime_df)
-                logger.info(f"Added HMM regime features: {regime_df.columns.tolist()}")
-        except Exception as e:
-            logger.warning(f"Regime detection failed, skipping: {e}")
 
-    # Candlestick pattern detection
-    if include_candlesticks:
-        try:
-            cdl_df = detect_candlestick_patterns(data)
-            data = data.join(cdl_df)
-            logger.info(f"Added {len(cdl_df.columns)} candlestick pattern features")
-        except Exception as e:
-            logger.warning(f"Candlestick detection failed, skipping: {e}")
+    # Core required features
+    close = data['Close']
 
-    logger.info(f"Created features: {len(data.columns)} total columns")
-    
+    # Returns
+    data['Daily_Return'] = close.pct_change()
+
+    # Moving averages
+    data['SMA_20'] = ta.trend.sma_indicator(close, window=20)
+    data['SMA_50'] = ta.trend.sma_indicator(close, window=50)
+
+    # Momentum
+    data['RSI_14'] = ta.momentum.rsi(close, window=14)
+    macd = ta.trend.MACD(close)
+    data['MACD'] = macd.macd()
+
+    # Volatility
+    data['Volatility'] = data['Daily_Return'].rolling(window=20).std()
+
+    # Keep only the requested subset
+    keep_cols = CORE_REGRESSION_FEATURE_COLUMNS.copy()
+    # Ensure all target columns are kept if present
+    keep_cols += [col for col in data.columns if col.startswith("target_return_")]
+
+    # Drop any other columns that snuck in
+    data = data[[col for col in keep_cols if col in data.columns]]
+
+    logger.info(f"Created restricted core features: {len(data.columns)} total columns")
+
     return data
+
+
+def _adjusted_close_for_targets(df: pd.DataFrame) -> pd.Series:
+    """Use adjusted close for supervised return targets, falling back to close."""
+    if "Adj Close" in df.columns:
+        series = df["Adj Close"]
+    else:
+        series = df["Close"]
+    return pd.to_numeric(series, errors="coerce")
 
 
 def build_feature_frame(df: pd.DataFrame, feature_config: Optional[Dict] = None) -> pd.DataFrame:
@@ -203,7 +194,7 @@ def create_target_variable(
         Data with target column added
     """
     data = df.copy()
-    
+
     if target_type == 'return':
         data['Target'] = data['Close'].pct_change(horizon).shift(-horizon)
     elif target_type == 'price':
@@ -213,9 +204,9 @@ def create_target_variable(
         data['Target'] = (future_return > classification_threshold).astype(int)
     else:
         raise ValueError(f"Unknown target_type: {target_type}")
-    
+
     logger.info(f"Created target variable: {target_type}, horizon={horizon}")
-    
+
     return data
 
 
@@ -228,6 +219,10 @@ def select_feature_columns(
     """Select numeric model features in a stable column order."""
     exclude = set(MODEL_FEATURE_EXCLUDE_COLUMNS)
     exclude.add(target_column)
+    # Also exclude regression target columns to avoid leakage
+    for col in REGRESSION_TARGET_COLUMNS:
+        exclude.add(col)
+    exclude.update(col for col in df.columns if str(col).startswith("target_return_"))
     if exclude_columns:
         exclude.update(exclude_columns)
 
@@ -267,6 +262,72 @@ def build_supervised_dataset(
         horizon,
     )
     return dataset, resolved_feature_columns
+
+
+def build_regression_dataset(
+    df: pd.DataFrame,
+    horizon: int,
+    feature_config: Optional[Dict] = None,
+) -> Tuple[pd.DataFrame, List[str], str]:
+    """
+    Build a clean regression dataset for direct return forecasting.
+
+    The target is the future adjusted-close return at `horizon` trading days
+    ahead. All features are computed from past/current data only (no leakage).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Raw OHLCV data
+    horizon : int
+        Number of trading days ahead to predict (e.g. 7, 15, 30, 60)
+    feature_config : dict, optional
+        Feature pipeline configuration
+
+    Returns
+    -------
+    dataset : pd.DataFrame
+        Clean dataset with feature columns + target_col
+    feature_columns : List[str]
+        Names of feature columns (excludes target)
+    target_col : str
+        Name of the target column (e.g. "target_return_30d")
+    """
+    target_col = f"target_return_{horizon}d"
+
+    # 1. Build feature frame
+    feature_frame = clean_market_data(build_feature_frame(df, feature_config=feature_config))
+
+    # 2. Add multi-horizon targets. Shift(-h) makes today's feature row learn
+    # the future return h trading rows ahead without using future values in any
+    # indicator calculation.
+    adjusted_close = _adjusted_close_for_targets(df).reindex(feature_frame.index)
+    target_horizons = sorted({int(horizon), *REGRESSION_HORIZONS})
+    for h in target_horizons:
+        col = f"target_return_{h}d"
+        feature_frame[col] = adjusted_close.shift(-h) / adjusted_close - 1.0
+
+    # 3. Select the exact 11 features requested by the prediction spec.
+    feature_columns = [
+        col
+        for col in CORE_REGRESSION_FEATURE_COLUMNS
+        if col in feature_frame.columns and int(feature_frame[col].notna().sum()) >= 30
+    ]
+
+    if not feature_columns:
+        return feature_frame.iloc[0:0].copy(), [], target_col
+
+    # 4. Drop rows where the target or any feature is NaN
+    dataset = feature_frame.dropna(subset=feature_columns + [target_col]).copy()
+
+    logger.info(
+        "Built regression dataset: %s rows, %s features, horizon=%sd, target=%s",
+        len(dataset),
+        len(feature_columns),
+        horizon,
+        target_col,
+    )
+    return dataset, feature_columns, target_col
 
 
 def _create_scaler(scaler_type: Optional[str]):
@@ -415,27 +476,27 @@ def prepare_features_for_model(
         X_train, X_test, y_train, y_test, scaler
     """
     data = df.copy()
-    
+
     # Remove rows with NaN in target
     data = data.dropna(subset=[target_column])
-    
+
     # Select features
     if feature_columns is None:
         exclude = [target_column, 'Target', 'Close', 'Open', 'High', 'Low']
-        feature_columns = [col for col in data.select_dtypes(include=[np.number]).columns 
+        feature_columns = [col for col in data.select_dtypes(include=[np.number]).columns
                           if col not in exclude]
-    
+
     # Drop rows with NaN in features
     data = data.dropna(subset=feature_columns)
-    
+
     X = data[feature_columns].values
     y = data[target_column].values
-    
+
     # Time series split (no shuffling)
     split_idx = int(len(X) * (1 - test_size))
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
-    
+
     # Scale features
     scaler = None
     if scaler_type == 'minmax':
@@ -446,9 +507,9 @@ def prepare_features_for_model(
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X_train)
         X_test = scaler.transform(X_test)
-    
+
     logger.info(f"Prepared data: {X_train.shape[0]} train, {X_test.shape[0]} test samples")
-    
+
     return X_train, X_test, y_train, y_test, scaler
 
 
@@ -475,9 +536,9 @@ def create_sequences(
         X_sequences, y_sequences
     """
     X_seq, y_seq = [], []
-    
+
     for i in range(sequence_length - 1, len(X)):
         X_seq.append(X[i-sequence_length+1:i+1])
         y_seq.append(y[i])
-    
+
     return np.array(X_seq), np.array(y_seq)

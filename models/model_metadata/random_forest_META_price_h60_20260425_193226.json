@@ -1,0 +1,99 @@
+{
+  "version_id": "random_forest_META_price_h60_20260425_193226",
+  "model_type": "random_forest",
+  "symbol": "META",
+  "horizon": 60,
+  "training_horizon": 60,
+  "horizons": [
+    60
+  ],
+  "objective": "future_close_price",
+  "target_type": "price_regression",
+  "target_col": "target_60d",
+  "target_columns": [
+    "target_7d",
+    "target_15d",
+    "target_30d",
+    "target_60d"
+  ],
+  "trained_at": "2026-04-25T19:32:26.650676",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 803,
+    "val": 115,
+    "test": 229
+  },
+  "training_rows": 1147,
+  "val_metrics": {
+    "mae": 51.395545959472656,
+    "rmse": 64.95995611480583,
+    "mape": 8.091897964477539,
+    "directional_accuracy": 0.808695652173913
+  },
+  "test_metrics": {
+    "mae": 107.26636505126953,
+    "rmse": 120.81627483756068,
+    "mape": 15.214046478271484,
+    "directional_accuracy": 0.5021834061135371
+  },
+  "metrics": {
+    "validation": {
+      "mae": 51.395545959472656,
+      "rmse": 64.95995611480583,
+      "mape": 8.091897964477539,
+      "directional_accuracy": 0.808695652173913
+    },
+    "test": {
+      "mae": 107.26636505126953,
+      "rmse": 120.81627483756068,
+      "mape": 15.214046478271484,
+      "directional_accuracy": 0.5021834061135371
+    }
+  },
+  "params": {},
+  "model_path": "models\\bundles\\META\\random_forest\\60\\model.joblib",
+  "scaler_path": "models\\bundles\\META\\random_forest\\60\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\META\\random_forest\\60\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\META\\random_forest\\60"
+}

@@ -716,7 +716,7 @@ export default function App() {
                             onMouseLeave={() => setHoveredChip(null)}
                         >
                             <button
-                                onClick={() => { setSelectedTicker(t); setActiveTab("analysis"); }}
+                                onClick={() => setSelectedTicker(t)}
                                 style={{
                                     background: active ? C.amberDim : hovered ? C.bg2 : "transparent",
                                     border: `1px solid ${active ? C.amber + "55" : "transparent"}`,

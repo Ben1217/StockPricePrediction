@@ -1,0 +1,107 @@
+{
+  "version_id": "xgboost_META_price_h60_20260425_231818",
+  "model_type": "xgboost",
+  "symbol": "META",
+  "horizon": 60,
+  "training_horizon": 60,
+  "horizons": [
+    60
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_60d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-25T23:18:18.480207",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-26",
+    "end": "2026-04-24"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 803,
+    "val": 115,
+    "test": 229
+  },
+  "training_rows": 1147,
+  "val_metrics": {
+    "mae": 0.11335093528032303,
+    "rmse": 0.14280542127607618,
+    "mape": 11.335093528032303,
+    "directional_accuracy": 0.5565217391304348
+  },
+  "test_metrics": {
+    "mae": 0.15744008123874664,
+    "rmse": 0.1848604857993622,
+    "mape": 15.744008123874664,
+    "directional_accuracy": 0.5764192139737991
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.11335093528032303,
+      "rmse": 0.14280542127607618,
+      "mape": 11.335093528032303,
+      "directional_accuracy": 0.5565217391304348
+    },
+    "test": {
+      "mae": 0.15744008123874664,
+      "rmse": 0.1848604857993622,
+      "mape": 15.744008123874664,
+      "directional_accuracy": 0.5764192139737991
+    }
+  },
+  "params": {},
+  "oob_error": null,
+  "model_path": "models\\bundles\\META\\xgboost\\60\\model.json",
+  "scaler_path": "models\\bundles\\META\\xgboost\\60\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\META\\xgboost\\60\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\META\\xgboost\\60"
+}

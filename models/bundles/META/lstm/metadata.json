@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-04-13T05:14:07.562769",
+  "trained_at": "2026-04-25T04:10:00.955430",
   "objective": "next_day_direction",
   "target_type": "direction",
   "feature_config": {
@@ -32,12 +32,12 @@
     "sequence_length": 60
   },
   "split_sizes": {
-    "train": 223,
+    "train": 224,
     "validation": 32,
     "test": 64
   },
-  "samples": 319,
-  "training_sample_count": 223,
+  "samples": 320,
+  "training_sample_count": 224,
   "features": 59,
   "feature_count": 59,
   "params": {
@@ -45,30 +45,30 @@
   },
   "metrics": {
     "validation": {
+      "accuracy": 0.53125,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "directional_accuracy": 0.53125,
+      "roc_auc": 0.5529411764705883,
+      "positive_rate": 0.0,
+      "average_probability_up": 0.4683469533920288
+    },
+    "test": {
       "accuracy": 0.46875,
       "precision": 0.0,
       "recall": 0.0,
       "f1": 0.0,
       "directional_accuracy": 0.46875,
-      "roc_auc": 0.4549019607843137,
+      "roc_auc": 0.4014705882352941,
       "positive_rate": 0.0,
-      "average_probability_up": 0.4857301712036133
-    },
-    "test": {
-      "accuracy": 0.5,
-      "precision": 0.0,
-      "recall": 0.0,
-      "f1": 0.0,
-      "directional_accuracy": 0.5,
-      "roc_auc": 0.3134765625,
-      "positive_rate": 0.0,
-      "average_probability_up": 0.4854395091533661
+      "average_probability_up": 0.46834003925323486
     }
   },
   "backtest": {
     "validation": {
       "strategy_return": 0.0,
-      "benchmark_return": 0.09749126434326172,
+      "benchmark_return": -0.02097141742706299,
       "trade_days": 0,
       "long_ratio": 0.0,
       "win_rate": 0.0
@@ -82,7 +82,7 @@
     },
     "rule": "long_when_probability_up_at_least_0.55_else_flat"
   },
-  "version_id": "lstm_META_h1_20260413_051407",
+  "version_id": "lstm_META_h1_20260425_041000",
   "model_type": "lstm",
   "symbol": "META",
   "training_symbol": "META",
