@@ -1,0 +1,137 @@
+2026-04-29 08:36:40.729 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-04-29 08:36:40.729 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-04-29 08:36:40.743 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+2026-04-29 08:36:40.743 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
+INFO:     Started server process [19984]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)
+handle: <Handle _ProactorBasePipeTransport._call_connection_lost(None)>
+Traceback (most recent call last):
+  File "C:\Users\tanye\AppData\Local\Programs\Python\Python311\Lib\asyncio\events.py", line 84, in _run
+    self._context.run(self._callback, *self._args)
+  File "C:\Users\tanye\AppData\Local\Programs\Python\Python311\Lib\asyncio\proactor_events.py", line 165, in _call_connection_lost
+    self._sock.shutdown(socket.SHUT_RDWR)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:08.724299, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:09.561231, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:11.048382, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:13.873501, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:14.636850, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:15.702393, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:21.805540, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:29.033076, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:32.096838, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:38.302576, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:39.028983, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:39.776727, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:38:48.107536, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:39:10.296989, threshold=18:00:00.
+Stale data detected: timestamp=2026-04-28T00:00:00+00:00, age=1 day, 0:39:16.954063, threshold=18:00:00.
+Unhandled API exception at /api/predict/historical-signals/^GSPC
+Traceback (most recent call last):
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\cors.py", line 96, in __call__
+    await self.simple_response(scope, receive, send, request_headers=headers)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\cors.py", line 154, in simple_response
+    await self.app(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\src\api\routes\predict.py", line 562, in get_historical_signals
+    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\src\models\model_bundle.py", line 469, in load_model_bundle
+    model.load(str(model_path))
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\src\models\xgboost_model.py", line 136, in load
+    self.model.load_model(filepath)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\xgboost\sklearn.py", line 1132, in load_model
+    raise TypeError(
+TypeError: Loading an estimator with different type. Expecting: classifier, got: regressor
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 421, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 56, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\applications.py", line 90, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\cors.py", line 96, in __call__
+    await self.simple_response(scope, receive, send, request_headers=headers)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\cors.py", line 154, in simple_response
+    await self.app(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\routing.py", line 660, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\routing.py", line 680, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\routing.py", line 276, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 134, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 120, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 674, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\fastapi\routing.py", line 328, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\src\api\routes\predict.py", line 562, in get_historical_signals
+    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\src\models\model_bundle.py", line 469, in load_model_bundle
+    model.load(str(model_path))
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\src\models\xgboost_model.py", line 136, in load
+    self.model.load_model(filepath)
+  File "C:\Users\tanye\Downloads\StockPricePrediction-fresh\.venv\Lib\site-packages\xgboost\sklearn.py", line 1132, in load_model
+    raise TypeError(
+TypeError: Loading an estimator with different type. Expecting: classifier, got: regressor

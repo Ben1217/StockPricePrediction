@@ -56,6 +56,7 @@ _TIMEFRAME_REQUIRED_CANDLES = {
 MIN_DECISION_CANDLES = 120
 MIN_SETUP_CONFIDENCE = 70.0
 MIN_SETUP_RISK_REWARD = 1.5
+MAX_ACTIONABLE_ENTRY_DISTANCE_PCT = 15.0
 
 
 # ── Pivot Detection ─────────────────────────────────────────────
@@ -124,7 +125,7 @@ def _derive_entry_price(pattern: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def _is_actionable_pattern(pattern: Dict[str, Any]) -> bool:
+def _has_required_trade_levels(pattern: Dict[str, Any]) -> bool:
     return (
         pattern.get("direction") in {"bullish", "bearish"}
         and pattern.get("status") != "broken"
@@ -132,6 +133,119 @@ def _is_actionable_pattern(pattern: Dict[str, Any]) -> bool:
         and pattern.get("target_price") is not None
         and pattern.get("stop_loss") is not None
     )
+
+
+def _is_price_relevant_pattern(pattern: Dict[str, Any]) -> bool:
+    relevance = pattern.get("setup_relevance_status")
+    return relevance in (None, "active", "unknown")
+
+
+def _is_actionable_pattern(pattern: Dict[str, Any]) -> bool:
+    return _has_required_trade_levels(pattern) and _is_price_relevant_pattern(pattern)
+
+
+def _is_target_reached(direction: str, current_price: float, target_price: float) -> bool:
+    if direction == "bullish":
+        return current_price >= target_price
+    if direction == "bearish":
+        return current_price <= target_price
+    return False
+
+
+def _is_stop_breached(direction: str, current_price: float, stop_loss: float) -> bool:
+    if direction == "bullish":
+        return current_price <= stop_loss
+    if direction == "bearish":
+        return current_price >= stop_loss
+    return False
+
+
+def _levels_are_directional(direction: str, entry_price: float, stop_loss: float, target_price: float) -> bool:
+    if direction == "bullish":
+        return stop_loss < entry_price < target_price
+    if direction == "bearish":
+        return target_price < entry_price < stop_loss
+    return False
+
+
+def _setup_relevance_fields(
+    pattern: Dict[str, Any],
+    market_context: Optional[Dict[str, Any]],
+    max_entry_distance_pct: float = MAX_ACTIONABLE_ENTRY_DISTANCE_PCT,
+) -> Dict[str, Any]:
+    entry_price = _derive_entry_price(pattern)
+    target_price = _safe_float(pattern.get("target_price"))
+    stop_loss = _safe_float(pattern.get("stop_loss"))
+    current_price = _safe_float((market_context or {}).get("close"))
+    direction = pattern.get("direction")
+
+    fields: Dict[str, Any] = {
+        "current_price": round(current_price, 2) if current_price is not None else None,
+        "entry_distance_pct": None,
+        "setup_relevance_status": "unknown",
+        "setup_relevance_reason": None,
+        "setup_relevance_ok": True,
+    }
+
+    if not _has_required_trade_levels(pattern):
+        fields.update({
+            "setup_relevance_status": "invalid",
+            "setup_relevance_reason": "Missing entry / stop / target",
+            "setup_relevance_ok": False,
+        })
+        return fields
+
+    if current_price is None or current_price <= 0:
+        return fields
+
+    if entry_price is None or target_price is None or stop_loss is None or entry_price <= 0 or target_price <= 0 or stop_loss <= 0:
+        fields.update({
+            "setup_relevance_status": "invalid",
+            "setup_relevance_reason": "Invalid non-positive trade level",
+            "setup_relevance_ok": False,
+        })
+        return fields
+
+    entry_distance_pct = abs(current_price - entry_price) / entry_price * 100.0
+    fields["entry_distance_pct"] = round(entry_distance_pct, 2)
+
+    if direction not in {"bullish", "bearish"} or not _levels_are_directional(direction, entry_price, stop_loss, target_price):
+        fields.update({
+            "setup_relevance_status": "invalid",
+            "setup_relevance_reason": "Entry, stop, and target are not directionally consistent",
+            "setup_relevance_ok": False,
+        })
+        return fields
+
+    if _is_target_reached(direction, current_price, target_price):
+        fields.update({
+            "setup_relevance_status": "completed",
+            "setup_relevance_reason": "Current price has already reached or exceeded the primary target",
+            "setup_relevance_ok": False,
+        })
+        return fields
+
+    if _is_stop_breached(direction, current_price, stop_loss):
+        fields.update({
+            "setup_relevance_status": "invalid",
+            "setup_relevance_reason": "Current price has already breached the stop level",
+            "setup_relevance_ok": False,
+        })
+        return fields
+
+    if entry_distance_pct > max_entry_distance_pct:
+        fields.update({
+            "setup_relevance_status": "stale",
+            "setup_relevance_reason": (
+                f"Entry is {entry_distance_pct:.1f}% away from current price, "
+                f"above the {max_entry_distance_pct:.0f}% active threshold"
+            ),
+            "setup_relevance_ok": False,
+        })
+        return fields
+
+    fields["setup_relevance_status"] = "active"
+    return fields
 
 
 def calculate_risk_reward(pattern: Dict[str, Any]) -> Optional[float]:
@@ -435,6 +549,8 @@ def build_best_trade_setup(pattern: Optional[Dict[str, Any]]) -> Optional[Dict[s
         "direction": pattern.get("direction"),
         "pattern_status": pattern.get("status"),
         "confidence_score": round(confidence, 1) if confidence is not None else None,
+        "current_price": round(float(pattern["current_price"]), 2) if pattern.get("current_price") is not None else None,
+        "entry_distance_pct": round(float(pattern["entry_distance_pct"]), 2) if pattern.get("entry_distance_pct") is not None else None,
         "entry_price": round(entry_price, 2),
         "stop_loss": round(stop_loss, 2),
         "primary_target": round(primary_target, 2),
@@ -457,6 +573,7 @@ def rank_patterns(
     for pattern in patterns:
         enriched = dict(pattern)
         enriched["entry_price"] = _derive_entry_price(enriched)
+        enriched.update(_setup_relevance_fields(enriched, market_context))
         risk_reward = calculate_risk_reward(enriched)
         ml_probability = _score_ml_probability(enriched)
         pattern_quality = _score_pattern_quality(enriched)
@@ -555,7 +672,8 @@ def evaluate_best_setup(
 
     sufficient_data = candle_count >= required_candles
     has_detected_pattern = len(ranked) > 0
-    levels_ok = bool(candidate and _is_actionable_pattern(candidate))
+    levels_ok = bool(candidate and _has_required_trade_levels(candidate))
+    price_relevance_ok = True if not candidate else _is_price_relevant_pattern(candidate)
     confidence_ok = bool(candidate and float(candidate.get("confidence", 0.0)) >= min_confidence)
     risk_reward_ok = bool(candidate_risk_reward is not None and candidate_risk_reward >= min_risk_reward)
 
@@ -586,12 +704,24 @@ def evaluate_best_setup(
     elif not has_detected_pattern:
         reason_code = "NO_PATTERN"
         reason = "No pattern detected"
-    elif not confidence_ok:
-        reason_code = "LOW_CONFIDENCE"
-        reason = "Confidence below threshold"
     elif not levels_ok:
         reason_code = "INVALID_LEVELS"
         reason = "Missing entry / stop / target"
+    elif not price_relevance_ok:
+        relevance_status = candidate.get("setup_relevance_status") if candidate else None
+        relevance_reason = candidate.get("setup_relevance_reason") if candidate else None
+        if relevance_status == "completed":
+            reason_code = "SETUP_COMPLETED"
+            reason = relevance_reason or "Pattern target has already been reached"
+        elif relevance_status == "stale":
+            reason_code = "SETUP_STALE"
+            reason = relevance_reason or "Pattern entry is too far from current price"
+        else:
+            reason_code = "INVALID_LEVELS"
+            reason = relevance_reason or "Pattern levels are not relevant to current price"
+    elif not confidence_ok:
+        reason_code = "LOW_CONFIDENCE"
+        reason = "Confidence below threshold"
     elif not risk_reward_ok:
         reason_code = "LOW_RR"
         reason = "Risk/reward too weak"
@@ -612,6 +742,7 @@ def evaluate_best_setup(
         "has_detected_pattern": has_detected_pattern,
         "confidence_ok": confidence_ok,
         "levels_ok": levels_ok,
+        "price_relevance_ok": price_relevance_ok,
         "risk_reward_ok": risk_reward_ok,
         "no_conflicting_filters": no_conflicting_filters,
         "candle_count": candle_count,
@@ -622,6 +753,10 @@ def evaluate_best_setup(
         "candidate_confidence": float(candidate.get("confidence")) if candidate and candidate.get("confidence") is not None else None,
         "candidate_risk_reward": round(candidate_risk_reward, 2) if candidate_risk_reward is not None else None,
         "candidate_strength_label": candidate_setup.get("strength_label") if candidate_setup else None,
+        "candidate_relevance_status": candidate.get("setup_relevance_status") if candidate else None,
+        "candidate_relevance_reason": candidate.get("setup_relevance_reason") if candidate else None,
+        "candidate_entry_distance_pct": float(candidate.get("entry_distance_pct")) if candidate and candidate.get("entry_distance_pct") is not None else None,
+        "current_price": float(candidate.get("current_price")) if candidate and candidate.get("current_price") is not None else None,
         "conflicting_pattern_names": conflicting_patterns,
         "best_setup": candidate_setup if setup_available else None,
         "best_pattern": dict(candidate) if setup_available and candidate else None,

@@ -1,6 +1,49 @@
 {
-  "trained_at": "2026-04-11T22:20:01.385349",
-  "target_type": "return",
+  "version_id": "xgboost_^GSPC_price_h7_20260429_020718",
+  "model_type": "xgboost",
+  "symbol": "^GSPC",
+  "horizon": 7,
+  "training_horizon": 7,
+  "horizons": [
+    7
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_7d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-29T02:07:18.349625",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-30",
+    "end": "2026-04-28"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
   "feature_config": {
     "include_technical": true,
     "include_lags": true,
@@ -14,105 +57,51 @@
       10
     ]
   },
-  "lookback_days": 756,
-  "test_size": 0.2,
-  "validation_size": 0.1,
-  "preprocessing": {
-    "scaler_type": "minmax",
-    "sequence_length": 60
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
   },
   "split_sizes": {
-    "train": 219,
-    "validation": 31,
-    "test": 62
+    "train": 838,
+    "val": 120,
+    "test": 240
   },
-  "samples": 312,
-  "features": 59,
-  "params": {},
+  "training_rows": 1198,
+  "val_metrics": {
+    "mae": 0.027460532262921333,
+    "rmse": 0.040776763505714686,
+    "mape": 2.7460532262921333,
+    "directional_accuracy": 0.5666666666666667
+  },
+  "test_metrics": {
+    "mae": 0.017494531348347664,
+    "rmse": 0.02232041534929877,
+    "mape": 1.7494531348347664,
+    "directional_accuracy": 0.5083333333333333
+  },
   "metrics": {
     "validation": {
-      "mae": 0.024412255734205246,
-      "mse": 0.0008025194401852787,
-      "rmse": 0.028328774067814488,
-      "r2": -2.612396001815796,
-      "directional_accuracy": 0.5333333333333333
+      "mae": 0.027460532262921333,
+      "rmse": 0.040776763505714686,
+      "mape": 2.7460532262921333,
+      "directional_accuracy": 0.5666666666666667
     },
     "test": {
-      "mae": 0.0198147464543581,
-      "mse": 0.0006055480916984379,
-      "rmse": 0.02460788677839765,
-      "r2": -0.3648780584335327,
-      "directional_accuracy": 0.6229508196721312
+      "mae": 0.017494531348347664,
+      "rmse": 0.02232041534929877,
+      "mape": 1.7494531348347664,
+      "directional_accuracy": 0.5083333333333333
     }
   },
-  "version_id": "xgboost_^GSPC_h7_20260411_222001",
-  "model_type": "xgboost",
-  "symbol": "^GSPC",
-  "horizon": 7,
-  "feature_columns": [
-    "Returns",
-    "Log_Returns",
-    "SMA_20",
-    "SMA_50",
-    "SMA_200",
-    "EMA_12",
-    "EMA_26",
-    "EMA_50",
-    "MACD",
-    "MACD_Signal",
-    "MACD_Histogram",
-    "ADX",
-    "Ichimoku_A",
-    "Ichimoku_B",
-    "RSI",
-    "Stoch_K",
-    "Stoch_D",
-    "Williams_R",
-    "ROC",
-    "Ultimate_Osc",
-    "TSI",
-    "ATR",
-    "BB_High",
-    "BB_Mid",
-    "BB_Low",
-    "BB_Width",
-    "BB_Pband",
-    "KC_High",
-    "KC_Low",
-    "DC_High",
-    "DC_Low",
-    "OBV",
-    "CMF",
-    "MFI",
-    "VWAP",
-    "Volume_SMA_20",
-    "Volume_Ratio",
-    "Daily_Return",
-    "Log_Return",
-    "High_Low_Range",
-    "Open_Close_Range",
-    "Close_Lag_1",
-    "Return_Lag_1",
-    "Volume_Lag_1",
-    "Close_Lag_2",
-    "Return_Lag_2",
-    "Volume_Lag_2",
-    "Close_Lag_3",
-    "Return_Lag_3",
-    "Volume_Lag_3",
-    "Close_Lag_5",
-    "Return_Lag_5",
-    "Volume_Lag_5",
-    "Close_Lag_10",
-    "Return_Lag_10",
-    "Volume_Lag_10",
-    "DayOfWeek",
-    "Month",
-    "Quarter"
-  ],
-  "bundle_dir": "models\\bundles\\^GSPC\\xgboost\\7",
-  "artifact_dir": "models\\bundles\\^GSPC\\xgboost\\7",
+  "params": {},
+  "oob_error": null,
   "model_path": "models\\bundles\\^GSPC\\xgboost\\7\\model.json",
   "scaler_path": "models\\bundles\\^GSPC\\xgboost\\7\\scaler.joblib",
-  "feature_columns_path": "models\\bundles\\^GSPC\\xgboost\\7\\feature_columns.json"
+  "feature_columns_path": "models\\bundles\\^GSPC\\xgboost\\7\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\^GSPC\\xgboost\\7"
 }

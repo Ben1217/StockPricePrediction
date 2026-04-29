@@ -1,6 +1,49 @@
 {
-  "trained_at": "2026-04-11T22:20:02.991222",
-  "target_type": "return",
+  "version_id": "random_forest_^GSPC_price_h15_20260429_020732",
+  "model_type": "random_forest",
+  "symbol": "^GSPC",
+  "horizon": 15,
+  "training_horizon": 15,
+  "horizons": [
+    15
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_15d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-29T02:07:32.463351",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-30",
+    "end": "2026-04-28"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
   "feature_config": {
     "include_technical": true,
     "include_lags": true,
@@ -14,105 +57,51 @@
       10
     ]
   },
-  "lookback_days": 756,
-  "test_size": 0.2,
-  "validation_size": 0.1,
-  "preprocessing": {
-    "scaler_type": "minmax",
-    "sequence_length": 60
+  "scaler_type": "standard",
+  "sequence_length": null,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
   },
   "split_sizes": {
-    "train": 213,
-    "validation": 30,
-    "test": 61
+    "train": 833,
+    "val": 119,
+    "test": 238
   },
-  "samples": 304,
-  "features": 59,
-  "params": {},
+  "training_rows": 1190,
+  "val_metrics": {
+    "mae": 0.03935369476675987,
+    "rmse": 0.054461307304258445,
+    "mape": 3.9353694766759872,
+    "directional_accuracy": 0.5210084033613446
+  },
+  "test_metrics": {
+    "mae": 0.026506725698709488,
+    "rmse": 0.0340013637638459,
+    "mape": 2.650672569870949,
+    "directional_accuracy": 0.5588235294117647
+  },
   "metrics": {
     "validation": {
-      "mae": 0.026690946469485072,
-      "mse": 0.0008497087944958537,
-      "rmse": 0.02914976491321763,
-      "r2": -3.216391037787515,
-      "directional_accuracy": 0.4827586206896552
+      "mae": 0.03935369476675987,
+      "rmse": 0.054461307304258445,
+      "mape": 3.9353694766759872,
+      "directional_accuracy": 0.5210084033613446
     },
     "test": {
-      "mae": 0.03663960825996477,
-      "mse": 0.0017325031727491577,
-      "rmse": 0.04162334888916505,
-      "r2": -2.8501334006515475,
-      "directional_accuracy": 0.6333333333333333
+      "mae": 0.026506725698709488,
+      "rmse": 0.0340013637638459,
+      "mape": 2.650672569870949,
+      "directional_accuracy": 0.5588235294117647
     }
   },
-  "version_id": "random_forest_^GSPC_h15_20260411_222002",
-  "model_type": "random_forest",
-  "symbol": "^GSPC",
-  "horizon": 15,
-  "feature_columns": [
-    "Returns",
-    "Log_Returns",
-    "SMA_20",
-    "SMA_50",
-    "SMA_200",
-    "EMA_12",
-    "EMA_26",
-    "EMA_50",
-    "MACD",
-    "MACD_Signal",
-    "MACD_Histogram",
-    "ADX",
-    "Ichimoku_A",
-    "Ichimoku_B",
-    "RSI",
-    "Stoch_K",
-    "Stoch_D",
-    "Williams_R",
-    "ROC",
-    "Ultimate_Osc",
-    "TSI",
-    "ATR",
-    "BB_High",
-    "BB_Mid",
-    "BB_Low",
-    "BB_Width",
-    "BB_Pband",
-    "KC_High",
-    "KC_Low",
-    "DC_High",
-    "DC_Low",
-    "OBV",
-    "CMF",
-    "MFI",
-    "VWAP",
-    "Volume_SMA_20",
-    "Volume_Ratio",
-    "Daily_Return",
-    "Log_Return",
-    "High_Low_Range",
-    "Open_Close_Range",
-    "Close_Lag_1",
-    "Return_Lag_1",
-    "Volume_Lag_1",
-    "Close_Lag_2",
-    "Return_Lag_2",
-    "Volume_Lag_2",
-    "Close_Lag_3",
-    "Return_Lag_3",
-    "Volume_Lag_3",
-    "Close_Lag_5",
-    "Return_Lag_5",
-    "Volume_Lag_5",
-    "Close_Lag_10",
-    "Return_Lag_10",
-    "Volume_Lag_10",
-    "DayOfWeek",
-    "Month",
-    "Quarter"
-  ],
-  "bundle_dir": "models\\bundles\\^GSPC\\random_forest\\15",
-  "artifact_dir": "models\\bundles\\^GSPC\\random_forest\\15",
+  "params": {},
+  "oob_error": 0.2722523843887421,
   "model_path": "models\\bundles\\^GSPC\\random_forest\\15\\model.joblib",
   "scaler_path": "models\\bundles\\^GSPC\\random_forest\\15\\scaler.joblib",
-  "feature_columns_path": "models\\bundles\\^GSPC\\random_forest\\15\\feature_columns.json"
+  "feature_columns_path": "models\\bundles\\^GSPC\\random_forest\\15\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\^GSPC\\random_forest\\15"
 }

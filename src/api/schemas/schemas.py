@@ -326,6 +326,11 @@ class MultiTFPatternItem(BaseModel):
     risk_reward_ratio: Optional[float] = None
     strength_label: Optional[str] = None
     secondary_targets: List[float] = Field(default_factory=list)
+    current_price: Optional[float] = None
+    entry_distance_pct: Optional[float] = None
+    setup_relevance_status: Optional[str] = None
+    setup_relevance_reason: Optional[str] = None
+    setup_relevance_ok: Optional[bool] = None
 
 
 class SetupScoreComponents(BaseModel):
@@ -347,6 +352,8 @@ class BestTradeSetup(BaseModel):
     direction: str
     pattern_status: str
     confidence_score: Optional[float] = None
+    current_price: Optional[float] = None
+    entry_distance_pct: Optional[float] = None
     entry_price: float
     stop_loss: float
     primary_target: float
@@ -397,6 +404,7 @@ class BestSetupStatus(BaseModel):
     has_detected_pattern: bool
     confidence_ok: bool
     levels_ok: bool
+    price_relevance_ok: bool = True
     risk_reward_ok: bool
     no_conflicting_filters: bool
     candle_count: int
@@ -407,6 +415,10 @@ class BestSetupStatus(BaseModel):
     candidate_confidence: Optional[float] = None
     candidate_risk_reward: Optional[float] = None
     candidate_strength_label: Optional[str] = None
+    candidate_relevance_status: Optional[str] = None
+    candidate_relevance_reason: Optional[str] = None
+    candidate_entry_distance_pct: Optional[float] = None
+    current_price: Optional[float] = None
     conflicting_pattern_names: List[str] = Field(default_factory=list)
 
 
