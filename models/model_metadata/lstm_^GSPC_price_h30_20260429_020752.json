@@ -1,0 +1,109 @@
+{
+  "version_id": "lstm_^GSPC_price_h30_20260429_020752",
+  "model_type": "lstm",
+  "symbol": "^GSPC",
+  "horizon": 30,
+  "training_horizon": 30,
+  "horizons": [
+    30
+  ],
+  "objective": "future_return_pct",
+  "target_type": "return_regression",
+  "target_col": "target_return_30d",
+  "target_columns": [
+    "target_return_7d",
+    "target_return_15d",
+    "target_return_30d",
+    "target_return_60d"
+  ],
+  "model_output": "predicted_return",
+  "prediction_formula": "predicted_price = current_price * (1 + predicted_return)",
+  "ensemble_weights": {
+    "lstm": 0.4,
+    "xgboost": 0.35,
+    "random_forest": 0.25
+  },
+  "trained_at": "2026-04-29T02:07:52.701251",
+  "lookback_days": 1825,
+  "data_source": "yfinance",
+  "data_range": {
+    "start": "2021-04-30",
+    "end": "2026-04-28"
+  },
+  "feature_columns": [
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "Daily_Return",
+    "SMA_20",
+    "SMA_50",
+    "RSI_14",
+    "MACD",
+    "Volatility"
+  ],
+  "feature_count": 11,
+  "feature_config": {
+    "include_technical": true,
+    "include_lags": true,
+    "include_regime": false,
+    "include_candlesticks": false,
+    "lag_periods": [
+      1,
+      2,
+      3,
+      5,
+      10
+    ]
+  },
+  "scaler_type": "standard",
+  "sequence_length": 60,
+  "validation_policy": {
+    "split": "chronological",
+    "train": 0.7000000000000001,
+    "validation": 0.1,
+    "test": 0.2,
+    "shuffle": false
+  },
+  "split_sizes": {
+    "train": 822,
+    "val": 118,
+    "test": 235
+  },
+  "training_rows": 1175,
+  "val_metrics": {
+    "mae": 0.0491236075758934,
+    "rmse": 0.06564777594948812,
+    "mape": 4.91236075758934,
+    "directional_accuracy": 0.4322033898305085
+  },
+  "test_metrics": {
+    "mae": 0.03801511973142624,
+    "rmse": 0.05148420575870951,
+    "mape": 3.801511973142624,
+    "directional_accuracy": 0.6170212765957447
+  },
+  "metrics": {
+    "validation": {
+      "mae": 0.0491236075758934,
+      "rmse": 0.06564777594948812,
+      "mape": 4.91236075758934,
+      "directional_accuracy": 0.4322033898305085
+    },
+    "test": {
+      "mae": 0.03801511973142624,
+      "rmse": 0.05148420575870951,
+      "mape": 3.801511973142624,
+      "directional_accuracy": 0.6170212765957447
+    }
+  },
+  "params": {
+    "sequence_length": 60
+  },
+  "oob_error": null,
+  "model_path": "models\\bundles\\^GSPC\\lstm\\30\\model.pt",
+  "scaler_path": "models\\bundles\\^GSPC\\lstm\\30\\scaler.joblib",
+  "feature_columns_path": "models\\bundles\\^GSPC\\lstm\\30\\feature_columns.json",
+  "bundle_dir": "models\\bundles\\^GSPC\\lstm\\30"
+}

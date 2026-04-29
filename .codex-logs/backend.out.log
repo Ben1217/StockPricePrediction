@@ -1,0 +1,79 @@
+INFO:     127.0.0.1:60326 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55525 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57181 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57181 - "OPTIONS /api/data/sources HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57181 - "GET /api/data/sources HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55525 - "OPTIONS /api/sentiment/%5EGSPC?days=400&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52553 - "OPTIONS /api/data/prices/%5EGSPC?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "OPTIONS /api/data/prices/%5EGSPC?source=yfinance&days=120&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52616 - "OPTIONS /api/data/indicators/%5EGSPC?days=120&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55525 - "GET /api/sentiment/%5EGSPC?days=400&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56205 - "GET /api/data/sources HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57181 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=120&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:10 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:60757 - "GET /api/data/indicators/%5EGSPC?days=120&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57181 - "OPTIONS /api/data/prices/AAPL?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "GET /api/data/prices/AAPL?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57181 - "OPTIONS /api/data/extended-quote/%5EGSPC?source=yfinance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "OPTIONS /api/data/extended-quote/%5EGSPC?source=yfinance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "GET /api/data/extended-quote/%5EGSPC?source=yfinance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "OPTIONS /api/data/prices/MSFT?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56205 - "GET /api/data/extended-quote/%5EGSPC?source=yfinance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "GET /api/data/prices/MSFT?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "OPTIONS /api/data/prices/GOOGL?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "GET /api/data/prices/GOOGL?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56205 - "OPTIONS /api/patterns/confluence/%5EGSPC HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "OPTIONS /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "OPTIONS /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56205 - "OPTIONS /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "OPTIONS /api/patterns/confluence/%5EGSPC HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "OPTIONS /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56205 - "OPTIONS /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "OPTIONS /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "GET /api/patterns/confluence/%5EGSPC HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56205 - "OPTIONS /api/data/prices/AMZN?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65337 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:16 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:60757 - "GET /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:20 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:64844 - "GET /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52733 - "GET /api/patterns/confluence/%5EGSPC HTTP/1.1" 200 OK
+2026-04-29 08:38:20 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:65337 - "GET /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64826 - "GET /api/data/prices/AMZN?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:28 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:60757 - "GET /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:30 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:52733 - "GET /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60757 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "OPTIONS /api/data/prices/NVDA?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:38 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:52733 - "GET /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "GET /api/data/prices/NVDA?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "OPTIONS /api/data/prices/TSLA?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "GET /api/data/prices/TSLA?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "OPTIONS /api/data/prices/META?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53895 - "GET /api/data/prices/META?source=yfinance&days=30&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52646 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:49 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:63330 - "GET /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:38:52 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:49300 - "GET /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49792 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:39:11 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:62682 - "GET /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+2026-04-29 08:39:15 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:51226 - "GET /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+2026-04-29 08:39:16 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:58905 - "GET /api/data/indicators/%5EGSPC?days=320&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62682 - "GET /api/data/prices/%5EGSPC?source=yfinance&days=420&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49792 - "OPTIONS /api/patterns/support-resistance/%5EGSPC?interval=1d&lookback=420 HTTP/1.1" 200 OK
+2026-04-29 08:39:20 - src.features.technical_indicators - INFO - Added 43 technical indicators
+INFO:     127.0.0.1:51226 - "GET /api/patterns/%5EGSPC?tf=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62682 - "GET /api/patterns/support-resistance/%5EGSPC?interval=1d&lookback=420 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62682 - "OPTIONS /api/predict/historical-signals/%5EGSPC?days=90&model_type=xgboost HTTP/1.1" 200 OK
+2026-04-29 08:39:21 - src.utils.config_loader - INFO - Loaded configuration from config/config.yaml
+2026-04-29 08:39:21 - src.models.xgboost_model - INFO - Built XGBoost model with params: {'n_estimators': 100, 'max_depth': 5, 'learning_rate': 0.1, 'subsample': 0.8, 'colsample_bytree': 0.8, 'objective': 'binary:logistic', 'eval_metric': 'logloss', 'random_state': 42, 'task': 'classification'}
+INFO:     127.0.0.1:62682 - "GET /api/predict/historical-signals/%5EGSPC?days=90&model_type=xgboost HTTP/1.1" 500 Internal Server Error
