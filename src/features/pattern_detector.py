@@ -54,7 +54,7 @@ _TIMEFRAME_REQUIRED_CANDLES = {
     "1mo": 150,
 }
 MIN_DECISION_CANDLES = 120
-MIN_SETUP_CONFIDENCE = 65.0
+MIN_SETUP_CONFIDENCE = 70.0
 MIN_SETUP_RISK_REWARD = 1.5
 
 
@@ -295,6 +295,79 @@ def _score_volume_confirmation(pattern: Dict[str, Any], market_context: Optional
     return round(sum(scores) / len(scores), 4)
 
 
+def _score_support_resistance_confirmation(pattern: Dict[str, Any]) -> float:
+    """Heuristic level-quality score using the pattern's own support/resistance points."""
+    if not _is_actionable_pattern(pattern):
+        return 0.2
+
+    entry_price = _derive_entry_price(pattern)
+    target_price = _safe_float(pattern.get("target_price"))
+    stop_loss = _safe_float(pattern.get("stop_loss"))
+    direction = pattern.get("direction")
+    if entry_price is None or target_price is None or stop_loss is None:
+        return 0.2
+
+    levels = [
+        _safe_float(level.get("price"))
+        for level in pattern.get("key_levels", [])
+        if isinstance(level, dict)
+    ]
+    levels = [level for level in levels if level is not None]
+
+    if direction == "bullish":
+        geometry_score = 1.0 if stop_loss < entry_price < target_price else 0.1
+        protective_levels = [level for level in levels if level <= entry_price]
+        resistance_levels = [level for level in levels if level >= entry_price]
+    elif direction == "bearish":
+        geometry_score = 1.0 if target_price < entry_price < stop_loss else 0.1
+        protective_levels = [level for level in levels if level >= entry_price]
+        resistance_levels = [level for level in levels if level <= entry_price]
+    else:
+        return 0.35
+
+    risk = abs(entry_price - stop_loss)
+    if risk <= 0:
+        return 0.2
+
+    stop_has_structure = any(abs(level - stop_loss) <= risk * 0.35 for level in protective_levels)
+    target_has_room = not resistance_levels or abs(target_price - entry_price) >= risk
+    structure_score = 0.85 if stop_has_structure and target_has_room else 0.6 if stop_has_structure or target_has_room else 0.35
+    return round(_clamp(0.55 * geometry_score + 0.45 * structure_score), 4)
+
+
+def _score_risk_reward(pattern: Dict[str, Any]) -> float:
+    risk_reward = calculate_risk_reward(pattern)
+    if risk_reward is None:
+        return 0.0
+    return round(_clamp(risk_reward / 3.0), 4)
+
+
+def _low_risk_reward_penalty(pattern: Dict[str, Any]) -> float:
+    risk_reward = calculate_risk_reward(pattern)
+    if risk_reward is None:
+        return 0.18
+    if risk_reward >= MIN_SETUP_RISK_REWARD:
+        return 0.0
+    return round(_clamp((MIN_SETUP_RISK_REWARD - risk_reward) / MIN_SETUP_RISK_REWARD) * 0.18, 4)
+
+
+def _conflict_penalty(pattern: Dict[str, Any], patterns: List[Dict[str, Any]]) -> float:
+    direction = pattern.get("direction")
+    if direction not in {"bullish", "bearish"} or not _is_actionable_pattern(pattern):
+        return 0.0
+
+    for other in patterns:
+        if other is pattern:
+            continue
+        if other.get("direction") == direction or other.get("direction") not in {"bullish", "bearish"}:
+            continue
+        if other.get("status") == "broken" or not _is_actionable_pattern(other):
+            continue
+        if other.get("timeframe") == pattern.get("timeframe"):
+            return 0.06
+    return 0.0
+
+
 def _derive_secondary_targets(pattern: Dict[str, Any]) -> List[float]:
     entry_price = _derive_entry_price(pattern)
     primary_target = _safe_float(pattern.get("target_price"))
@@ -387,14 +460,23 @@ def rank_patterns(
         risk_reward = calculate_risk_reward(enriched)
         ml_probability = _score_ml_probability(enriched)
         pattern_quality = _score_pattern_quality(enriched)
-        indicator_alignment = _score_indicator_alignment(enriched, market_context)
+        trend_confirmation = _score_indicator_alignment(enriched, market_context)
         volume_confirmation = _score_volume_confirmation(enriched, market_context)
+        support_resistance_confirmation = _score_support_resistance_confirmation(enriched)
+        risk_reward_score = _score_risk_reward(enriched)
+        conflict_penalty = _conflict_penalty(enriched, patterns)
+        low_risk_reward_penalty = _low_risk_reward_penalty(enriched)
         composite_score = (
-            0.4 * ml_probability
-            + 0.3 * pattern_quality
-            + 0.2 * indicator_alignment
+            0.32 * ml_probability
+            + 0.22 * pattern_quality
+            + 0.18 * trend_confirmation
             + 0.1 * volume_confirmation
+            + 0.12 * support_resistance_confirmation
+            + 0.06 * risk_reward_score
+            - conflict_penalty
+            - low_risk_reward_penalty
         )
+        composite_score = _clamp(composite_score)
         confidence = round(composite_score * 100.0, 1)
 
         enriched["risk_reward_ratio"] = round(risk_reward, 2) if risk_reward is not None else None
@@ -404,8 +486,13 @@ def rank_patterns(
         enriched["score_components"] = {
             "ml_probability": round(ml_probability, 4),
             "pattern_quality": round(pattern_quality, 4),
-            "indicator_alignment": round(indicator_alignment, 4),
+            "indicator_alignment": round(trend_confirmation, 4),
+            "trend_confirmation": round(trend_confirmation, 4),
             "volume_confirmation": round(volume_confirmation, 4),
+            "support_resistance_confirmation": round(support_resistance_confirmation, 4),
+            "risk_reward_score": round(risk_reward_score, 4),
+            "conflict_penalty": round(conflict_penalty, 4),
+            "low_risk_reward_penalty": round(low_risk_reward_penalty, 4),
             "composite_score": round(composite_score, 4),
         }
         ranked.append(enriched)

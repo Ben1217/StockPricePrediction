@@ -262,6 +262,47 @@ function getSetupRiskReward(pattern) {
     return reward / risk;
 }
 
+function getPatternConfidence(pattern) {
+    const value = Number(pattern?.confidence ?? pattern?.confidence_score);
+    return Number.isFinite(value) ? value : null;
+}
+
+function getPatternRiskReward(pattern) {
+    const direct = Number(pattern?.risk_reward_ratio);
+    if (Number.isFinite(direct)) return direct;
+    return getSetupRiskReward(pattern);
+}
+
+function getPatternDirectionLabel(direction) {
+    if (direction === "bullish") return "Bullish";
+    if (direction === "bearish") return "Bearish";
+    return "Neutral";
+}
+
+function getPatternRejectReason(pattern, setupStatus) {
+    if (!pattern) return "No pattern detected";
+    if (pattern.status === "broken" || pattern.pattern_status === "broken") return "Pattern already broken";
+    if (!isActionableSetup(pattern)) return "Entry/stop/target not valid";
+
+    const confidence = getPatternConfidence(pattern);
+    const minConfidence = Number(setupStatus?.min_confidence ?? 70);
+    if (confidence != null && confidence < minConfidence) return "Pattern confidence below threshold";
+
+    const riskReward = getPatternRiskReward(pattern);
+    const minRiskReward = Number(setupStatus?.min_risk_reward ?? 1.5);
+    if (riskReward == null || riskReward < minRiskReward) return "Risk/reward too weak";
+
+    if (Array.isArray(setupStatus?.conflicting_pattern_names) && setupStatus.conflicting_pattern_names.includes(pattern.pattern_name)) {
+        return "Conflicting pattern signals";
+    }
+
+    if (setupStatus?.candidate_pattern_name === pattern.pattern_name && setupStatus?.reason && setupStatus.reason_code !== "VALID_SETUP") {
+        return setupStatus.reason;
+    }
+
+    return "Lower-ranked than best setup";
+}
+
 function formatSetupPercent(value, signed = true) {
     if (value == null) return "--";
     const number = Number(value);
@@ -525,7 +566,84 @@ function DecisionCheckRow({ label, passed }) {
     );
 }
 
-function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) {
+function PatternDetailsSection({ patterns, bestSetup, setupStatus, advancedMode }) {
+    const rows = (patterns || []).slice(0, advancedMode ? 10 : 6);
+    const components = bestSetup?.score_components;
+    if (!rows.length && !components) return null;
+
+    return (
+        <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+            {components && (
+                <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", background: C.bg1 }}>
+                    <div style={{ color: C.textDim, fontSize: 9, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 8 }}>
+                        Confidence Calculation
+                    </div>
+                    {[
+                        ["Confidence", bestSetup.confidence_score != null ? `${Number(bestSetup.confidence_score).toFixed(0)}%` : "--"],
+                        ["Risk / reward score", components.risk_reward_score != null ? Number(components.risk_reward_score).toFixed(2) : "--"],
+                        ["Trend confirmation", (components.trend_confirmation ?? components.indicator_alignment) != null ? Number(components.trend_confirmation ?? components.indicator_alignment).toFixed(2) : "--"],
+                        ["Volume confirmation", components.volume_confirmation != null ? Number(components.volume_confirmation).toFixed(2) : "--"],
+                        ["S/R confirmation", components.support_resistance_confirmation != null ? Number(components.support_resistance_confirmation).toFixed(2) : "--"],
+                        ["Conflict penalty", components.conflict_penalty != null ? Number(components.conflict_penalty).toFixed(2) : "--"],
+                    ].map(([label, value]) => (
+                        <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: 9 }}>
+                            <span style={{ color: C.textDim }}>{label}</span>
+                            <span style={{ color: C.text, fontWeight: 700 }}>{value}</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {rows.length > 0 && (
+                <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", background: C.bg1 }}>
+                    <div style={{ color: C.textDim, fontSize: 9, letterSpacing: 1.2, textTransform: "uppercase", marginBottom: 8 }}>
+                        Detected Patterns
+                    </div>
+                    <div style={{ display: "grid", gap: 8 }}>
+                        {rows.map((pattern, index) => {
+                            const isBest = Boolean(bestSetup && pattern.pattern_name === bestSetup.pattern_name && pattern.direction === bestSetup.direction);
+                            const confidence = getPatternConfidence(pattern);
+                            const riskReward = getPatternRiskReward(pattern);
+                            const tone = isBest ? getSetupTone(bestSetup).color : C.textDim;
+                            return (
+                                <div key={`${pattern.pattern_name}-${pattern.direction}-${pattern.end_date}-${index}`} style={{
+                                    border: `1px solid ${isBest ? tone + "55" : C.border}`,
+                                    borderRadius: 8,
+                                    padding: "8px 9px",
+                                    background: isBest ? tone + "10" : "transparent",
+                                }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                                        <span style={{ color: isBest ? tone : C.text, fontWeight: 800 }}>{pattern.pattern_name}</span>
+                                        <span style={{ color: isBest ? tone : C.amber, fontWeight: 800 }}>
+                                            {isBest ? "Valid Setup" : "Rejected Setup"}
+                                        </span>
+                                    </div>
+                                    <div style={{ color: C.textDim, fontSize: 9, lineHeight: 1.5 }}>
+                                        {getPatternDirectionLabel(pattern.direction)}
+                                        {confidence != null ? ` | ${confidence.toFixed(0)}%` : ""}
+                                        {riskReward != null ? ` | R/R ${riskReward.toFixed(2)}` : ""}
+                                    </div>
+                                    {!isBest && (
+                                        <div style={{ color: C.textMid, fontSize: 9, lineHeight: 1.45, marginTop: 3 }}>
+                                            {getPatternRejectReason(pattern, setupStatus)}
+                                        </div>
+                                    )}
+                                    {advancedMode && (
+                                        <div style={{ color: C.textDim, fontSize: 9, lineHeight: 1.45, marginTop: 4 }}>
+                                            Entry {formatSetupPrice(pattern.entry_price)} | Stop {formatSetupPrice(pattern.stop_loss)} | Target {formatSetupPrice(pattern.target_price)}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading, patterns = [], showDetails = false, advancedMode = false }) {
     const [showTargets, setShowTargets] = useState(false);
     if (loading) return (
         <div style={{
@@ -571,7 +689,7 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
                         <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2 }}>
-                            {setupStatus?.status || "NO_SETUP"}
+                            No Clear Setup
                         </div>
                         <div style={{
                             color: reasonTone,
@@ -612,6 +730,14 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                         ))}
                     </div>
                 )}
+                {showDetails && (
+                    <PatternDetailsSection
+                        patterns={patterns}
+                        bestSetup={bestSetup}
+                        setupStatus={setupStatus}
+                        advancedMode={advancedMode}
+                    />
+                )}
             </div>
         );
     }
@@ -633,17 +759,17 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                 color: C.textDim, fontSize: 9, letterSpacing: 1.4, marginBottom: 10,
                 fontWeight: 800, textTransform: "uppercase",
             }}>
-                Best Trade Setup
+                Best Setup Status
             </div>
 
             <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
                     <div>
                         <div style={{ color: tone.color, fontSize: 18, fontWeight: 900, lineHeight: 1.2 }}>
-                            {`● ${bestSetup.pattern_name}`}
+                            {bestSetup.pattern_name}
                         </div>
                         <div style={{ color: C.textDim, fontSize: 10, marginTop: 4 }}>
-                            {bestSetup.timeframe} · {tone.label}
+                            Valid Setup | {bestSetup.timeframe} | {tone.label}
                         </div>
                     </div>
                     <div style={{
@@ -678,6 +804,10 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                     <span style={{ color: tone.color, fontWeight: 700 }}>{statusLabel}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ color: C.textDim }}>Direction</span>
+                    <span style={{ color: tone.color, fontWeight: 700 }}>{tone.label}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
                     <span style={{ color: C.textDim }}>Entry</span>
                     <span style={{ color: C.text, fontWeight: 700 }}>{formatSetupPrice(bestSetup.entry_price)}</span>
                 </div>
@@ -703,7 +833,7 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                 <span style={{ color: strengthTone, fontWeight: 800 }}>{bestSetup.strength_label}</span>
             </div>
 
-            {Array.isArray(bestSetup.secondary_targets) && bestSetup.secondary_targets.length > 0 && (
+            {showDetails && Array.isArray(bestSetup.secondary_targets) && bestSetup.secondary_targets.length > 0 && (
                 <div style={{
                     display: "flex",
                     justifyContent: "space-between",
@@ -743,13 +873,13 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                 padding: "12px 14px",
             }}>
                 <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 6 }}>
-                    Action
+                    Reason
                 </div>
                 <div style={{ color: tone.color, fontSize: 14, fontWeight: 900, lineHeight: 1.35 }}>
-                    {actionText}
+                    {setupStatus?.reason || "Best setup ready"}
                 </div>
                 <div style={{ color: C.textMid, fontSize: 9, marginTop: 6, lineHeight: 1.5 }}>
-                    {setupStatus?.status || "VALID_SETUP"} | {statusLabel} | {tone.label}
+                    {actionText} | {statusLabel} | {tone.label}
                 </div>
             </div>
 
@@ -759,7 +889,7 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                 </div>
             )}
 
-            {checks.length > 0 && (
+            {showDetails && checks.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                     <div style={{ color: C.textDim, fontSize: 9, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 4 }}>
                         Decision Checks
@@ -770,6 +900,14 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                         ))}
                     </div>
                 </div>
+            )}
+            {showDetails && (
+                <PatternDetailsSection
+                    patterns={patterns}
+                    bestSetup={bestSetup}
+                    setupStatus={setupStatus}
+                    advancedMode={advancedMode}
+                />
             )}
         </div>
     );
@@ -835,9 +973,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
     // ── View Mode ──────────────────────────────────────────
     const [viewMode, setViewMode] = useState("pattern"); // "indicator" | "pattern" | "advanced"
-    const [patternScope, setPatternScope] = useState(() => {
-        try { return localStorage.getItem("qv_patternScope") || "best"; } catch { return "best"; }
-    });
+    const [patternScope, setPatternScope] = useState("best");
 
     // ── User Level ─────────────────────────────────────────
     const [userLevel, setUserLevel] = useState(() => {
@@ -845,8 +981,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     });
     useEffect(() => {
         localStorage.setItem("qv_userLevel", userLevel);
-        if (userLevel === "beginner" && viewMode === "advanced") setViewMode("pattern");
-    }, [userLevel, viewMode]);
+    }, [userLevel]);
     useEffect(() => {
         localStorage.setItem("qv_patternScope", patternScope);
     }, [patternScope]);
@@ -854,18 +989,18 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     // ── Derive toggle states from viewMode ─────────────────
     const isIndicatorMode = viewMode === "indicator";
     const isPatternMode = viewMode === "pattern" || viewMode === "advanced";
-    const showSR = isIndicatorMode || viewMode === "advanced";
-    const showSMA200 = viewMode === "indicator" || viewMode === "advanced";
-    const showSMA = viewMode === "advanced";
-    const showEMA = viewMode === "advanced";
-    const showBB = viewMode === "advanced";
-    const showVWAP = viewMode === "advanced";
-    const showRSI = viewMode === "indicator" || viewMode === "advanced";
-    const showMACD = viewMode === "advanced";
-    const showVol = viewMode === "indicator" || viewMode === "advanced";
-    const showATR = viewMode === "advanced";
+    const showSR = isIndicatorMode;
+    const showSMA200 = isIndicatorMode;
+    const showSMA = false;
+    const showEMA = false;
+    const showBB = false;
+    const showVWAP = false;
+    const showRSI = isIndicatorMode;
+    const showMACD = false;
+    const showVol = isIndicatorMode;
+    const showATR = false;
     const showPatterns = isPatternMode;
-    const showMLSignals = viewMode === "advanced";
+    const showMLSignals = false;
 
     const stateData = useRef({
         ohlc: [],
@@ -990,10 +1125,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             });
             seriesRefs.current.candle = candleSeries;
 
-            const { ohlc, indicators, signals, patterns, bestPattern, srData } = stateData.current;
-            const visiblePatterns = showPatterns
-                ? (patternScope === "all" ? (patterns || []) : (bestPattern ? [bestPattern] : []))
-                : [];
+            const { ohlc, indicators, signals, bestPattern, bestSetup, srData } = stateData.current;
+            const visiblePatterns = showPatterns && bestSetup && bestPattern ? [bestPattern] : [];
             const ohlcData = processChartData(ohlc.map(b => ({
                 time: parseChartTime(b.date),
                 open: b.open, high: b.high, low: b.low, close: b.close
@@ -1065,8 +1198,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     const isBullish = p.direction === "bullish";
                     const isNeutral = p.direction === "neutral";
                     
-                    // Check if highly confluent
-                    const isConfluent = confluence.some(c => c.pattern_name === p.pattern_name && c.direction === p.direction);
+                    const isConfluent = false;
 
                     allMarkers.push({
                         time: parseChartTime(p.end_date),
@@ -1131,7 +1263,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                         });
                     }
 
-                    if (patternScope === "best") {
+                    if (patternScope === "best" || patternScope === "all") {
                         if (cp.entry_price != null) {
                             candleSeries.createPriceLine({
                                 price: cp.entry_price,
@@ -1145,7 +1277,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                                 price: cp.target_price,
                                 color: C.green + 'CC',
                                 lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
-                                title: "Target",
+                                title: "Target 1",
                             });
                         }
 
@@ -1154,7 +1286,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                                 price: cp.stop_loss,
                                 color: C.red + 'CC',
                                 lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
-                                title: "Stop",
+                                title: "Stop Loss",
                             });
                         }
                     } else if (cp.status === "confirmed" || cp.pattern_name !== "Symmetrical Triangle") {
@@ -1326,11 +1458,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const bestSetup = stateData.current.bestSetup;
     const bestSetupStatus = stateData.current.bestSetupStatus;
     const indicatorSummary = stateData.current.indicatorSummary;
-    const selectedPatterns = new Set(
-        (patternScope === "all"
-            ? (stateData.current.patterns || []).map(pattern => pattern.pattern_name)
-            : bestPattern ? [bestPattern.pattern_name] : [])
-    );
+    const selectedPatterns = new Set(bestSetup ? [bestSetup.pattern_name] : []);
     const alternativeCount = Math.max((stateData.current.patterns?.length || 0) - (bestSetup ? 1 : 0), 0);
 
     return (
@@ -1360,7 +1488,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                             <div style={{ display: "flex", gap: 4, background: C.bg0, padding: 3, borderRadius: 6 }}>
                                 <ModeButton label="Indicator" emoji="🟢" active={viewMode === "indicator"} onClick={() => setViewMode("indicator")} />
                                 <ModeButton label="Pattern" emoji="🟣" active={viewMode === "pattern"} onClick={() => setViewMode("pattern")} />
-                                <ModeButton label="Advanced" emoji="🔴" active={viewMode === "advanced"} disabled={userLevel === "beginner"} onClick={() => { if (userLevel !== "beginner") setViewMode("advanced"); }} />
+                                <ModeButton label="Advanced" emoji="🔴" active={viewMode === "advanced"} onClick={() => setViewMode("advanced")} />
                             </div>
 
                             {showPatterns && (
@@ -1467,7 +1595,15 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     {isIndicatorMode ? (
                         <IndicatorSummaryPanel summary={indicatorSummary} loading={loading} error={error} />
                     ) : (
-                        <TradeSetupPanel bestSetup={bestSetup} setupStatus={bestSetupStatus} alternativeCount={alternativeCount} loading={loading} />
+                        <TradeSetupPanel
+                            bestSetup={bestSetup}
+                            setupStatus={bestSetupStatus}
+                            alternativeCount={alternativeCount}
+                            loading={loading}
+                            patterns={stateData.current.patterns || []}
+                            showDetails={patternScope === "all" || viewMode === "advanced"}
+                            advancedMode={viewMode === "advanced"}
+                        />
                     )}
                 </div>
             </div>

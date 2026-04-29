@@ -617,25 +617,28 @@ export default function App() {
     }, [selectedTicker, dataSource, apiConnected]);
 
     const notify = (msg) => { setNotif(msg); setTimeout(() => setNotif(null), 3000); };
+    const handleTickerSelect = useCallback((ticker) => {
+        const normalized = String(ticker || "").toUpperCase().trim();
+        if (normalized) setSelectedTicker(normalized);
+    }, []);
 
     /* Watchlist mutations */
     const addTicker = useCallback((ticker) => {
         if (watchlist.includes(ticker) || watchlist.length >= 8) return;
         setWatchlist(prev => [...prev, ticker]);
-        setSelectedTicker(ticker);
-        setActiveTab("analysis");
+        handleTickerSelect(ticker);
         notify(`${ticker} added to watchlist`);
-    }, [watchlist]);
+    }, [watchlist, handleTickerSelect]);
 
     const removeTicker = useCallback((ticker) => {
         if (watchlist.length <= 1) { notify("You need at least 1 ticker in your watchlist."); return; }
         setWatchlist(prev => {
             const next = prev.filter(t => t !== ticker);
             // If the removed ticker was selected, switch to first remaining
-            if (selectedTicker === ticker) setSelectedTicker(next[0]);
+            if (selectedTicker === ticker) handleTickerSelect(next[0]);
             return next;
         });
-    }, [watchlist, selectedTicker]);
+    }, [watchlist, selectedTicker, handleTickerSelect]);
 
     return (
         <div style={{ minHeight: "100vh", background: C.bg0, color: C.text, fontFamily: "'DM Mono',monospace" }}>
@@ -716,7 +719,7 @@ export default function App() {
                             onMouseLeave={() => setHoveredChip(null)}
                         >
                             <button
-                                onClick={() => setSelectedTicker(t)}
+                                onClick={() => handleTickerSelect(t)}
                                 style={{
                                     background: active ? C.amberDim : hovered ? C.bg2 : "transparent",
                                     border: `1px solid ${active ? C.amber + "55" : "transparent"}`,
@@ -786,9 +789,7 @@ export default function App() {
                 {activeTab === "analysis" && (
                     <AnalysisTab
                         selectedTicker={selectedTicker}
-                        setSelectedTicker={(t) => {
-                            setSelectedTicker(t.toUpperCase().trim());
-                        }}
+                        setSelectedTicker={handleTickerSelect}
                         priceData={priceData}
                         indicatorData={indicatorData}
                         dataSource={dataSource}
@@ -806,8 +807,7 @@ export default function App() {
                     <PortfolioTab
                         notify={notify}
                         apiConnected={apiConnected}
-                        setSelectedTicker={setSelectedTicker}
-                        setActiveTab={setActiveTab}
+                        setSelectedTicker={handleTickerSelect}
                     />
                 )}
                 {activeTab === "backtest" && (
@@ -826,8 +826,7 @@ export default function App() {
                 {activeTab === "heatmap" && (
                     <HeatmapTab
                         apiConnected={apiConnected}
-                        setSelectedTicker={setSelectedTicker}
-                        setActiveTab={setActiveTab}
+                        setSelectedTicker={handleTickerSelect}
                     />
                 )}
             </div>

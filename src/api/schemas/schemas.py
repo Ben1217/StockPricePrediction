@@ -174,6 +174,14 @@ class PredictResponse(BaseModel):
     model_type: str
     horizon: int
     current_price: float
+    current_price_source: Optional[str] = None
+    predicted_price: Optional[float] = None
+    target_price: Optional[float] = None
+    expected_change_pct: Optional[float] = None
+    upper95: Optional[float] = None
+    lower95: Optional[float] = None
+    upper68: Optional[float] = None
+    lower68: Optional[float] = None
     direction: Optional[str] = None
     signal: Optional[str] = None
     confidence: Optional[float] = None
@@ -253,6 +261,10 @@ class EnsembleSummary(BaseModel):
     change_pct: float
     upper_90: float
     lower_90: float
+    upper_95: Optional[float] = None
+    lower_95: Optional[float] = None
+    upper_68: Optional[float] = None
+    lower_68: Optional[float] = None
     reliability: str
     consensus: str
     signal: Optional[str] = None
@@ -261,16 +273,22 @@ class EnsembleSummary(BaseModel):
 class EnsembleForecastPoint(BaseModel):
     date: str
     ensemble: float
+    prediction: Optional[float] = None
     lstm: Optional[float] = None
     xgboost: Optional[float] = None
     random_forest: Optional[float] = None
     upper_90: float
     lower_90: float
+    upper_95: Optional[float] = None
+    lower_95: Optional[float] = None
+    upper_68: Optional[float] = None
+    lower_68: Optional[float] = None
 
 
 class EnsemblePredictResponse(BaseModel):
     symbol: str
     current_price: float
+    current_price_source: Optional[str] = None
     horizon: int
     ensemble: Optional[EnsembleSummary] = None
     weights: Dict[str, float] = Field(default_factory=dict)
@@ -314,7 +332,12 @@ class SetupScoreComponents(BaseModel):
     ml_probability: float
     pattern_quality: float
     indicator_alignment: float
+    trend_confirmation: Optional[float] = None
     volume_confirmation: float
+    support_resistance_confirmation: Optional[float] = None
+    risk_reward_score: Optional[float] = None
+    conflict_penalty: Optional[float] = None
+    low_risk_reward_penalty: Optional[float] = None
     composite_score: float
 
 

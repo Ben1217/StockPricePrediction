@@ -4,8 +4,17 @@ import pytest
 from pydantic import ValidationError
 
 from src.api.schemas.schemas import EnsemblePredictRequest, EnsembleTrainRequest
-from src.features.feature_engineering import build_regression_dataset
-from src.models.ensemble_predictor import _compute_weights, _metadata_is_return_regression, _spec_reliability_score
+from src.features.feature_engineering import (
+    build_regression_dataset,
+    build_regression_feature_frame,
+    transform_feature_frame,
+)
+from src.models.ensemble_predictor import (
+    _build_forecast_points,
+    _compute_weights,
+    _metadata_is_return_regression,
+    _spec_reliability_score,
+)
 
 
 def _sample_ohlcv(rows: int = 320) -> pd.DataFrame:
@@ -51,11 +60,49 @@ def test_regression_dataset_creates_shifted_multi_horizon_targets():
         "MACD",
         "Volatility",
     ]
+    assert {
+        "Returns",
+        "Log_Returns",
+        "SMA_200",
+        "EMA_12",
+        "EMA_26",
+        "High_Low_Range",
+        "Close_Lag_10",
+    }.issubset(dataset.columns)
 
     first_idx = dataset.index[0]
     source_pos = df.index.get_loc(first_idx)
     expected = df["Adj Close"].iloc[source_pos + 30] / df["Adj Close"].iloc[source_pos] - 1
     assert dataset.loc[first_idx, "target_return_30d"] == pytest.approx(expected)
+
+
+def test_regression_feature_frame_supports_legacy_bundle_columns():
+    df = _sample_ohlcv()
+    feature_frame = build_regression_feature_frame(df)
+
+    legacy_feature_cols = [
+        "Returns",
+        "Log_Returns",
+        "SMA_200",
+        "EMA_12",
+        "EMA_26",
+        "MACD_Signal",
+        "BB_High",
+        "Volume_Ratio",
+        "High_Low_Range",
+        "Close_Lag_10",
+        "Return_Lag_10",
+        "DayOfWeek",
+        "Month",
+        "Quarter",
+        "Price_Momentum",
+        "Rolling_Volatility",
+    ]
+
+    aligned, X = transform_feature_frame(feature_frame, legacy_feature_cols, scaler=None)
+
+    assert not aligned.empty
+    assert X.shape[1] == len(legacy_feature_cols)
 
 
 def test_ensemble_weights_use_fixed_spec_weights():
@@ -71,6 +118,28 @@ def test_ensemble_weights_use_fixed_spec_weights():
     assert weights["lstm"] == pytest.approx(0.40)
     assert weights["xgboost"] == pytest.approx(0.35)
     assert weights["random_forest"] == pytest.approx(0.25)
+
+
+def test_forecast_points_use_each_daily_prediction_value():
+    points = _build_forecast_points(
+        predicted_price=259.0,
+        current_price=270.0,
+        horizon=4,
+        last_date=pd.Timestamp("2026-04-27"),
+        avg_mape=1.0,
+        weighted_rmse=1.0,
+        spread_pct=0.0,
+        recent_volatility=0.01,
+        raw_predictions={"xgboost": 258.0, "random_forest": 260.0, "lstm": 259.0},
+    )
+
+    predictions = [point["predicted"] for point in points]
+
+    assert len(points) == 4
+    assert [point["date"] for point in points] == ["2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01"]
+    assert predictions[-1] == pytest.approx(259.0)
+    assert len(set(predictions)) > 1
+    assert predictions[0] > predictions[-1]
 
 
 def test_reliability_flags_hard_gap_and_volatility_bounds():

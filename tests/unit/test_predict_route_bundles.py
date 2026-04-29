@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -63,11 +64,12 @@ def test_predict_returns_explicit_unavailable_when_no_bundle_exists():
 
     with (
         patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv()),
+        patch.object(predict_route, "_latest_available_price", return_value=(147.6, "latest_close")),
         patch.object(predict_route, "load_model_bundle", return_value=None),
     ):
         response = client.post(
             "/api/predict",
-            json={"symbol": "AAPL", "model_type": "xgboost", "horizon": 15},
+            json={"symbol": "AAPL", "model_type": "xgboost", "horizon": 1},
         )
 
     assert response.status_code == 200
@@ -87,6 +89,7 @@ def test_predict_uses_recursive_one_step_bundle_when_available():
 
     with (
         patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv()),
+        patch.object(predict_route, "_latest_available_price", return_value=(147.6, "latest_close")),
         patch.object(predict_route, "load_model_bundle", return_value=_FakeBundle(probability_up=0.72)),
     ):
         response = client.post(
@@ -106,3 +109,64 @@ def test_predict_uses_recursive_one_step_bundle_when_available():
     assert payload["confidence"] == 72.0
     assert payload["prediction_date"]
     assert len(payload["forecasts"]) == 5
+
+
+def test_ensemble_predict_returns_daily_prediction_series():
+    app = FastAPI()
+    app.include_router(predict_route.router, prefix="/api/predict")
+    client = TestClient(app)
+
+    dates = ["2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06"]
+    forecast_points = [
+        {
+            "date": dates[index],
+            "predicted": value,
+            "xgboost": value - 0.5,
+            "random_forest": value + 0.25,
+            "lstm": value,
+            "lower_95": value - 8,
+            "upper_95": value + 8,
+            "lower_68": value - 4,
+            "upper_68": value + 4,
+        }
+        for index, value in enumerate([270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5])
+    ]
+    forecast = SimpleNamespace(
+        symbol="SHOP",
+        current_price=272.0,
+        horizon=7,
+        predicted_price=259.5,
+        expected_change_pct=-4.6,
+        confidence_interval={"lower": 251.5, "upper": 267.5},
+        reliability="Medium",
+        reason="test forecast",
+        signal="Bearish",
+        model_predictions=[
+            SimpleNamespace(model_type="xgboost", weight=0.35),
+            SimpleNamespace(model_type="random_forest", weight=0.25),
+            SimpleNamespace(model_type="lstm", weight=0.4),
+        ],
+        forecast_points=forecast_points,
+    )
+
+    class FakePredictor:
+        def predict(self, **_kwargs):
+            return forecast
+
+    with (
+        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
+        patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
+        patch.object(predict_route, "ensemble_bundles_available", return_value=True),
+        patch.object(predict_route, "EnsemblePricePredictor", return_value=FakePredictor()),
+    ):
+        response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
+
+    assert response.status_code == 200
+    payload = response.json()
+    values = [point["prediction"] for point in payload["forecast_points"]]
+
+    assert payload["status"] == "ok"
+    assert len(payload["forecast_points"]) == 7
+    assert values == [270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5]
+    assert payload["forecast_points"][0]["ensemble"] == 270.0
+    assert len(set(values)) > 1

@@ -681,7 +681,7 @@ function CompanyCell({ cell, onClick, onHover, onLeave, onMouseMove, isSelected 
 /* ═══════════════════════════════════════════════════════════════
    MAIN HEATMAP TAB
 ═══════════════════════════════════════════════════════════════ */
-export default function HeatmapTab({ apiConnected, setSelectedTicker, setActiveTab }) {
+export default function HeatmapTab({ apiConnected, setSelectedTicker }) {
     // ── State ──────────────────────────────────────────────────────
     const [sectors, setSectors] = useState(SECTOR_DATA);
     const [drillSector, setDrillSector] = useState(null); // null = sector view
@@ -891,7 +891,6 @@ export default function HeatmapTab({ apiConnected, setSelectedTicker, setActiveT
     const openAnalysis = () => {
         if (!selectedCompany) return;
         setSelectedTicker?.(selectedCompany.ticker);
-        setActiveTab?.("analysis");
     };
 
     const goBack = () => {
@@ -1084,7 +1083,7 @@ export default function HeatmapTab({ apiConnected, setSelectedTicker, setActiveT
                         fontWeight: 700,
                         fontFamily: "'Syne',sans-serif",
                     }}>
-                        Open Analysis
+                        Select Ticker
                     </button>
                 </div>
             )}

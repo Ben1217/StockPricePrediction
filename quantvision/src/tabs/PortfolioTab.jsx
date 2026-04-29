@@ -9,7 +9,7 @@ import { StatCard, Section, ChartTooltip } from "../components/UIComponents";
 
 const PIE_COLORS = [C.amber, C.cyan, C.green, C.purple, C.red, "#f97316", "#ec4899", "#8b5cf6"];
 
-export default function PortfolioTab({ notify, apiConnected, setSelectedTicker, setActiveTab }) {
+export default function PortfolioTab({ notify, apiConnected, setSelectedTicker }) {
     const [portfolio, setPortfolio] = useState([
         { ticker: "AAPL", shares: 50, avgCost: 170 },
         { ticker: "MSFT", shares: 30, avgCost: 350 },
@@ -102,7 +102,7 @@ export default function PortfolioTab({ notify, apiConnected, setSelectedTicker, 
                     <tbody>
                         {holdings.map(h => (
                             <tr key={h.ticker} style={{ borderBottom: `1px solid ${C.border}22`, cursor: "pointer" }}
-                                onClick={() => { setSelectedTicker?.(h.ticker); setActiveTab?.("analysis"); }}>
+                                onClick={() => { setSelectedTicker?.(h.ticker); }}>
                                 <td style={{ padding: "8px 12px", color: C.amber, fontWeight: 700, textAlign: "left" }}>{h.ticker}</td>
                                 <td style={{ padding: "8px 12px", color: C.text, textAlign: "right" }}>{h.shares}</td>
                                 <td style={{ padding: "8px 12px", color: C.textMid, textAlign: "right" }}>${h.avgCost.toFixed(2)}</td>

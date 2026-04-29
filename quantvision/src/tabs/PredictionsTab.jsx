@@ -11,9 +11,10 @@ import {
     YAxis,
 } from "recharts";
 import { C } from "../utils/data";
-import { fetchEnsemblePrediction, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
+import { fetchEnsemblePrediction, fetchPredictions, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
 
 const HORIZONS = [7, 15, 30, 60];
+const MODEL_KEYS = ["xgboost", "random_forest", "lstm"];
 const MODEL_OPTIONS = [
     { value: "all", label: "All Models" },
     { value: "ensemble", label: "Ensemble" },
@@ -41,6 +42,7 @@ const WEIGHT_LABELS = {
 
 const MODEL_LABELS = {
     historical: "Historical",
+    prediction: "Prediction",
     ensemble: "Ensemble",
     lstm: "LSTM",
     xgboost: "XGBoost",
@@ -60,6 +62,180 @@ function formatPct(value) {
 function formatDateLabel(date) {
     if (typeof date !== "string" || date.length < 10) return date;
     return date.slice(5).replace("-", "/");
+}
+
+function toFiniteNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function firstFiniteNumber(...values) {
+    for (const value of values) {
+        const number = toFiniteNumber(value);
+        if (number !== null) return number;
+    }
+    return null;
+}
+
+function modelLabel(model) {
+    return MODEL_LABELS[model] || MODEL_LABELS.ensemble;
+}
+
+function getFinalForecastPoint(points) {
+    return Array.isArray(points) && points.length ? points[points.length - 1] : null;
+}
+
+function normalizeSingleForecast(payload, modelType) {
+    const points = (payload?.forecasts || []).map((point) => ({
+        date: point.date,
+        predicted: firstFiniteNumber(point.predicted, point.prediction),
+        lower_95: point.lower95,
+        upper_95: point.upper95,
+        lower_68: point.lower68,
+        upper_68: point.upper68,
+        [modelType]: firstFiniteNumber(point.predicted, point.prediction),
+    }));
+    return {
+        ...payload,
+        forecast_points: points,
+    };
+}
+
+function normalizeEnsemblePoint(point) {
+    const prediction = firstFiniteNumber(point.prediction, point.predicted, point.ensemble);
+    return {
+        ...point,
+        ensemble: prediction,
+        prediction,
+        predicted: prediction,
+        lower_95: point.lower_95 ?? point.lower_90,
+        upper_95: point.upper_95 ?? point.upper_90,
+        lower_68: point.lower_68 ?? point.lower_90,
+        upper_68: point.upper_68 ?? point.upper_90,
+    };
+}
+
+function buildFallbackEnsemble(models) {
+    const available = MODEL_KEYS
+        .map((key) => [key, models?.[key]])
+        .filter(([, payload]) => payload?.status === "ok" && Array.isArray(payload.forecast_points) && payload.forecast_points.length);
+    if (!available.length) return null;
+
+    const first = available[0][1];
+    const points = first.forecast_points.map((point, index) => {
+        const values = available
+            .map(([key, payload]) => [key, firstFiniteNumber(
+                payload.forecast_points[index]?.prediction,
+                payload.forecast_points[index]?.predicted,
+                payload.forecast_points[index]?.[key],
+            )])
+            .filter(([, value]) => value !== null);
+        const predicted = values.reduce((sum, [, value]) => sum + Number(value), 0) / Math.max(values.length, 1);
+        const row = {
+            date: point.date,
+            ensemble: predicted,
+            prediction: predicted,
+            predicted,
+            lower_95: predicted,
+            upper_95: predicted,
+            lower_68: predicted,
+            upper_68: predicted,
+        };
+        values.forEach(([key, value]) => {
+            row[key] = Number(value);
+        });
+        return row;
+    });
+    const currentPrice = first.current_price;
+    const finalPoint = getFinalForecastPoint(points);
+    const changePct = finalPoint && currentPrice
+        ? ((finalPoint.predicted - currentPrice) / currentPrice) * 100
+        : 0;
+
+    return {
+        status: "ok",
+        model_available: true,
+        current_price: currentPrice,
+        current_price_source: first.current_price_source,
+        forecast_points: points,
+        ensemble: {
+            target: finalPoint?.predicted,
+            change_pct: changePct,
+            upper_95: finalPoint?.upper_95,
+            lower_95: finalPoint?.lower_95,
+            upper_68: finalPoint?.upper_68,
+            lower_68: finalPoint?.lower_68,
+            upper_90: finalPoint?.upper_95,
+            lower_90: finalPoint?.lower_95,
+            signal: changePct >= 0 ? "Bullish" : "Bearish",
+            reliability: available.length === MODEL_KEYS.length ? "Medium" : "Low",
+            consensus: `${available.length} model${available.length === 1 ? "" : "s"} available`,
+        },
+        weights: available.reduce((acc, [key]) => {
+            acc[key] = 1 / available.length;
+            return acc;
+        }, {}),
+    };
+}
+
+function resolveDisplayData(data, selectedModel) {
+    if (!data) return {};
+    const ensemblePayload = data.ensemblePayload?.status === "ok"
+        ? {
+            ...data.ensemblePayload,
+            forecast_points: (data.ensemblePayload.forecast_points || []).map(normalizeEnsemblePoint),
+        }
+        : buildFallbackEnsemble(data.models);
+
+    if (MODEL_KEYS.includes(selectedModel)) {
+        const payload = data.models?.[selectedModel];
+        const points = payload?.forecast_points || [];
+        const finalPoint = getFinalForecastPoint(points);
+        const changePct = finalPoint && payload?.current_price
+            ? ((finalPoint.predicted - payload.current_price) / payload.current_price) * 100
+            : payload?.expected_change_pct;
+        return {
+            payload,
+            points,
+            currentPrice: payload?.current_price,
+            currentPriceSource: payload?.current_price_source,
+            target: finalPoint?.predicted ?? payload?.target_price ?? payload?.predicted_price,
+            changePct,
+            lower95: finalPoint?.lower_95 ?? payload?.lower95,
+            upper95: finalPoint?.upper_95 ?? payload?.upper95,
+            lower68: finalPoint?.lower_68 ?? payload?.lower68,
+            upper68: finalPoint?.upper_68 ?? payload?.upper68,
+            signal: payload?.signal || (Number(changePct) >= 0 ? "Bullish" : "Bearish"),
+            reliability: payload?.status === "ok" ? "Model" : "Unavailable",
+            tableLabel: modelLabel(selectedModel),
+            chartModel: selectedModel,
+            unavailable: payload?.status !== "ok",
+            message: payload?.message || payload?.model_info?.message,
+        };
+    }
+
+    const finalPoint = getFinalForecastPoint(ensemblePayload?.forecast_points);
+    const summary = ensemblePayload?.ensemble;
+    return {
+        payload: ensemblePayload,
+        points: ensemblePayload?.forecast_points || [],
+        currentPrice: ensemblePayload?.current_price,
+        currentPriceSource: ensemblePayload?.current_price_source,
+        target: summary?.target ?? finalPoint?.predicted,
+        changePct: summary?.change_pct,
+        lower95: summary?.lower_95 ?? summary?.lower_90 ?? finalPoint?.lower_95,
+        upper95: summary?.upper_95 ?? summary?.upper_90 ?? finalPoint?.upper_95,
+        lower68: summary?.lower_68 ?? finalPoint?.lower_68,
+        upper68: summary?.upper_68 ?? finalPoint?.upper_68,
+        signal: summary?.signal,
+        reliability: summary?.reliability,
+        consensus: summary?.consensus,
+        tableLabel: selectedModel === "ensemble" ? "Ensemble" : "Forecast",
+        chartModel: selectedModel === "all" ? "all" : "ensemble",
+        unavailable: !ensemblePayload || ensemblePayload.status !== "ok",
+        message: ensemblePayload?.message,
+    };
 }
 
 function MetricCard({ label, value, sub, color }) {
@@ -178,8 +354,12 @@ function TooltipContent({ active, payload, label }) {
 }
 
 function ForecastChart({ priceData, forecastPoints, selectedModel }) {
-    const { chartData, todayDate } = useMemo(() => {
+    const { chartData, todayDate, yDomain } = useMemo(() => {
         const history = (priceData?.bars || []).slice(-60);
+        const future = (forecastPoints || [])
+            .filter((point) => point?.date)
+            .slice()
+            .sort((a, b) => String(a.date).localeCompare(String(b.date)));
         const rows = [];
         let boundary = null;
 
@@ -195,24 +375,45 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                 random_forest: isLast && forecastPoints.length ? bar.close : null,
                 upper_90: isLast && forecastPoints.length ? bar.close : null,
                 lower_90: isLast && forecastPoints.length ? bar.close : null,
+                upper_95: isLast && forecastPoints.length ? bar.close : null,
+                lower_95: isLast && forecastPoints.length ? bar.close : null,
+                upper_68: isLast && forecastPoints.length ? bar.close : null,
+                lower_68: isLast && forecastPoints.length ? bar.close : null,
             });
         });
 
-        forecastPoints.forEach((point) => {
+        future.forEach((point) => {
+            const prediction = firstFiniteNumber(point.prediction, point.predicted, point.ensemble);
             rows.push({
                 date: point.date,
                 historical: null,
-                ensemble: point.ensemble,
-                lstm: point.lstm,
-                xgboost: point.xgboost,
-                random_forest: point.random_forest,
-                upper_90: point.upper_90,
-                lower_90: point.lower_90,
+                ensemble: prediction,
+                lstm: firstFiniteNumber(point.lstm, selectedModel === "lstm" ? prediction : null),
+                xgboost: firstFiniteNumber(point.xgboost, selectedModel === "xgboost" ? prediction : null),
+                random_forest: firstFiniteNumber(point.random_forest, selectedModel === "random_forest" ? prediction : null),
+                upper_90: point.upper_90 ?? point.upper_95,
+                lower_90: point.lower_90 ?? point.lower_95,
+                upper_95: point.upper_95 ?? point.upper_90,
+                lower_95: point.lower_95 ?? point.lower_90,
+                upper_68: point.upper_68,
+                lower_68: point.lower_68,
             });
         });
 
-        return { chartData: rows, todayDate: boundary };
-    }, [priceData, forecastPoints]);
+        const visibleKeys = selectedModel === "all"
+            ? ["historical", "ensemble", "lstm", "xgboost", "random_forest"]
+            : ["historical", selectedModel];
+        const lineValues = rows.flatMap((row) => visibleKeys.map((key) => toFiniteNumber(row[key]))).filter((value) => value !== null);
+        const min = Math.min(...lineValues);
+        const max = Math.max(...lineValues);
+        const span = Number.isFinite(max - min) ? max - min : 0;
+        const pad = Math.max(span * 0.08, Math.abs(max || min || 0) * 0.01, 1);
+        const domain = lineValues.length
+            ? [Math.max(0, Number((min - pad).toFixed(2))), Number((max + pad).toFixed(2))]
+            : ["auto", "auto"];
+
+        return { chartData: rows, todayDate: boundary, yDomain: domain };
+    }, [priceData, forecastPoints, selectedModel]);
 
     const show = (model) => selectedModel === "all" || selectedModel === model;
 
@@ -246,7 +447,8 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                     <YAxis
                         orientation="right"
                         tick={{ fill: C.textDim, fontSize: 11 }}
-                        domain={["auto", "auto"]}
+                        domain={yDomain}
+                        allowDataOverflow
                         axisLine={false}
                         tickLine={false}
                         tickFormatter={(value) => `$${Number(value).toFixed(0)}`}
@@ -254,17 +456,37 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                     <Tooltip content={<TooltipContent />} />
                     <Area
                         type="monotone"
-                        dataKey="upper_90"
+                        dataKey="upper_95"
                         stroke="none"
                         fill={COLORS.band}
-                        fillOpacity={0.09}
+                        fillOpacity={0.06}
                         connectNulls
                         isAnimationActive={false}
                         tooltipType="none"
                     />
                     <Area
                         type="monotone"
-                        dataKey="lower_90"
+                        dataKey="lower_95"
+                        stroke="none"
+                        fill={COLORS.panel}
+                        fillOpacity={1}
+                        connectNulls
+                        isAnimationActive={false}
+                        tooltipType="none"
+                    />
+                    <Area
+                        type="monotone"
+                        dataKey="upper_68"
+                        stroke="none"
+                        fill={COLORS.band}
+                        fillOpacity={0.14}
+                        connectNulls
+                        isAnimationActive={false}
+                        tooltipType="none"
+                    />
+                    <Area
+                        type="monotone"
+                        dataKey="lower_68"
                         stroke="none"
                         fill={COLORS.panel}
                         fillOpacity={1}
@@ -325,7 +547,7 @@ function WeightsPanel({ weights, consensus, signal, reliability }) {
     );
 }
 
-function ForecastTable({ rows }) {
+function ForecastTable({ rows, modelKey, label }) {
     const tableRows = (rows || []).slice(0, 7);
     return (
         <div style={{ background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, overflowX: "auto" }}>
@@ -333,22 +555,28 @@ function ForecastTable({ rows }) {
                 <thead>
                     <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                         <th style={{ color: C.textDim, textAlign: "left", padding: "0 10px 10px 0", fontWeight: 800 }}>DATE</th>
-                        <th style={{ color: COLORS.ensemble, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>ENSEMBLE</th>
-                        <th style={{ color: COLORS.lstm, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>LSTM</th>
-                        <th style={{ color: COLORS.xgboost, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>XGBOOST</th>
-                        <th style={{ color: COLORS.random_forest, textAlign: "right", padding: "0 0 10px 10px", fontWeight: 800 }}>RF</th>
+                        <th style={{ color: COLORS[modelKey] || COLORS.ensemble, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>{label || "PREDICTED PRICE"}</th>
+                        <th style={{ color: C.red, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>LOWER 95%</th>
+                        <th style={{ color: C.green, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>UPPER 95%</th>
+                        <th style={{ color: C.textDim, textAlign: "right", padding: "0 0 10px 10px", fontWeight: 800 }}>RANGE</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {tableRows.map((row) => (
-                        <tr key={row.date} style={{ borderBottom: "1px solid rgba(255,255,255,.055)" }}>
-                            <td style={{ color: C.textMid, padding: "10px 10px 10px 0", fontVariantNumeric: "tabular-nums" }}>{row.date}</td>
-                            <td style={{ color: COLORS.ensemble, textAlign: "right", padding: "10px", fontWeight: 800 }}>{formatPrice(row.ensemble)}</td>
-                            <td style={{ color: COLORS.lstm, textAlign: "right", padding: "10px" }}>{formatPrice(row.lstm)}</td>
-                            <td style={{ color: COLORS.xgboost, textAlign: "right", padding: "10px" }}>{formatPrice(row.xgboost)}</td>
-                            <td style={{ color: COLORS.random_forest, textAlign: "right", padding: "10px 0 10px 10px" }}>{formatPrice(row.random_forest)}</td>
-                        </tr>
-                    ))}
+                    {tableRows.map((row) => {
+                        const predicted = row.predicted ?? row.ensemble ?? row[modelKey];
+                        const lower = row.lower_95 ?? row.lower_90;
+                        const upper = row.upper_95 ?? row.upper_90;
+                        const range = Number.isFinite(Number(upper)) && Number.isFinite(Number(lower)) ? Number(upper) - Number(lower) : null;
+                        return (
+                            <tr key={row.date} style={{ borderBottom: "1px solid rgba(255,255,255,.055)" }}>
+                                <td style={{ color: C.textMid, padding: "10px 10px 10px 0", fontVariantNumeric: "tabular-nums" }}>{row.date}</td>
+                                <td style={{ color: COLORS[modelKey] || COLORS.ensemble, textAlign: "right", padding: "10px", fontWeight: 800 }}>{formatPrice(predicted)}</td>
+                                <td style={{ color: C.red, textAlign: "right", padding: "10px" }}>{formatPrice(lower)}</td>
+                                <td style={{ color: C.green, textAlign: "right", padding: "10px" }}>{formatPrice(upper)}</td>
+                                <td style={{ color: C.textMid, textAlign: "right", padding: "10px 0 10px 10px" }}>{formatPrice(range)}</td>
+                            </tr>
+                        );
+                    })}
                 </tbody>
             </table>
         </div>
@@ -367,9 +595,34 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
         if (!apiConnected) return;
         setLoading(true);
         setError(null);
-        fetchEnsemblePrediction(selectedTicker, horizon)
-            .then((payload) => {
-                setData(payload);
+        Promise.allSettled([
+            fetchEnsemblePrediction(selectedTicker, horizon),
+            ...MODEL_KEYS.map((modelType) => fetchPredictions(selectedTicker, modelType, horizon)),
+        ])
+            .then((results) => {
+                const [ensembleResult, ...modelResults] = results;
+                const models = {};
+                const errors = {};
+                MODEL_KEYS.forEach((modelType, index) => {
+                    const result = modelResults[index];
+                    if (result.status === "fulfilled") {
+                        models[modelType] = normalizeSingleForecast(result.value, modelType);
+                    } else {
+                        models[modelType] = {
+                            status: "unavailable",
+                            model_available: false,
+                            message: result.reason?.message || "Prediction model not available. Please train or load model bundle.",
+                            forecasts: [],
+                            forecast_points: [],
+                        };
+                        errors[modelType] = models[modelType].message;
+                    }
+                });
+                setData({
+                    ensemblePayload: ensembleResult.status === "fulfilled" ? ensembleResult.value : null,
+                    models,
+                    errors,
+                });
                 setLoading(false);
             })
             .catch((err) => {
@@ -386,11 +639,11 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
         );
     }
 
-    const currentPrice = data?.current_price ?? priceData?.bars?.[priceData.bars.length - 1]?.close;
-    const ensemble = data?.ensemble;
-    const modelUnavailable = data?.status === "unavailable" || data?.model_available === false;
-    const bullish = Number(ensemble?.change_pct || 0) >= 0;
-    const reliabilityColor = ensemble?.reliability === "Low" ? C.red : ensemble?.reliability === "Medium" ? C.amber : C.green;
+    const display = resolveDisplayData(data, selectedModel);
+    const currentPrice = display.currentPrice ?? priceData?.bars?.[priceData.bars.length - 1]?.close;
+    const modelUnavailable = !loading && !error && display.unavailable;
+    const bullish = Number(display.changePct || 0) >= 0;
+    const reliabilityColor = display.reliability === "Low" ? C.red : display.reliability === "Medium" ? C.amber : C.green;
 
     return (
         <div style={{ display: "grid", gap: 18, paddingBottom: 36 }}>
@@ -458,48 +711,58 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
             {!loading && !error && modelUnavailable && (
                 <div style={{ padding: 28, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, display: "grid", gap: 16 }}>
                     <div>
-                        <div style={{ color: C.text, fontSize: 18, fontWeight: 900, marginBottom: 6 }}>Ensemble models not trained</div>
-                        <div style={{ color: C.textMid, fontSize: 13 }}>{data?.message || `Train the LSTM, XGBoost, and Random Forest ensemble for ${selectedTicker}.`}</div>
+                        <div style={{ color: C.text, fontSize: 18, fontWeight: 900, marginBottom: 6 }}>Prediction model unavailable</div>
+                        <div style={{ color: C.textMid, fontSize: 13 }}>
+                            {display.message || "Prediction model not available. Please train or load model bundle."}
+                        </div>
                     </div>
                     <TrainButton symbol={selectedTicker} onComplete={() => setRefreshKey((key) => key + 1)} />
                 </div>
             )}
 
-            {!loading && !error && !modelUnavailable && ensemble && (
+            {!loading && !error && !modelUnavailable && display.payload && (
                 <>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-                        <MetricCard label="Current" value={formatPrice(currentPrice)} />
                         <MetricCard
-                            label="Ensemble Forecast"
-                            value={formatPrice(ensemble.target)}
-                            sub={`${formatPct(ensemble.change_pct)} ${ensemble.signal || ""} | ${ensemble.reliability} reliability`}
+                            label="Current"
+                            value={formatPrice(currentPrice)}
+                            sub={display.currentPriceSource ? display.currentPriceSource.replace("_", " ") : null}
+                        />
+                        <MetricCard
+                            label={`${modelLabel(display.chartModel)} Forecast`}
+                            value={formatPrice(display.target)}
+                            sub={`${formatPct(display.changePct)} ${display.signal || ""} | ${display.reliability || "Model"}`}
                             color={bullish ? COLORS.ensemble : C.red}
                         />
-                        <MetricCard label="Bull 90%" value={formatPrice(ensemble.upper_90)} color={C.green} />
-                        <MetricCard label="Bear 90%" value={formatPrice(ensemble.lower_90)} color={C.red} />
+                        <MetricCard label="Upper 95%" value={formatPrice(display.upper95)} color={C.green} />
+                        <MetricCard label="Lower 95%" value={formatPrice(display.lower95)} color={C.red} />
                     </div>
 
                     <ForecastChart
                         priceData={priceData}
-                        forecastPoints={(data.forecast_points || []).slice(0, horizon)}
-                        selectedModel={selectedModel}
+                        forecastPoints={(display.points || []).slice(0, horizon)}
+                        selectedModel={display.chartModel}
                     />
 
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14, alignItems: "start" }}>
                         <WeightsPanel
-                            weights={data.weights}
-                            consensus={ensemble.consensus}
-                            signal={ensemble.signal}
-                            reliability={ensemble.reliability}
+                            weights={display.payload?.weights}
+                            consensus={display.consensus}
+                            signal={display.signal}
+                            reliability={display.reliability}
                         />
                         <div style={{ display: "grid", gap: 10 }}>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
                                 <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>Forecast Table</div>
                                 <div style={{ color: reliabilityColor, fontSize: 12, fontWeight: 800 }}>
-                                    {ensemble.reliability} Reliability
+                                    {display.reliability || "Model"}
                                 </div>
                             </div>
-                            <ForecastTable rows={data.forecast_points || []} />
+                            <ForecastTable
+                                rows={display.points || []}
+                                modelKey={display.chartModel === "all" ? "ensemble" : display.chartModel}
+                                label={`${display.tableLabel || "Predicted"} Price`}
+                            />
                         </div>
                     </div>
                 </>

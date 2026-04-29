@@ -51,6 +51,174 @@ CORE_REGRESSION_FEATURE_COLUMNS = [
     "MACD",
     "Volatility",
 ]
+LEGACY_REGRESSION_FEATURE_COLUMNS = [
+    "Returns",
+    "Log_Returns",
+    "SMA_5",
+    "SMA_20",
+    "SMA_50",
+    "SMA_200",
+    "EMA_12",
+    "EMA_26",
+    "EMA_50",
+    "MACD",
+    "MACD_Signal",
+    "MACD_Histogram",
+    "ADX",
+    "Ichimoku_A",
+    "Ichimoku_B",
+    "RSI",
+    "RSI_14",
+    "Stoch_K",
+    "Stoch_D",
+    "Williams_R",
+    "ROC",
+    "Ultimate_Osc",
+    "TSI",
+    "ATR",
+    "BB_High",
+    "BB_Mid",
+    "BB_Low",
+    "BB_Width",
+    "BB_Pband",
+    "Bollinger_Upper",
+    "Bollinger_Lower",
+    "Bollinger_Bandwidth",
+    "KC_High",
+    "KC_Low",
+    "DC_High",
+    "DC_Low",
+    "OBV",
+    "CMF",
+    "MFI",
+    "VWAP",
+    "Volume_SMA_20",
+    "Volume_Ratio",
+    "Volume_Change",
+    "Daily_Return",
+    "Log_Return",
+    "High_Low_Range",
+    "Open_Close_Range",
+    "Close_Lag_1",
+    "Return_Lag_1",
+    "Volume_Lag_1",
+    "Close_Lag_2",
+    "Return_Lag_2",
+    "Volume_Lag_2",
+    "Close_Lag_3",
+    "Return_Lag_3",
+    "Volume_Lag_3",
+    "Close_Lag_5",
+    "Return_Lag_5",
+    "Volume_Lag_5",
+    "Close_Lag_10",
+    "Return_Lag_10",
+    "Volume_Lag_10",
+    "DayOfWeek",
+    "Month",
+    "Quarter",
+    "Prev_Close",
+    "Price_Momentum",
+    "Rolling_Volatility",
+    "Lag_Return_1",
+    "Lag_Return_2",
+    "Lag_Return_3",
+    "Lag_Return_5",
+]
+FEATURE_ENGINEERING_STEP_MAP = {
+    "Returns": "returns",
+    "Log_Returns": "returns",
+    "Daily_Return": "returns",
+    "Log_Return": "returns",
+    "SMA_5": "trend_indicators",
+    "SMA_20": "trend_indicators",
+    "SMA_50": "trend_indicators",
+    "SMA_200": "trend_indicators",
+    "EMA_12": "trend_indicators",
+    "EMA_26": "trend_indicators",
+    "EMA_50": "trend_indicators",
+    "MACD": "trend_indicators",
+    "MACD_Signal": "trend_indicators",
+    "MACD_Histogram": "trend_indicators",
+    "ADX": "trend_indicators",
+    "Ichimoku_A": "trend_indicators",
+    "Ichimoku_B": "trend_indicators",
+    "RSI": "momentum_indicators",
+    "RSI_14": "momentum_indicators",
+    "Stoch_K": "momentum_indicators",
+    "Stoch_D": "momentum_indicators",
+    "Williams_R": "momentum_indicators",
+    "ROC": "momentum_indicators",
+    "Ultimate_Osc": "momentum_indicators",
+    "TSI": "momentum_indicators",
+    "ATR": "volatility_indicators",
+    "BB_High": "volatility_indicators",
+    "BB_Mid": "volatility_indicators",
+    "BB_Low": "volatility_indicators",
+    "BB_Width": "volatility_indicators",
+    "BB_Pband": "volatility_indicators",
+    "Bollinger_Upper": "volatility_indicators",
+    "Bollinger_Lower": "volatility_indicators",
+    "Bollinger_Bandwidth": "volatility_indicators",
+    "KC_High": "volatility_indicators",
+    "KC_Low": "volatility_indicators",
+    "DC_High": "volatility_indicators",
+    "DC_Low": "volatility_indicators",
+    "OBV": "volume_indicators",
+    "CMF": "volume_indicators",
+    "MFI": "volume_indicators",
+    "VWAP": "volume_indicators",
+    "Volume_SMA_20": "volume_indicators",
+    "Volume_Ratio": "volume_indicators",
+    "Volume_Change": "volume_indicators",
+    "Volatility": "volatility_features",
+    "High_Low_Range": "price_action_features",
+    "Open_Close_Range": "price_action_features",
+    "Prev_Close": "price_action_features",
+    "Price_Momentum": "price_action_features",
+    "Rolling_Volatility": "price_action_features",
+    "Close_Lag_1": "lag_features",
+    "Return_Lag_1": "lag_features",
+    "Volume_Lag_1": "lag_features",
+    "Close_Lag_2": "lag_features",
+    "Return_Lag_2": "lag_features",
+    "Volume_Lag_2": "lag_features",
+    "Close_Lag_3": "lag_features",
+    "Return_Lag_3": "lag_features",
+    "Volume_Lag_3": "lag_features",
+    "Close_Lag_5": "lag_features",
+    "Return_Lag_5": "lag_features",
+    "Volume_Lag_5": "lag_features",
+    "Close_Lag_10": "lag_features",
+    "Return_Lag_10": "lag_features",
+    "Volume_Lag_10": "lag_features",
+    "DayOfWeek": "calendar_features",
+    "Month": "calendar_features",
+    "Quarter": "calendar_features",
+}
+FEATURE_MIN_HISTORY = {
+    "Returns": 2,
+    "Log_Returns": 2,
+    "Daily_Return": 2,
+    "Log_Return": 2,
+    "SMA_5": 5,
+    "SMA_20": 20,
+    "SMA_50": 50,
+    "SMA_200": 200,
+    "EMA_12": 12,
+    "EMA_26": 26,
+    "EMA_50": 50,
+    "RSI": 14,
+    "RSI_14": 14,
+    "ATR": 14,
+    "Volatility": 21,
+    "Volume_SMA_20": 20,
+    "Price_Momentum": 11,
+    "Rolling_Volatility": 21,
+    "Close_Lag_10": 11,
+    "Return_Lag_10": 11,
+    "Volume_Lag_10": 11,
+}
 
 
 def normalize_feature_config(feature_config: Optional[Dict] = None) -> Dict:
@@ -134,6 +302,105 @@ def build_feature_frame(df: pd.DataFrame, feature_config: Optional[Dict] = None)
         include_candlesticks=bool(config["include_candlesticks"]),
         lag_periods=list(config["lag_periods"]),
     )
+
+
+def _regression_feature_columns_to_keep(extra_columns: Optional[List[str]] = None) -> List[str]:
+    keep_cols: List[str] = []
+    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+        if col not in keep_cols:
+            keep_cols.append(col)
+    for col in CORE_REGRESSION_FEATURE_COLUMNS + LEGACY_REGRESSION_FEATURE_COLUMNS:
+        if col not in keep_cols:
+            keep_cols.append(col)
+    for col in extra_columns or []:
+        if col not in keep_cols:
+            keep_cols.append(col)
+    return keep_cols
+
+
+def build_regression_feature_frame(
+    df: pd.DataFrame,
+    feature_config: Optional[Dict] = None,
+) -> pd.DataFrame:
+    """
+    Build the canonical regression feature frame used by price-forecast models.
+
+    This intentionally returns a superset of indicators so inference can align
+    against both the newer reduced bundles and the older wide legacy bundles.
+    """
+    config = normalize_feature_config(feature_config)
+    data = clean_market_data(df.copy())
+    if data.empty:
+        return data
+
+    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+        if col in data.columns:
+            data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    close = data["Close"]
+    volume = data["Volume"] if "Volume" in data.columns else None
+
+    if bool(config["include_technical"]):
+        data = add_all_technical_indicators(data)
+    else:
+        data["Returns"] = close.pct_change()
+        data["Log_Returns"] = np.log(close / close.shift(1))
+
+    data["Daily_Return"] = data.get("Daily_Return", data["Returns"])
+    data["Log_Return"] = data.get("Log_Return", data["Log_Returns"])
+    data["Volatility"] = data.get("Volatility", data["Daily_Return"].rolling(window=20).std())
+    data["High_Low_Range"] = (data["High"] - data["Low"]) / close.replace(0, np.nan)
+    data["Open_Close_Range"] = (close - data["Open"]) / data["Open"].replace(0, np.nan)
+
+    if bool(config["include_lags"]):
+        data = add_price_action_features(data)
+        lag_periods = sorted({int(period) for period in config.get("lag_periods", []) if int(period) > 0})
+        for lag in lag_periods:
+            data[f"Close_Lag_{lag}"] = close.shift(lag)
+            data[f"Return_Lag_{lag}"] = data["Daily_Return"].shift(lag)
+            if volume is not None:
+                data[f"Volume_Lag_{lag}"] = volume.shift(lag)
+
+    data["DayOfWeek"] = data.index.dayofweek
+    data["Month"] = data.index.month
+    data["Quarter"] = data.index.quarter
+
+    extra_columns: List[str] = []
+    if bool(config["include_regime"]):
+        try:
+            detector = MarketRegimeDetector()
+            detector.fit(data["Daily_Return"])
+            regime_frame = detector.get_regime_features(data["Daily_Return"])
+            data = data.join(regime_frame, how="left")
+            extra_columns.extend(["regime_label", "regime_probability"])
+        except Exception as exc:
+            logger.warning("Failed to add regime features: %s", exc)
+
+    if bool(config["include_candlesticks"]):
+        try:
+            data = detect_candlestick_patterns(data)
+            pattern_cols = [
+                col for col in data.columns
+                if col not in _regression_feature_columns_to_keep(extra_columns)
+            ]
+            extra_columns.extend(pattern_cols)
+        except Exception as exc:
+            logger.warning("Failed to add candlestick features: %s", exc)
+
+    keep_cols = _regression_feature_columns_to_keep(extra_columns)
+    keep_cols += [col for col in data.columns if col.startswith("target_return_")]
+    data = data[[col for col in keep_cols if col in data.columns]]
+
+    logger.info("Built regression feature frame with %s columns", len(data.columns))
+    return data
+
+
+def _group_missing_features_by_step(missing_columns: List[str]) -> Dict[str, List[str]]:
+    grouped: Dict[str, List[str]] = {}
+    for column in missing_columns:
+        step = FEATURE_ENGINEERING_STEP_MAP.get(column, "unknown_feature_step")
+        grouped.setdefault(step, []).append(column)
+    return grouped
 
 
 def clean_market_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -296,7 +563,7 @@ def build_regression_dataset(
     target_col = f"target_return_{horizon}d"
 
     # 1. Build feature frame
-    feature_frame = clean_market_data(build_feature_frame(df, feature_config=feature_config))
+    feature_frame = clean_market_data(build_regression_feature_frame(df, feature_config=feature_config))
 
     # 2. Add multi-horizon targets. Shift(-h) makes today's feature row learn
     # the future return h trading rows ahead without using future values in any
@@ -435,10 +702,33 @@ def transform_feature_frame(
 
     missing = [col for col in feature_columns if col not in feature_frame.columns]
     if missing:
+        grouped_missing = _group_missing_features_by_step(missing)
+        logger.error(
+            "Feature engineering validation failed: missing columns=%s step_groups=%s rows=%s available_cols=%s",
+            missing,
+            grouped_missing,
+            len(feature_frame),
+            len(feature_frame.columns),
+        )
         raise ValueError(f"Missing required feature columns: {missing[:5]}")
 
     aligned = feature_frame.dropna(subset=feature_columns).copy()
     if aligned.empty:
+        non_null_counts = {col: int(feature_frame[col].notna().sum()) for col in feature_columns}
+        insufficient_history = {
+            col: FEATURE_MIN_HISTORY[col]
+            for col in feature_columns
+            if col in FEATURE_MIN_HISTORY and len(feature_frame) < FEATURE_MIN_HISTORY[col]
+        }
+        zero_coverage = [col for col, count in non_null_counts.items() if count == 0]
+        if zero_coverage or insufficient_history:
+            logger.error(
+                "Feature engineering produced no usable inference rows. zero_coverage=%s insufficient_history=%s rows=%s step_groups=%s",
+                zero_coverage,
+                insufficient_history,
+                len(feature_frame),
+                _group_missing_features_by_step(zero_coverage),
+            )
         return aligned, np.empty((0, len(feature_columns)), dtype=np.float32)
 
     X = aligned[feature_columns].values.astype(np.float32)

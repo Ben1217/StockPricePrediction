@@ -1,0 +1,13 @@
+[
+  "Open",
+  "High",
+  "Low",
+  "Close",
+  "Volume",
+  "Daily_Return",
+  "SMA_20",
+  "SMA_50",
+  "RSI_14",
+  "MACD",
+  "Volatility"
+]

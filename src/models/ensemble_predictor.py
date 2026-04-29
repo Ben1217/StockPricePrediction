@@ -22,10 +22,9 @@ import numpy as np
 import pandas as pd
 
 from src.features.feature_engineering import (
-    build_feature_frame,
+    build_regression_feature_frame,
     normalize_feature_config,
     transform_feature_frame,
-    create_sequences,
 )
 from src.models.regression_models import REGRESSOR_FACTORIES, REGRESSOR_FILE_NAMES
 from src.utils.logger import get_logger
@@ -151,6 +150,13 @@ def _run_inference(bundle: Dict, feature_frame: pd.DataFrame, model_type: str) -
         aligned, X = transform_feature_frame(feature_frame, feature_cols, scaler=scaler)
         if aligned.empty or len(X) == 0:
             return None
+
+        if model_type == "random_forest" and hasattr(model, "model"):
+            # Avoid Windows worker-spawn failures during API inference.
+            try:
+                model.model.n_jobs = 1
+            except Exception:
+                pass
 
         if model_type == "lstm":
             seq_len = int(meta.get("sequence_length") or SEQUENCE_LENGTH)
@@ -435,11 +441,16 @@ def _build_forecast_points(
         spread_band = current_price * (max(spread_pct, 0.0) / 100.0) * 0.50 * frac
         volatility_band = p * daily_vol * np.sqrt(i + 1) * 0.50
         band = validation_band + 0.50 * rmse_band + spread_band + volatility_band
+        band68 = band / 1.96
         point = {
             "date": str(dt.date()),
             "predicted": round(float(p), 2),
             "lower": round(float(max(p - band, 0.0)), 2),
             "upper": round(float(p + band), 2),
+            "lower_95": round(float(max(p - band, 0.0)), 2),
+            "upper_95": round(float(p + band), 2),
+            "lower_68": round(float(max(p - band68, 0.0)), 2),
+            "upper_68": round(float(p + band68), 2),
         }
         for m, m_pred in raw_predictions.items():
             m_p = current_price + (m_pred - current_price) * frac
@@ -463,6 +474,8 @@ class EnsemblePricePredictor:
         symbol: str,
         horizon: int,
         raw_df: pd.DataFrame,
+        model_types: Optional[List[str]] = None,
+        current_price: Optional[float] = None,
     ) -> Optional[EnsembleForecast]:
         symbol = symbol.upper()
         horizon = int(horizon)
@@ -471,7 +484,9 @@ class EnsemblePricePredictor:
 
         # 1. Load all available bundles
         bundles: Dict[str, Dict] = {}
-        for mtype in MODEL_TYPES:
+        requested_model_types = model_types or MODEL_TYPES
+        requested_model_types = [mtype for mtype in requested_model_types if mtype in MODEL_TYPES]
+        for mtype in requested_model_types:
             b = _load_regression_bundle(symbol, mtype, horizon)
             if b is not None:
                 bundles[mtype] = b
@@ -480,13 +495,13 @@ class EnsemblePricePredictor:
             logger.info("No regression bundles found for %s h=%d", symbol, horizon)
             return None
 
-        current_price = float(raw_df["Close"].iloc[-1])
+        current_price = float(current_price if current_price is not None else raw_df["Close"].iloc[-1])
         last_date = raw_df.index[-1]
 
         # 2. Build feature frame (shared across all models)
         first_meta = next(iter(bundles.values()))["meta"]
         feature_config = normalize_feature_config(first_meta.get("feature_config"))
-        feature_frame = build_feature_frame(raw_df, feature_config=feature_config)
+        feature_frame = build_regression_feature_frame(raw_df, feature_config=feature_config)
 
         # 3. Run inference per model. Models output returns, which are
         # converted to prices only after inference.
