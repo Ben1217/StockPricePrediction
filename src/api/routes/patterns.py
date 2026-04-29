@@ -238,6 +238,7 @@ async def get_patterns(
         patterns_raw,
         candle_count=len(df),
         timeframe=tf,
+        market_context=market_context,
         min_candles=cfg["min_candles"],
     )
     best_setup_raw = setup_status_raw.pop("best_setup")

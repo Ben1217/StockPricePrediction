@@ -233,7 +233,8 @@ function isActionableSetup(pattern) {
         pattern.direction !== "neutral" &&
         pattern.entry_price != null &&
         pattern.target_price != null &&
-        pattern.stop_loss != null
+        pattern.stop_loss != null &&
+        pattern.setup_relevance_ok !== false
     );
 }
 
@@ -271,6 +272,7 @@ function formatSetupPercent(value, signed = true) {
 
 function getReasonTone(reasonCode) {
     if (reasonCode === "INSUFFICIENT_DATA") return C.amber;
+    if (reasonCode === "SETUP_COMPLETED" || reasonCode === "SETUP_STALE") return C.amber;
     if (reasonCode === "VALID_SETUP") return C.green;
     return C.red;
 }
@@ -542,6 +544,7 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
         { label: "Pattern detected", passed: setupStatus.has_detected_pattern },
         { label: `Confidence >= ${Number(setupStatus.min_confidence || 0).toFixed(0)}%`, passed: setupStatus.confidence_ok },
         { label: "Valid entry / stop / target", passed: setupStatus.levels_ok },
+        { label: "Relevant to current price", passed: setupStatus.price_relevance_ok !== false },
         { label: `Risk / reward >= ${Number(setupStatus.min_risk_reward || 0).toFixed(1)}`, passed: setupStatus.risk_reward_ok },
         { label: "No conflicting filters", passed: setupStatus.no_conflicting_filters },
         { label: `Sufficient candles (${setupStatus.candle_count || 0}/${setupStatus.min_candles || 0})`, passed: setupStatus.sufficient_data },
@@ -596,6 +599,17 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                             Candidate: {setupStatus.candidate_pattern_name}
                             {setupStatus.candidate_confidence != null ? ` • ${Number(setupStatus.candidate_confidence).toFixed(0)}%` : ""}
                             {setupStatus.candidate_risk_reward != null ? ` • R/R ${Number(setupStatus.candidate_risk_reward).toFixed(2)}` : ""}
+                        </div>
+                    )}
+                    {setupStatus?.candidate_relevance_status && (
+                        <div style={{ color: C.textDim, fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
+                            Relevance: {setupStatus.candidate_relevance_status}
+                            {setupStatus.candidate_entry_distance_pct != null ? `, entry ${Number(setupStatus.candidate_entry_distance_pct).toFixed(1)}% from current` : ""}
+                        </div>
+                    )}
+                    {setupStatus?.current_price != null && (
+                        <div style={{ color: C.textDim, fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
+                            Current price: {formatSetupPrice(setupStatus.current_price)}
                         </div>
                     )}
                     {setupStatus?.conflicting_pattern_names?.length > 0 && (
@@ -677,6 +691,12 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                     <span style={{ color: C.textDim }}>Status</span>
                     <span style={{ color: tone.color, fontWeight: 700 }}>{statusLabel}</span>
                 </div>
+                {bestSetup.current_price != null && (
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                        <span style={{ color: C.textDim }}>Current</span>
+                        <span style={{ color: C.text, fontWeight: 700 }}>{formatSetupPrice(bestSetup.current_price)}</span>
+                    </div>
+                )}
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
                     <span style={{ color: C.textDim }}>Entry</span>
                     <span style={{ color: C.text, fontWeight: 700 }}>{formatSetupPrice(bestSetup.entry_price)}</span>
@@ -696,6 +716,12 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading }) 
                     <span style={{ color: C.textDim }}>Risk / Reward</span>
                     <span style={{ color: C.text, fontWeight: 700 }}>{riskReward ? riskReward.toFixed(1) : "—"}</span>
                 </div>
+                {bestSetup.entry_distance_pct != null && (
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
+                        <span style={{ color: C.textDim }}>Entry Distance</span>
+                        <span style={{ color: C.text, fontWeight: 700 }}>{formatSetupPercent(bestSetup.entry_distance_pct, false)}</span>
+                    </div>
+                )}
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", marginTop: 10 }}>

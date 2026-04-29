@@ -197,3 +197,59 @@ def test_evaluate_best_setup_returns_trade_setup_payload():
     assert result["best_setup"]["primary_target"] == 650.0
     assert result["best_setup"]["risk_reward_ratio"] == 3.0
     assert len(result["best_setup"]["secondary_targets"]) == 2
+
+
+def test_evaluate_best_setup_marks_bullish_setup_completed_when_current_price_above_target():
+    market_context = {"close": 152.51}
+    patterns = rank_patterns([
+        _base_pattern(
+            pattern_name="Double Bottom",
+            status="forming",
+            neckline=54.39,
+            entry_price=54.39,
+            target_price=70.08,
+            stop_loss=45.74,
+        )
+    ], market_context=market_context)
+
+    result = evaluate_best_setup(
+        patterns,
+        candle_count=320,
+        timeframe="1d",
+        market_context=market_context,
+    )
+
+    assert result["setup_available"] is False
+    assert result["status"] == "NO_SETUP"
+    assert result["reason_code"] == "SETUP_COMPLETED"
+    assert result["levels_ok"] is True
+    assert result["price_relevance_ok"] is False
+    assert result["candidate_relevance_status"] == "completed"
+    assert result["best_setup"] is None
+
+
+def test_evaluate_best_setup_rejects_bullish_entry_too_far_from_current_price():
+    market_context = {"close": 152.51}
+    patterns = rank_patterns([
+        _base_pattern(
+            pattern_name="Bull Flag",
+            status="confirmed",
+            entry_price=125.0,
+            neckline=None,
+            target_price=180.0,
+            stop_loss=115.0,
+        )
+    ], market_context=market_context)
+
+    result = evaluate_best_setup(
+        patterns,
+        candle_count=320,
+        timeframe="1d",
+        market_context=market_context,
+    )
+
+    assert result["setup_available"] is False
+    assert result["reason_code"] == "SETUP_STALE"
+    assert result["price_relevance_ok"] is False
+    assert result["candidate_relevance_status"] == "stale"
+    assert result["candidate_entry_distance_pct"] > 15.0
