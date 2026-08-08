@@ -28,6 +28,9 @@ pytest-cache-files-*/
 htmlcov/
 .mypy_cache/
 
+# Agent and tool logs
+.codex-logs/
+
 # Build
 build/
 dist/
@@ -49,6 +52,7 @@ models/scalers/**/*.pkl
 # Database
 database/*.db
 database/*.sqlite
+data/*.db
 
 # Logs
 logs/**/*.log
@@ -60,3 +64,5 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+*.diff
+temp_hist.txt

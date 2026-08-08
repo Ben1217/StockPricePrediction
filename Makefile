@@ -55,12 +55,12 @@ test-unit:
 	pytest tests/unit/ -v
 
 lint:
-	flake8 src tests scripts test_setup.py test_indicators.py
+	flake8 src tests scripts
 	mypy src
 
 format:
-	black src tests scripts test_setup.py test_indicators.py
-	isort src tests scripts test_setup.py test_indicators.py
+	black src tests scripts
+	isort src tests scripts
 
 download-data:
 	$(PYTHON) scripts/download_daily_data.py
