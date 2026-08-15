@@ -11,13 +11,18 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import numpy as np
 import pytest
+import torch
 
 from src.models.lstm_model import LSTMModel
 
 
 def test_lstm_stops_before_max_epochs():
     """With deliberately bad validation data, training should stop early."""
+    # Both RNGs must be seeded: numpy drives the synthetic data, torch drives weight
+    # initialisation. Seeding only numpy left this test order-dependent — it passed in
+    # isolation and failed in a full run, depending on what had advanced torch's RNG.
     np.random.seed(42)
+    torch.manual_seed(42)
     n_train, seq_len, n_feat = 200, 10, 3
 
     # Training data: clean learnable relationship
@@ -52,6 +57,7 @@ def test_lstm_stops_before_max_epochs():
 def test_lstm_restores_best_weights():
     """After training, model weights should correspond to the best val epoch."""
     np.random.seed(123)
+    torch.manual_seed(123)
     n, seq_len, n_feat = 200, 10, 2
 
     X_train = np.random.randn(n, seq_len, n_feat).astype(np.float32)

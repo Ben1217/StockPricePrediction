@@ -2,6 +2,7 @@
 Backtest API routes — run and retrieve backtests.
 """
 
+import threading
 import uuid
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from cachetools import LRUCache
 from fastapi import APIRouter, HTTPException
 
 from src.api.schemas.schemas import BacktestRequest, BacktestResponse
@@ -38,8 +40,42 @@ from src.signals.signal_generator import TradingSignalGenerator
 
 router = APIRouter()
 
-# Store results in memory
-_backtest_results = {}
+# Backtest results in memory, bounded — each entry holds a full trade log, so an
+# unbounded dict grew without limit. `_latest_backtest_id` is tracked explicitly
+# rather than inferred from insertion order, which eviction would silently break.
+MAX_BACKTEST_RESULTS = 50
+_backtest_results: LRUCache = LRUCache(maxsize=MAX_BACKTEST_RESULTS)
+_backtest_lock = threading.Lock()
+_latest_backtest_id: Optional[str] = None
+
+
+def store_backtest_result(backtest_id: str, payload) -> None:
+    """Record a completed run and mark it as the most recent."""
+    global _latest_backtest_id
+    with _backtest_lock:
+        _backtest_results[backtest_id] = payload
+        _latest_backtest_id = backtest_id
+
+
+def get_backtest_result(backtest_id: str):
+    with _backtest_lock:
+        return _backtest_results.get(backtest_id)
+
+
+def get_latest_backtest():
+    """Return (id, payload) for the most recent run, or (None, None)."""
+    with _backtest_lock:
+        if _latest_backtest_id is None:
+            return None, None
+        payload = _backtest_results.get(_latest_backtest_id)
+        if payload is None:  # evicted
+            return None, None
+        return _latest_backtest_id, payload
+
+
+def list_backtest_results():
+    with _backtest_lock:
+        return list(_backtest_results.items())
 
 STRATEGY_HYBRID = "hybrid_ml_ta"
 STRATEGY_TECHNICAL = "technical_only"
@@ -784,12 +820,12 @@ def _run_simple_backtest(req: BacktestRequest, symbol: str) -> BacktestResponse:
     }
 
     response = _json_safe(response)
-    _backtest_results[backtest_id] = response
+    store_backtest_result(backtest_id, response)
     return BacktestResponse(**response)
 
 
 @router.post("/run", response_model=BacktestResponse)
-async def run_backtest(req: BacktestRequest):
+def run_backtest(req: BacktestRequest):
     """Run comparison-focused backtests for the requested symbol."""
     symbol = req.symbol.upper()
     if req.strategy is not None:
@@ -1022,24 +1058,25 @@ async def run_backtest(req: BacktestRequest):
     }
 
     response = _json_safe(response)
-    _backtest_results[backtest_id] = response
+    store_backtest_result(backtest_id, response)
     return BacktestResponse(**response)
 
 
 @router.get("/results/{backtest_id}")
-async def get_backtest_results(backtest_id: str):
+def get_backtest_results(backtest_id: str):
     """Retrieve a previous backtest result."""
-    if backtest_id not in _backtest_results:
+    result = get_backtest_result(backtest_id)
+    if result is None:
         raise HTTPException(404, f"Backtest {backtest_id} not found")
-    return _backtest_results[backtest_id]
+    return result
 
 
 @router.get("/results")
-async def list_backtests():
+def list_backtests():
     """List all backtest results."""
     return {
         "backtests": [
             {"backtest_id": bid, "metrics": data.get("metrics", {}), "summary": data.get("summary", {})}
-            for bid, data in _backtest_results.items()
+            for bid, data in list_backtest_results()
         ]
     }

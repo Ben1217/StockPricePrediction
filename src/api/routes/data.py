@@ -13,6 +13,7 @@ Changes from original:
 import os
 import io
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -20,7 +21,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import pytz
-from cachetools import TTLCache
+from cachetools import LRUCache
 from fastapi import APIRouter, Query, UploadFile, File, HTTPException
 
 from src.api.schemas.schemas import (
@@ -29,9 +30,10 @@ from src.api.schemas.schemas import (
 from src.features.technical_indicators import add_all_technical_indicators
 from src.data.data_acquisition import get_sp500_tickers
 from src.data.live_data import (
-    is_market_open, get_market_session, get_cache_ttl,
+    is_market_open, get_market_session,
     validate_freshness, fetch_live_quote, fetch_extended_quote
 )
+from src.data.ohlcv import cache_get, cache_set, cache_stats, download_lock, fetch_ohlcv
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -39,10 +41,26 @@ router = APIRouter()
 _UTC = pytz.UTC
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
-# TTL is evaluated lazily on first access each server start.
-# For true dynamic TTL per request we bypass cache when market is open.
-_price_cache: dict = {}          # key -> (df, cached_at)
-_uploaded_datasets: dict = {}   # filename -> DataFrame
+# Frame caching lives in src.data.ohlcv so every router shares one bounded store.
+# Uploaded datasets are held in a bounded LRU: they are whole DataFrames, and an
+# unbounded dict meant a long-lived server retained every CSV ever uploaded.
+MAX_UPLOADED_DATASETS = 20
+_uploaded_datasets: LRUCache = LRUCache(maxsize=MAX_UPLOADED_DATASETS)
+
+# Upload guards. The filename is client-controlled and is used as a store key and
+# echoed back, so it is reduced to a basename over an allow-listed character set.
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_upload_name(filename: Optional[str]) -> str:
+    """Reduce a client-supplied filename to a safe basename."""
+    raw = os.path.basename((filename or "").replace("\\", "/")).strip()
+    cleaned = _SAFE_NAME_RE.sub("_", raw).lstrip(".")
+    if not cleaned:
+        raise HTTPException(400, "Invalid filename")
+    return cleaned[:120]
 
 _INTERVAL_DAY_LIMITS = {
     "1m": {"prices": (7, 7), "indicators": (60, 120)},
@@ -57,20 +75,12 @@ _INTERVAL_DAY_LIMITS = {
 
 
 def _cache_get(key: str) -> Optional[pd.DataFrame]:
-    """Return cached DataFrame if within the current TTL, else None."""
-    entry = _price_cache.get(key)
-    if entry is None:
-        return None
-    df, cached_at = entry
-    ttl = get_cache_ttl()
-    if (datetime.utcnow() - cached_at).total_seconds() < ttl:
-        return df
-    del _price_cache[key]
-    return None
+    """Thin alias kept so existing call sites read naturally."""
+    return cache_get(key)
 
 
 def _cache_set(key: str, df: pd.DataFrame) -> None:
-    _price_cache[key] = (df, datetime.utcnow())
+    cache_set(key, df)
 
 
 def _clamp_interval_days(interval: str, value: int, bucket: str) -> int:
@@ -81,50 +91,8 @@ def _clamp_interval_days(interval: str, value: int, bucket: str) -> int:
 # ── Internal fetchers ─────────────────────────────────────────────────────────
 
 def _fetch_yfinance(symbol: str, start: str, end: str, interval: str = "1d") -> pd.DataFrame:
-    """
-    Fetch OHLCV from yfinance with support for intraday intervals.
-    """
-    key = f"yf:{symbol}:{interval}:{start}:{end}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
-    df = pd.DataFrame()
-    try:
-        if interval in ("1d", "1wk", "1mo"):
-            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
-        else:
-            # For intraday, use period matching limits to avoid empty errors
-            period_map = {"1m": "7d", "5m": "60d", "15m": "60d", "1h": "730d", "4h": "730d"}
-            period = period_map.get(interval, "1mo")
-            df = yf.download(symbol, period=period, interval=interval, progress=False)
-    except Exception as e:
-        logger.warning(f"Primary YF fetch failed for {symbol} at {interval}: {e}")
-        df = pd.DataFrame()
-
-    # Yahoo occasionally returns an empty frame for valid symbols. Retry with period-based fallback.
-    if df.empty:
-        fallback_period = {
-            "1d": "1y",
-            "1wk": "max",
-            "1mo": "max",
-        }.get(interval)
-        if fallback_period:
-            try:
-                df = yf.download(symbol, period=fallback_period, interval=interval, progress=False)
-            except Exception as e:
-                logger.error(f"Fallback YF fetch failed for {symbol} at {interval}: {e}")
-                df = pd.DataFrame()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    # Drop any severely malformed rows
-    if not df.empty:
-        df = df.dropna(subset=["Close"])
-        _cache_set(key, df)
-
-    return df
+    """Fetch OHLCV via the shared cached fetcher (src.data.ohlcv)."""
+    return fetch_ohlcv(symbol, interval, start=start, end=end)
 
 
 def _fetch_alpha_vantage_history(symbol: str, start: str, end: str) -> pd.DataFrame:
@@ -198,8 +166,16 @@ def _get_data_timestamp(df: pd.DataFrame) -> datetime:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+@router.get("/cache")
+def get_cache_stats():
+    """Inspect the shared OHLCV cache — entry counts, bound, and active TTL."""
+    stats = cache_stats()
+    stats["uploaded_datasets"] = len(_uploaded_datasets)
+    return stats
+
+
 @router.get("/sources")
-async def list_sources():
+def list_sources():
     """List available data sources."""
     sources = ["yfinance"]
     ak = os.getenv("ALPHA_VANTAGE_API_KEY", "")
@@ -213,8 +189,96 @@ async def list_sources():
     }
 
 
+MAX_BATCH_SYMBOLS = 100
+
+
+@router.get("/quotes")
+def get_batch_quotes(
+    symbols: str = Query(..., description="Comma-separated ticker symbols, e.g. AAPL,MSFT,NVDA"),
+):
+    """
+    Batch last-close and daily-change lookup for many symbols in one upstream call.
+
+    Replaces N individual /prices requests from the ticker bar and sector heatmap.
+    Unknown or delisted symbols are omitted from `quotes` rather than failing the
+    whole request, so one bad ticker cannot blank the caller's grid.
+    """
+    requested = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    # dict.fromkeys de-duplicates while preserving request order.
+    requested = list(dict.fromkeys(requested))
+    if not requested:
+        raise HTTPException(400, "At least one symbol is required")
+    if len(requested) > MAX_BATCH_SYMBOLS:
+        raise HTTPException(
+            400, f"Too many symbols: {len(requested)} (max {MAX_BATCH_SYMBOLS})"
+        )
+
+    cache_key = f"batch-quotes:{','.join(sorted(requested))}"
+    cached = _cache_get(cache_key)
+    quotes: dict[str, dict] = {}
+
+    if cached is not None:
+        frame = cached
+    else:
+        try:
+            # Shares the download lock with src.data.ohlcv — yfinance is not thread-safe
+            # and concurrent downloads can return frames with merged columns.
+            with download_lock:
+                frame = yf.download(
+                    tickers=requested,
+                    period="5d",
+                    interval="1d",
+                    group_by="ticker",
+                    progress=False,
+                    threads=True,
+                    auto_adjust=False,
+                )
+        except Exception as exc:
+            logger.warning("Batch quote fetch failed for %s symbols: %s", len(requested), exc)
+            raise HTTPException(502, f"Quote fetch failed: {exc}")
+        if not frame.empty:
+            _cache_set(cache_key, frame)
+
+    for symbol in requested:
+        try:
+            # yfinance returns flat columns for a single ticker and a MultiIndex for many.
+            if isinstance(frame.columns, pd.MultiIndex):
+                if symbol not in frame.columns.get_level_values(0):
+                    continue
+                closes = frame[symbol]["Close"].dropna()
+                volumes = frame[symbol].get("Volume")
+            else:
+                closes = frame["Close"].dropna()
+                volumes = frame.get("Volume")
+            if len(closes) < 1:
+                continue
+            last = float(closes.iloc[-1])
+            prev = float(closes.iloc[-2]) if len(closes) >= 2 else last
+            change_pct = ((last - prev) / prev * 100.0) if prev else 0.0
+            volume = 0
+            if volumes is not None and len(volumes.dropna()) > 0:
+                volume = int(volumes.dropna().iloc[-1])
+            quotes[symbol] = {
+                "symbol": symbol,
+                "price": round(last, 4),
+                "previous_close": round(prev, 4),
+                "change_pct": round(change_pct, 4),
+                "volume": volume,
+            }
+        except Exception as exc:  # one malformed symbol must not fail the batch
+            logger.debug("Skipping %s in batch quotes: %s", symbol, exc)
+
+    return {
+        "quotes": quotes,
+        "requested": len(requested),
+        "returned": len(quotes),
+        "missing": [s for s in requested if s not in quotes],
+        "market_open": is_market_open(),
+    }
+
+
 @router.get("/quote/{symbol}")
-async def get_live_quote(
+def get_live_quote(
     symbol: str,
     source: str = Query("yfinance", enum=["yfinance", "alpha_vantage"]),
 ):
@@ -231,7 +295,7 @@ async def get_live_quote(
 
 
 @router.get("/extended-quote/{symbol}")
-async def get_extended_quote(
+def get_extended_quote(
     symbol: str,
     source: str = Query("yfinance", enum=["yfinance", "alpha_vantage"]),
 ):
@@ -249,7 +313,7 @@ async def get_extended_quote(
 
 
 @router.get("/prices/{symbol}", response_model=PriceResponse)
-async def get_prices(
+def get_prices(
     symbol: str,
     source: str = Query("yfinance", enum=["yfinance", "alpha_vantage"]),
     interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
@@ -301,7 +365,7 @@ async def get_prices(
 
 
 @router.get("/indicators/{symbol}", response_model=IndicatorResponse)
-async def get_indicators(
+def get_indicators(
     symbol: str,
     interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
     days: int = Query(120, ge=1, le=20000),
@@ -362,7 +426,7 @@ async def get_indicators(
 
 
 @router.get("/sp500", response_model=SP500Response)
-async def get_sp500():
+def get_sp500():
     """Get S&P 500 constituents."""
     try:
         from src.data.market_data import get_sp500_constituents
@@ -379,11 +443,30 @@ async def get_sp500():
 
 
 @router.post("/upload", response_model=UploadResponse)
-async def upload_dataset(file: UploadFile = File(...)):
+def upload_dataset(file: UploadFile = File(...)):
     """Upload a CSV dataset for training / backtesting."""
-    if not file.filename.endswith(".csv"):
+    safe_name = _safe_upload_name(file.filename)
+    if not safe_name.endswith(".csv"):
         raise HTTPException(400, "Only CSV files are supported")
-    contents = await file.read()
+
+    # Read in chunks with a hard ceiling — an unbounded read() let a single large
+    # upload exhaust memory before pandas ever saw it.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = file.file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                413, f"File too large: limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
+            )
+        chunks.append(chunk)
+    contents = b"".join(chunks)
+    if not contents:
+        raise HTTPException(400, "Uploaded file is empty")
+
     try:
         df = pd.read_csv(io.BytesIO(contents), parse_dates=True, index_col=0)
     except Exception as e:
@@ -400,18 +483,18 @@ async def upload_dataset(file: UploadFile = File(...)):
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
 
-    _uploaded_datasets[file.filename] = df
+    _uploaded_datasets[safe_name] = df
     return UploadResponse(
-        filename=file.filename,
+        filename=safe_name,
         rows=len(df),
         columns=list(df.columns),
         date_range={"start": str(df.index.min().date()), "end": str(df.index.max().date())},
-        message=f"Uploaded {file.filename}: {len(df)} rows",
+        message=f"Uploaded {safe_name}: {len(df)} rows",
     )
 
 
 @router.get("/uploaded/{filename}")
-async def get_uploaded_data(filename: str, tail: int = Query(120, ge=1)):
+def get_uploaded_data(filename: str, tail: int = Query(120, ge=1)):
     """Retrieve previously uploaded dataset."""
     if filename not in _uploaded_datasets:
         raise HTTPException(404, f"Dataset '{filename}' not found")

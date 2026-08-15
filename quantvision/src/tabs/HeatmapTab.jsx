@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { C } from "../utils/data";
-import { fetchPrices } from "../utils/api";
+import { fetchQuotes } from "../utils/api";
 
 /* ═══════════════════════════════════════════════════════════════
    SECTOR & COMPANY STATIC DATA  (11 GICS sectors, ~80 companies)
@@ -719,30 +719,17 @@ export default function HeatmapTab({ apiConnected, setSelectedTicker }) {
         const allTickers = SECTOR_DATA.flatMap(s => s.companies.map(c => c.ticker));
 
         try {
-            const results = await Promise.allSettled(
-                allTickers.map(ticker =>
-                    fetchPrices(ticker.replace(".", "-"), "yfinance", 5).then(r => {
-                        if (r?.bars?.length >= 2) {
-                            const last = r.bars[r.bars.length - 1];
-                            const prev = r.bars[r.bars.length - 2];
-                            return {
-                                ticker,
-                                price: last.close,
-                                chg: ((last.close - prev.close) / prev.close) * 100,
-                                vol: last.volume || 0,
-                            };
-                        }
-                        return null;
-                    })
-                )
-            );
+            // One batched request for all ~60 tickers instead of one request each.
+            // yfinance symbols use "-" where the display ticker uses "." (BRK.B → BRK-B).
+            const quotes = await fetchQuotes(allTickers.map(t => t.replace(".", "-")));
 
             const liveMap = {};
-            results.forEach(res => {
-                if (res.status === "fulfilled" && res.value) {
-                    liveMap[res.value.ticker] = res.value;
+            for (const ticker of allTickers) {
+                const q = quotes[ticker.replace(".", "-")];
+                if (q && q.price != null) {
+                    liveMap[ticker] = { price: q.price, chg: q.change ?? 0, vol: q.vol ?? 0 };
                 }
-            });
+            }
 
             setSectors(prev => prev.map(sector => ({
                 ...sector,
@@ -785,7 +772,9 @@ export default function HeatmapTab({ apiConnected, setSelectedTicker }) {
     }, []);
 
     // ── Derived data ────────────────────────────────────────────────
-    const sectorsWithMeta = sectors.map((sector) => {
+    // Memoised on `sectors`: this is ~11 sectors × ~60 companies plus four sorts,
+    // and the component re-renders on every pointer move over the grid (mousePos).
+    const sectorsWithMeta = useMemo(() => sectors.map((sector) => {
         const avgVolume = sector.companies.reduce((sum, company) => sum + company.vol, 0) / sector.companies.length;
         const companies = sector.companies.map((company) => {
             const volumeStatus = getVolumeStatus(company.vol, avgVolume);
@@ -808,14 +797,21 @@ export default function HeatmapTab({ apiConnected, setSelectedTicker }) {
             strongestCompany: [...companies].sort((a, b) => b.chg - a.chg)[0],
             weakestCompany: [...companies].sort((a, b) => a.chg - b.chg)[0],
         };
-    });
+    }), [sectors]);
 
-    const allCompanies = sectorsWithMeta.flatMap((sector) => sector.companies);
-    const advancing = allCompanies.filter((company) => company.chg >= 0).length;
-    const declining = allCompanies.filter((company) => company.chg < 0).length;
-    const strongestSector = [...sectorsWithMeta].sort((a, b) => b.chg - a.chg)[0];
-    const weakestSector = [...sectorsWithMeta].sort((a, b) => a.chg - b.chg)[0];
-    const topGainer = [...allCompanies].sort((a, b) => b.chg - a.chg)[0];
+    const { allCompanies, advancing, declining, strongestSector, weakestSector, topGainer } = useMemo(() => {
+        const companies = sectorsWithMeta.flatMap((sector) => sector.companies);
+        const byChgDesc = [...companies].sort((a, b) => b.chg - a.chg);
+        const sectorsByChgDesc = [...sectorsWithMeta].sort((a, b) => b.chg - a.chg);
+        return {
+            allCompanies: companies,
+            advancing: companies.filter((company) => company.chg >= 0).length,
+            declining: companies.filter((company) => company.chg < 0).length,
+            strongestSector: sectorsByChgDesc[0],
+            weakestSector: sectorsByChgDesc[sectorsByChgDesc.length - 1],
+            topGainer: byChgDesc[0],
+        };
+    }, [sectorsWithMeta]);
     const selectedCompany = selectedCompanyTicker
         ? allCompanies.find((company) => company.ticker === selectedCompanyTicker) || null
         : null;

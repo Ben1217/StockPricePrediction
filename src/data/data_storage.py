@@ -3,8 +3,10 @@ Data Storage Module
 Functions for saving and loading data from database
 """
 
+import os
 import sqlite3
 import pandas as pd
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, List
 
@@ -29,7 +31,6 @@ def get_postgres_connection_string(
     dbname: str = "stock_data"
 ) -> str:
     """Get PostgreSQL connection string"""
-    import os
     user = os.getenv("POSTGRES_USER", user)
     password = os.getenv("POSTGRES_PASSWORD", password)
     host = os.getenv("POSTGRES_HOST", host)
@@ -39,10 +40,34 @@ def get_postgres_connection_string(
     return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
 
+@lru_cache(maxsize=1)
 def get_db_engine():
-    """Get SQLAlchemy engine for PostgreSQL"""
-    from sqlalchemy import create_engine
-    return create_engine(get_postgres_connection_string())
+    """
+    Return the shared SQLAlchemy engine for PostgreSQL.
+
+    Cached deliberately: an engine owns its connection pool, so building a new one
+    per call meant every caller got a fresh single-use pool and connections were
+    never reused. `pool_pre_ping` discards connections the server has already
+    dropped (common with idle timeouts), and `pool_recycle` retires them before a
+    typical server-side timeout can.
+
+    Requires the optional `postgres` extra: pip install -e ".[postgres]"
+    """
+    try:
+        from sqlalchemy import create_engine
+    except ImportError as exc:  # pragma: no cover - depends on install extras
+        raise RuntimeError(
+            "PostgreSQL support requires the 'postgres' extra: "
+            'pip install -e ".[postgres]"'
+        ) from exc
+
+    return create_engine(
+        get_postgres_connection_string(),
+        pool_pre_ping=True,
+        pool_size=int(os.getenv("POSTGRES_POOL_SIZE", "5")),
+        max_overflow=int(os.getenv("POSTGRES_MAX_OVERFLOW", "10")),
+        pool_recycle=int(os.getenv("POSTGRES_POOL_RECYCLE", "1800")),
+    )
 
 
 def init_database(db_path: str = DEFAULT_DB_PATH, schema_path: str = "database/schema.sql"):

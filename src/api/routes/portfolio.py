@@ -56,7 +56,7 @@ def _fetch_returns(symbols, lookback_days):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/optimize", response_model=PortfolioOptimizeResponse)
-async def optimize(req: PortfolioOptimizeRequest):
+def optimize(req: PortfolioOptimizeRequest):
     """Run portfolio optimization."""
     returns, prices = _fetch_returns(req.symbols, req.lookback_days)
     if returns.empty or len(returns) < 30:
@@ -95,7 +95,7 @@ async def optimize(req: PortfolioOptimizeRequest):
 
 
 @router.post("/frontier", response_model=EfficientFrontierResponse)
-async def efficient_frontier(req: PortfolioOptimizeRequest):
+def efficient_frontier(req: PortfolioOptimizeRequest):
     """Calculate and return efficient frontier points."""
     returns, _ = _fetch_returns(req.symbols, req.lookback_days)
     if returns.empty or len(returns) < 30:
@@ -117,7 +117,7 @@ async def efficient_frontier(req: PortfolioOptimizeRequest):
 
 
 @router.get("/metrics")
-async def portfolio_metrics(
+def portfolio_metrics(
     symbols: str = "AAPL,MSFT,GOOGL",
     lookback: int = 252,
     include_attribution: bool = False,
@@ -176,7 +176,7 @@ class RebalanceRequest(BaseModel):
 
 
 @router.post("/rebalance")
-async def rebalance_portfolio(request: RebalanceRequest):
+def rebalance_portfolio(request: RebalanceRequest):
     """
     Compute exact BUY/SELL trades to reach target weights,
     with dollar amounts, drift, and transaction cost estimates.
@@ -193,7 +193,7 @@ async def rebalance_portfolio(request: RebalanceRequest):
 # ── §4.4 Weight Drift Tracking ───────────────────────────────────────────────
 
 @router.get("/drift")
-async def get_weight_drift(
+def get_weight_drift(
     portfolio_id: str = "default",
     current_values: str = "{}",
     total_value: float = 100000.0,
@@ -225,7 +225,7 @@ async def get_weight_drift(
 # ── §5.1 Correlation Heatmap ─────────────────────────────────────────────────
 
 @router.get("/correlation")
-async def get_correlation(
+def get_correlation(
     symbols: str = "AAPL,MSFT,GOOGL",
     lookback_days: int = 90,
     high_corr_threshold: float = 0.80,
@@ -256,7 +256,7 @@ class SimulateRequest(BaseModel):
 
 
 @router.post("/simulate")
-async def simulate_portfolio(request: SimulateRequest):
+def simulate_portfolio(request: SimulateRequest):
     """
     Run Monte Carlo simulation for the portfolio.
     Returns 5 percentile paths (p10–p90 fan chart) and probability statistics.
@@ -276,7 +276,7 @@ async def simulate_portfolio(request: SimulateRequest):
 # ── §5.3 Sector Allocation ───────────────────────────────────────────────────
 
 @router.get("/sectors")
-async def get_sectors(
+def get_sectors(
     symbols: str = "AAPL,MSFT,GOOGL",
     weights: Optional[str] = None,
 ):
@@ -294,7 +294,7 @@ async def get_sectors(
 # ── §5.4 Risk Controls & Alerts ──────────────────────────────────────────────
 
 @router.get("/alerts")
-async def get_risk_alerts(
+def get_risk_alerts(
     symbols: str = "AAPL,MSFT,GOOGL",
     weights: str = "{}",
     lookback_days: int = 90,

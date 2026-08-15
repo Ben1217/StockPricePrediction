@@ -6,8 +6,11 @@ a set of LangChain tools that connect it to the FastAPI backend.
 Uses Anthropic Claude as the LLM reasoning engine.
 """
 
+import functools
 import os
+
 from crewai import Agent, LLM
+
 from .tools import (
     get_prediction,
     get_technical_signals,
@@ -17,11 +20,30 @@ from .tools import (
 )
 
 
+# Claude Sonnet 4 (the previous pin) is deprecated and retires 2026-06-15; after that
+# date these routes fail at the provider. Sonnet 5 is the like-for-like replacement.
+# Set QUANTVISION_AGENT_MODEL=anthropic/claude-opus-5 for the deeper analysis crew.
+DEFAULT_AGENT_MODEL = "anthropic/claude-sonnet-5"
+
+
+@functools.lru_cache(maxsize=1)
 def _get_llm() -> LLM:
-    """Create the LLM instance using Anthropic Claude."""
+    """
+    Build the shared Claude client.
+
+    Cached: this is called once per agent definition, and six agents previously meant
+    six separate clients. Raises at first use rather than passing an empty key through
+    to the provider, which surfaces as an opaque 401 mid-request.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or api_key == "your_anthropic_api_key":
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. The agent routes (/api/agent/*) need a valid "
+            "Anthropic API key; see .env.example."
+        )
     return LLM(
-        model="anthropic/claude-sonnet-4-20250514",
-        api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        model=os.getenv("QUANTVISION_AGENT_MODEL", DEFAULT_AGENT_MODEL),
+        api_key=api_key,
     )
 
 

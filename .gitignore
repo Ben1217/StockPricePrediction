@@ -43,11 +43,11 @@ data/indicators/
 *.csv
 *.parquet
 
-# Model files (too large for git)
-models/saved_models/**/*.h5
-models/saved_models/**/*.pkl
-models/saved_models/**/*.joblib
-models/scalers/**/*.pkl
+# Model files (too large for git — regenerate via POST /api/training/bootstrap)
+models/bundles/
+models/model_metadata/
+models/saved_models/
+models/scalers/
 
 # Database
 database/*.db

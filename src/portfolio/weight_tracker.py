@@ -7,7 +7,7 @@ drift between saved targets and current market values.
 
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..utils.logger import get_logger
@@ -51,7 +51,7 @@ def save_weights(portfolio_id: str, strategy: str, weights: dict) -> None:
     conn.execute(
         "INSERT INTO weight_snapshots (portfolio_id, strategy, weights_json, saved_at)"
         " VALUES (?, ?, ?, ?)",
-        (portfolio_id, strategy, json.dumps(weights), datetime.utcnow().isoformat()),
+        (portfolio_id, strategy, json.dumps(weights), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()

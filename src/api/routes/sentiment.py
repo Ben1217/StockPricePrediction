@@ -13,9 +13,9 @@ import logging
 from datetime import datetime, timedelta
 
 import pandas as pd
-import yfinance as yf
 from fastapi import APIRouter, Query, HTTPException
 
+from src.data.ohlcv import fetch_ohlcv
 from src.signals.sentiment.indicator_sentiment import compute_indicator_sentiment
 
 logger = logging.getLogger(__name__)
@@ -23,43 +23,21 @@ router = APIRouter()
 
 
 def _fetch_sentiment_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
-    try:
-        if interval in ("1wk", "1mo"):
-            df = yf.download(symbol, period="max", interval=interval, progress=False)
-        elif interval in ("1d",):
-            end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
-        else:
-            period_map = {
-                "1m": "7d",
-                "5m": "60d",
-                "15m": "60d",
-                "1h": "730d",
-                "4h": "730d",
-            }
-            df = yf.download(symbol, period=period_map.get(interval, "1mo"), interval=interval, progress=False)
-    except Exception as e:
-        raise HTTPException(502, f"Data fetch failed for {symbol}: {e}")
+    """
+    Fetch bars through the shared cached fetcher.
 
-    if df.empty and interval in ("1d", "1wk", "1mo"):
-        fallback_period = {"1d": "1y", "1wk": "max", "1mo": "max"}[interval]
-        try:
-            df = yf.download(symbol, period=fallback_period, interval=interval, progress=False)
-        except Exception as e:
-            raise HTTPException(502, f"Fallback data fetch failed for {symbol}: {e}")
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    if not df.empty:
-        df = df.dropna(subset=["Close"])
-
-    return df
+    This route previously called yfinance directly on every request with no cache,
+    so each ticker switch in the Analysis tab was a fresh upstream round trip.
+    """
+    if interval == "1d":
+        end = datetime.now().strftime("%Y-%m-%d")
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        return fetch_ohlcv(symbol, interval, start=start, end=end)
+    return fetch_ohlcv(symbol, interval)
 
 
 @router.get("/{symbol}")
-async def get_sentiment(
+def get_sentiment(
     symbol: str,
     days: int = Query(400, ge=30, le=7000),
     interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),

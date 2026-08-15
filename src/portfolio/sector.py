@@ -6,7 +6,7 @@ portfolio weights with concentration warnings.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yfinance as yf
@@ -54,7 +54,10 @@ def get_ticker_sector(ticker: str) -> str:
 
     if entry:
         cached_at = datetime.fromisoformat(entry["cached_at"])
-        if datetime.utcnow() - cached_at < timedelta(days=CACHE_TTL_DAYS):
+        # Entries written before the switch to timezone-aware timestamps are naive UTC.
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - cached_at < timedelta(days=CACHE_TTL_DAYS):
             return entry["sector"]
 
     # Cache miss — fetch from yFinance
@@ -65,7 +68,7 @@ def get_ticker_sector(ticker: str) -> str:
         logger.warning(f"Failed to fetch sector for {ticker}: {e}")
         sector = "Unknown"
 
-    cache[ticker] = {"sector": sector, "cached_at": datetime.utcnow().isoformat()}
+    cache[ticker] = {"sector": sector, "cached_at": datetime.now(timezone.utc).isoformat()}
     _save_cache(cache)
     return sector
 

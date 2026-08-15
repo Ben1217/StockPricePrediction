@@ -1,41 +1,13 @@
-# Core data and utilities
-numpy>=1.26
-pandas>=2.2
-scipy>=1.11
-requests>=2.31
-python-dotenv>=1.0
-PyYAML>=6.0
-pytz>=2024.1
-pandas-market-calendars>=4.4
-cachetools>=5.3
-tqdm>=4.66
-joblib>=1.3
+# Dependencies are declared once, in pyproject.toml.
+#
+# This file exists so `pip install -r requirements.txt` keeps working; it installs
+# the project itself, which pulls the runtime dependencies from [project.dependencies].
+# Previously this file duplicated that list verbatim and the two drifted.
+#
+# Optional feature sets:
+#   pip install -e ".[agents]"     CrewAI/Claude agent routes (/api/agent/*)
+#   pip install -e ".[postgres]"   PostgreSQL/TimescaleDB storage backend
+#   pip install -e ".[dev]"        tests, linters, notebooks
+#   pip install -e ".[agents,postgres,dev]"   everything
 
-# API runtime
-fastapi>=0.115
-uvicorn[standard]>=0.30
-pydantic>=2.7
-python-multipart>=0.0.9
-httpx>=0.27
-reportlab>=4.2
-
-# Data sources and storage
-yfinance>=0.2.54
-sqlalchemy>=2.0
-psycopg2-binary>=2.9
-streamlit>=1.32
-
-# Machine learning and quantitative tooling
-scikit-learn>=1.4
-xgboost>=2.0
-torch>=2.2
-hmmlearn>=0.3.2
-optuna>=3.6
-shap>=0.45
-cvxpy>=1.4
-ta>=0.11
-
-# Optional agent workflows
-crewai>=0.28
-langchain>=0.1
-langchain-anthropic>=0.1
+-e .

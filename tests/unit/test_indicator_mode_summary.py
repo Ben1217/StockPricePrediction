@@ -45,10 +45,11 @@ def test_compute_indicator_sentiment_includes_atr_details():
 def test_sentiment_route_returns_indicator_only_summary_fields(monkeypatch):
     sample_df = _sample_ohlcv()
 
-    def fake_download(*args, **kwargs):
+    def fake_fetch(*args, **kwargs):
         return sample_df.copy()
 
-    monkeypatch.setattr("src.api.routes.sentiment.yf.download", fake_download)
+    # The route now fetches through the shared cached fetcher rather than yfinance directly.
+    monkeypatch.setattr("src.api.routes.sentiment.fetch_ohlcv", fake_fetch)
 
     client = TestClient(app)
     response = client.get("/api/sentiment/META?days=420&interval=1d")

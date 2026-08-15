@@ -38,7 +38,7 @@ def _comparison_rows(runs):
 
 
 @router.get("/csv/{resource}")
-async def export_csv(
+def export_csv(
     resource: str,
     symbol: str = Query(DEFAULT_INDEX_SYMBOL),
 ):
@@ -64,11 +64,10 @@ async def export_csv(
         )
 
     elif resource == "backtest":
-        from src.api.routes.backtest import _backtest_results
-        if not _backtest_results:
+        from src.api.routes.backtest import get_latest_backtest
+        latest_id, data = get_latest_backtest()
+        if data is None:
             raise HTTPException(404, "No backtest results available. Run a backtest first.")
-        latest_id = list(_backtest_results.keys())[-1]
-        data = _backtest_results[latest_id]
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["Summary"])
@@ -113,7 +112,7 @@ async def export_csv(
         from src.api.routes.predict import predict
         from src.api.schemas.schemas import PredictRequest
         req = PredictRequest(symbol=symbol, horizon=1)
-        resp = await predict(req)
+        resp = predict(req)
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow([
@@ -152,7 +151,7 @@ async def export_csv(
 
 
 @router.get("/pdf/{resource}")
-async def export_pdf(
+def export_pdf(
     resource: str,
     symbol: str = Query(DEFAULT_INDEX_SYMBOL),
 ):
@@ -175,11 +174,10 @@ async def export_pdf(
     elements.append(Spacer(1, 24))
 
     if resource == "backtest":
-        from src.api.routes.backtest import _backtest_results
-        if not _backtest_results:
+        from src.api.routes.backtest import get_latest_backtest
+        latest_id, data = get_latest_backtest()
+        if data is None:
             raise HTTPException(404, "No backtest results available")
-        latest_id = list(_backtest_results.keys())[-1]
-        data = _backtest_results[latest_id]
         metrics = data.get("metrics", {})
 
         elements.append(Paragraph("Performance Metrics", styles["Heading2"]))

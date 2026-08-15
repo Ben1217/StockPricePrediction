@@ -48,13 +48,15 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
-If you also want notebook and development tooling, use:
+Dependencies are declared once, in `pyproject.toml`. Optional feature sets:
 
 ```bash
-pip install -r requirements_working.txt
+pip install -e ".[agents]"     # CrewAI/Claude agent routes (/api/agent/*)
+pip install -e ".[postgres]"   # PostgreSQL/TimescaleDB storage backend
+pip install -e ".[dev]"        # tests, linters, notebooks
 ```
 
 ### 2. Install the frontend

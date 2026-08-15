@@ -87,7 +87,8 @@ def test_support_resistance_route_clamps_large_lookback(monkeypatch):
             "dynamic_levels": [],
         }
 
-    monkeypatch.setattr("src.api.routes.patterns.yf.download", fake_download)
+    # The route now fetches through the shared cached fetcher rather than yfinance directly.
+    monkeypatch.setattr("src.api.routes.patterns.fetch_ohlcv", fake_download)
     monkeypatch.setattr("src.features.support_resistance.detect_support_resistance", fake_detect)
 
     client = TestClient(app)

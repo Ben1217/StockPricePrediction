@@ -10,14 +10,29 @@ import requests
 from io import StringIO
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-import streamlit as st
+
+from cachetools import TTLCache, cached
+from cachetools.keys import hashkey
 
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# These functions were previously decorated with Streamlit's @st.cache_data. That pulled
+# streamlit into the FastAPI import path, where it has no runtime and silently degrades to
+# an unbounded in-process cache. cachetools gives the same memoisation with a real bound.
+_DAY_CACHE: TTLCache = TTLCache(maxsize=32, ttl=86400)
+_QUOTE_CACHE: TTLCache = TTLCache(maxsize=256, ttl=300)
 
-@st.cache_data(ttl=86400)  # Cache for 24 hours
+
+def _list_key(*args, **kwargs):
+    """Hash key that tolerates list arguments (lists are unhashable by default)."""
+    norm = tuple(tuple(a) if isinstance(a, list) else a for a in args)
+    return hashkey(*norm, **kwargs)
+
+
+
+@cached(_DAY_CACHE)
 def get_sp500_constituents() -> pd.DataFrame:
     """
     Fetch S&P 500 constituents with sector information from Wikipedia.
@@ -64,7 +79,7 @@ def get_sp500_constituents() -> pd.DataFrame:
         return pd.DataFrame(columns=['Symbol', 'Company', 'Sector', 'Industry'])
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@cached(_QUOTE_CACHE, key=_list_key)
 def fetch_market_quotes(symbols: List[str]) -> pd.DataFrame:
     """
     Fetch current market quotes for a list of symbols.
@@ -125,7 +140,7 @@ def fetch_market_quotes(symbols: List[str]) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=300)
+@cached(_QUOTE_CACHE, key=_list_key)
 def fetch_batch_quotes(symbols: List[str], period: str = '5d') -> pd.DataFrame:
     """
     Fetch quotes in batch using yfinance download (faster).
@@ -206,7 +221,7 @@ def fetch_batch_quotes(symbols: List[str], period: str = '5d') -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=86400)  # Cache for 24 hours
+@cached(_DAY_CACHE, key=_list_key)
 def fetch_market_caps(symbols: List[str]) -> Dict[str, float]:
     """
     Fetch market caps for symbols (slower, cache longer).

@@ -170,3 +170,44 @@ def test_ensemble_predict_returns_daily_prediction_series():
     assert values == [270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5]
     assert payload["forecast_points"][0]["ensemble"] == 270.0
     assert len(set(values)) > 1
+
+
+def test_predict_reports_stale_bundle_instead_of_retraining_inline():
+    """
+    A feature-set mismatch must surface as an actionable `can_train` response.
+
+    This previously deleted the bundle directory and ran a five-year training job
+    inside the request, which blocked the event loop for minutes and left the symbol
+    with no model at all if training then failed. Retraining belongs on
+    POST /api/training/train.
+    """
+    app = FastAPI()
+    app.include_router(predict_route.router, prefix="/api/predict")
+    client = TestClient(app)
+
+    def _raise_feature_mismatch(*args, **kwargs):
+        raise ValueError("feature columns do not match the stored bundle")
+
+    with (
+        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv()),
+        patch.object(predict_route, "_latest_available_price", return_value=(147.6, "latest_close")),
+        patch.object(predict_route, "load_model_bundle", return_value=_FakeBundle()),
+        patch.object(predict_route, "_predict_bundle_probabilities", _raise_feature_mismatch),
+        patch("src.models.bundle_training.train_model_bundles") as mocked_train,
+        patch("shutil.rmtree") as mocked_rmtree,
+    ):
+        response = client.post(
+            "/api/predict",
+            json={"symbol": "AAPL", "model_type": "xgboost", "horizon": 1},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "unavailable"
+    assert payload["reason"] == "stale_bundle_requires_retraining"
+    assert payload["can_train"] is True
+    assert "/api/training/train" in payload["message"]
+
+    # The critical guarantees: no inline training, and the existing bundle is untouched.
+    mocked_train.assert_not_called()
+    mocked_rmtree.assert_not_called()

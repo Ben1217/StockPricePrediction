@@ -35,10 +35,29 @@ class AnalysisResponse(BaseModel):
     status: str
 
 
+AGENTS_EXTRA_HINT = (
+    "The agent routes require the optional 'agents' extra: "
+    'pip install -e ".[agents]"'
+)
+
+
+def _load_agents(attr: str):
+    """
+    Import a callable from src.agents, translating a missing optional dependency
+    into an actionable 503 rather than a bare ImportError in a 500.
+    """
+    try:
+        import src.agents.crew as crew
+    except ImportError as exc:
+        logger.warning("Agent stack unavailable: %s", exc)
+        raise HTTPException(503, detail=f"{AGENTS_EXTRA_HINT} ({exc})") from exc
+    return getattr(crew, attr)
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/query", response_model=QueryResponse)
-async def natural_language_query(req: QueryRequest):
+def natural_language_query(req: QueryRequest):
     """
     Ask a plain-English question about stocks, portfolio, or market conditions.
     The NL Query Agent will use available tools to fetch data and reason about it.
@@ -48,17 +67,19 @@ async def natural_language_query(req: QueryRequest):
     - 'Should I rebalance today given current volatility?'
     - 'What is the predicted price for AAPL in 30 days?'
     """
+    run_nl_query = _load_agents("run_nl_query")
     try:
-        from src.agents.crew import run_nl_query
         result = run_nl_query(req.question)
         return QueryResponse(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"NL query failed: {e}", exc_info=True)
         raise HTTPException(500, detail=f"Agent query failed: {str(e)}")
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
-async def run_full_analysis(req: AnalysisRequest):
+def run_full_analysis(req: AnalysisRequest):
     """
     Run the full 5-agent analysis pipeline:
     Monitor → Predict → Technical Analysis → Portfolio Optimize → Backtest Validate.
@@ -68,10 +89,12 @@ async def run_full_analysis(req: AnalysisRequest):
     if not req.tickers:
         raise HTTPException(400, detail="At least one ticker is required")
 
+    run_analysis_crew = _load_agents("run_analysis_crew")
     try:
-        from src.agents.crew import run_analysis_crew
         result = run_analysis_crew(req.tickers)
         return AnalysisResponse(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Analysis crew failed: {e}", exc_info=True)
         raise HTTPException(500, detail=f"Agent analysis failed: {str(e)}")

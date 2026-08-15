@@ -8,8 +8,10 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 
 import pandas as pd
-import yfinance as yf
+from cachetools import LRUCache
 from fastapi import APIRouter, Query, HTTPException, BackgroundTasks
+
+from src.data.ohlcv import fetch_ohlcv
 
 from src.api.schemas.schemas import (
     PatternResponse, MultiTFPatternItem, ConfluenceResponse, ConfluenceSignal, BestSetupStatus,
@@ -25,10 +27,11 @@ from src.features.pattern_detector import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Simple in-memory cache for confluence signals
-_confluence_store: Dict[str, List[Dict]] = {}
-# Simple cache to prevent spamming background tasks
-_confluence_last_update: Dict[str, datetime] = {}
+# Confluence signals per symbol, bounded so a long-lived server cannot accumulate
+# an entry for every symbol ever requested.
+MAX_CONFLUENCE_SYMBOLS = 250
+_confluence_store: LRUCache = LRUCache(maxsize=MAX_CONFLUENCE_SYMBOLS)
+_confluence_last_update: LRUCache = LRUCache(maxsize=MAX_CONFLUENCE_SYMBOLS)
 
 TF_CONFIG = {
     "1m": {"yf_interval": "1m", "weight": 1, "period": "7d", "pattern_lookback": 180, "min_candles": 120, "analysis_days": 7},
@@ -56,34 +59,8 @@ def _clamp_sr_lookback(interval: str, lookback: int) -> int:
 
 
 def _fetch_yf_data(symbol: str, interval: str, period: str, days_lookback: int) -> pd.DataFrame:
-    df = pd.DataFrame()
-    try:
-        if period == "max":
-            df = yf.download(symbol, period="max", interval=interval, progress=False)
-        else:
-            df = yf.download(symbol, period=period, interval=interval, progress=False)
-    except Exception as e:
-        logger.warning(f"Primary YF fetch failed for {symbol} at {interval}: {e}")
-        df = pd.DataFrame()
-
-    if df.empty:
-        fallback_period = {
-            "1d": "1y",
-            "1wk": "max",
-            "1mo": "max",
-        }.get(interval)
-        if fallback_period:
-            try:
-                df = yf.download(symbol, period=fallback_period, interval=interval, progress=False)
-            except Exception as e:
-                logger.error(f"Fallback YF fetch failed for {symbol} at {interval}: {e}")
-                return pd.DataFrame()
-
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    if not df.empty:
-        df = df.dropna(subset=["Close"])
-    return df
+    """Fetch bars via the shared cached fetcher (src.data.ohlcv)."""
+    return fetch_ohlcv(symbol, interval, period=period)
 
 
 def _compute_confluence_bg(symbol: str):
@@ -136,7 +113,7 @@ def _compute_confluence_bg(symbol: str):
 
 
 @router.get("/confluence/{symbol}", response_model=ConfluenceResponse)
-async def get_confluence(symbol: str):
+def get_confluence(symbol: str):
     """Retrieve pre-computed multi-timeframe confluence signals. This relies on background task."""
     symbol = symbol.upper()
     signals = _confluence_store.get(symbol, [])
@@ -150,7 +127,7 @@ async def get_confluence(symbol: str):
 
 
 @router.get("/support-resistance/{symbol}", response_model=None)
-async def get_support_resistance(
+def get_support_resistance(
     symbol: str,
     interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
     lookback: int = Query(180, ge=20, le=20000),
@@ -165,18 +142,12 @@ async def get_support_resistance(
         if interval in ("1d", "1wk", "1mo"):
             end = datetime.now().strftime("%Y-%m-%d")
             start = (datetime.now() - timedelta(days=lookback + 200)).strftime("%Y-%m-%d")
-            df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
+            df = fetch_ohlcv(symbol, interval, start=start, end=end)
         else:
-            period_map = {"1m": "7d", "5m": "60d", "15m": "60d", "1h": "730d", "4h": "730d"}
-            period = period_map.get(interval, "60d")
-            df = yf.download(symbol, period=period, interval=interval, progress=False)
-            
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df.dropna(subset=["Close"])
+            df = fetch_ohlcv(symbol, interval)
     except Exception as e:
-        logger.error(f"YF fetch failed: {e}")
-        raise HTTPException(500, "Fetch failed")
+        logger.error(f"OHLCV fetch failed for {symbol}: {e}")
+        raise HTTPException(502, f"Data fetch failed for {symbol}")
     
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
@@ -199,7 +170,7 @@ async def get_support_resistance(
 
 
 @router.get("/{symbol}", response_model=PatternResponse)
-async def get_patterns(
+def get_patterns(
     symbol: str, 
     background_tasks: BackgroundTasks,
     tf: str = Query("1d", enum=["1m", "1h", "1d", "1wk", "1mo"])

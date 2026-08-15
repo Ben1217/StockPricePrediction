@@ -7,17 +7,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ && \
     rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir fastapi uvicorn[standard] python-multipart aiohttp cachetools reportlab torch --index-url https://download.pytorch.org/whl/cpu
+# Python dependencies. Dependencies are declared in pyproject.toml, so the project
+# metadata is copied first and installed against a stub package tree — that keeps the
+# dependency layer cacheable independently of application code changes.
+COPY pyproject.toml README.md ./
+RUN mkdir -p src && touch src/__init__.py && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir .
 
 # Application code
 COPY src/ src/
 COPY config/ config/
 COPY database/ database/
-COPY models/ models/
-COPY .env .env
+
+# `models/` and `.env` are deliberately not copied: docker-compose supplies both
+# (a ../models volume mount and env_file), so baking them in would shadow the mount,
+# add a large layer of generated artifacts, and put secrets in an image layer.
+# The directory is created so the API can write bundles when no volume is mounted.
+RUN mkdir -p models data
 
 EXPOSE 8000
 

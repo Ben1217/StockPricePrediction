@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.schemas.schemas import (
@@ -39,7 +40,8 @@ class TrainStatus(BaseModel):
 
 import threading
 import uuid
-_ensemble_jobs: Dict[str, TrainStatus] = {}
+# Bounded: unbounded job dicts retained every job for the process lifetime.
+_ensemble_jobs: TTLCache = TTLCache(maxsize=200, ttl=24 * 3600)
 from src.features.feature_engineering import build_feature_frame, transform_feature_frame
 from src.models.direction_utils import (
     BUY_PROBABILITY_THRESHOLD,
@@ -582,7 +584,7 @@ def _predict_regression_model(
     )
 
 
-def _predict_or_train_regression_model(
+def _predict_regression_or_unavailable(
     *,
     symbol: str,
     model_type: str,
@@ -602,40 +604,12 @@ def _predict_or_train_regression_model(
     if response is not None:
         return response
 
-    logger.info("Missing or unusable regression bundle for %s %s h=%s. Attempting auto-retrain.", symbol, model_type, horizon)
-    try:
-        from src.models.ensemble_training import train_regression_bundle
-
-        train_regression_bundle(
-            symbol=symbol,
-            model_type=model_type,
-            horizon=horizon,
-            lookback_days=LOOKBACK_DAYS,
-            raw_df=raw_df,
-        )
-    except Exception as exc:
-        logger.error("Auto-retrain failed for %s %s h=%s: %s", symbol, model_type, horizon, exc)
-        return _unavailable_prediction_response(
-            symbol=symbol,
-            model_type=model_type,
-            horizon=horizon,
-            current_price=current_price,
-            current_price_source=current_price_source,
-            reason="missing_bundle",
-            message=f"{PREDICTION_MODEL_UNAVAILABLE} Auto-retrain failed: {exc}",
-        )
-
-    response = _predict_regression_model(
-        symbol=symbol,
-        model_type=model_type,
-        horizon=horizon,
-        raw_df=raw_df,
-        current_price=current_price,
-        current_price_source=current_price_source,
+    logger.info(
+        "Missing or unusable regression bundle for %s %s h=%s. Client must submit training.",
+        symbol,
+        model_type,
+        horizon,
     )
-    if response is not None:
-        return response
-
     return _unavailable_prediction_response(
         symbol=symbol,
         model_type=model_type,
@@ -643,15 +617,19 @@ def _predict_or_train_regression_model(
         current_price=current_price,
         current_price_source=current_price_source,
         reason="missing_bundle",
-        message=PREDICTION_MODEL_UNAVAILABLE,
+        message=(
+            f"No usable {model_type} price bundle for {symbol} at horizon {horizon}. "
+            f"Train one via POST /api/training/train, then retry."
+        ),
     )
+
 
 # ---------------------------------------------------------------------------
 # POST /api/predict
 # ---------------------------------------------------------------------------
 
 @router.post("", response_model=PredictResponse)
-async def predict(req: PredictRequest):
+def predict(req: PredictRequest):
     """Run price-regression forecasts for supported horizons, else direction inference."""
     symbol = req.symbol.upper()
     model_type = req.model_type.value
@@ -660,7 +638,7 @@ async def predict(req: PredictRequest):
     current_price, current_price_source = _latest_available_price(symbol, raw_df)
 
     if requested_horizon in SUPPORTED_FORECAST_HORIZONS:
-        return _predict_or_train_regression_model(
+        return _predict_regression_or_unavailable(
             symbol=symbol,
             model_type=model_type,
             horizon=requested_horizon,
@@ -720,58 +698,47 @@ async def predict(req: PredictRequest):
         probabilities = _predict_bundle_probabilities(bundle, feature_frame)
         prob_up = float(probability_up(probabilities)[0])
     except ValueError as exc:
-        # Legacy bundle feature mismatch. Auto-retrain!
-        logger.info(f"Feature mismatch for {symbol} ({model_type}): {exc}. Attempting auto-retrain...")
-        try:
-            from src.models.bundle_training import train_model_bundles
-            import shutil
-            import os
-            bundle_path = os.path.join("models", "bundles", symbol, model_type)
-            if os.path.exists(bundle_path):
-                shutil.rmtree(bundle_path)
-            
-            train_model_bundles(
-                symbol=symbol,
-                model_type=model_type,
-                horizons=[NEXT_DAY_HORIZON],
-                lookback_days=1825,
-            )
-            bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
-            if bundle is None:
-                raise ValueError("Retrained bundle failed to load")
-            feature_frame = build_feature_frame(raw_df, feature_config=bundle.feature_config)
-            probabilities = _predict_bundle_probabilities(bundle, feature_frame)
-            prob_up = float(probability_up(probabilities)[0])
-        except Exception as retry_exc:
-            message = str(retry_exc)
-            model_info = _build_model_info(
-                symbol=symbol,
-                requested_model=model_type,
-                bundle=bundle,
-                available=False,
-                reason="insufficient_inference_history",
-                message=message,
-            )
-            return PredictResponse(
-                symbol=symbol,
-                model_type=model_type,
-                horizon=requested_horizon,
-                current_price=round(current_price, 2),
-                current_price_source=current_price_source,
-                direction=None,
-                signal=None,
-                confidence=None,
-                probability_up=None,
-                probability_down=None,
-                expected_move=None,
-                prediction_date=None,
-                model_info=model_info,
-                status="unavailable",
-                model_available=False,
-                reason="insufficient_inference_history",
-                message=message,
-                can_train=True,
-            )
+        # The stored bundle was trained against a different feature set. Retraining is a
+        # multi-minute job, so it is never run inline — the client is told to submit it to
+        # POST /api/training/train, and the existing bundle is left on disk untouched.
+        logger.info(
+            "Feature mismatch for %s (%s): %s. Bundle needs retraining via /api/training/train.",
+            symbol,
+            model_type,
+            exc,
+        )
+        message = (
+            f"The stored {model_type} bundle for {symbol} was trained against an older feature "
+            f"set and can no longer be used for inference. Retrain it via POST /api/training/train."
+        )
+        model_info = _build_model_info(
+            symbol=symbol,
+            requested_model=model_type,
+            bundle=bundle,
+            available=False,
+            reason="stale_bundle_requires_retraining",
+            message=message,
+        )
+        return PredictResponse(
+            symbol=symbol,
+            model_type=model_type,
+            horizon=requested_horizon,
+            current_price=round(current_price, 2),
+            current_price_source=current_price_source,
+            direction=None,
+            signal=None,
+            confidence=None,
+            probability_up=None,
+            probability_down=None,
+            expected_move=None,
+            prediction_date=None,
+            model_info=model_info,
+            status="unavailable",
+            model_available=False,
+            reason="stale_bundle_requires_retraining",
+            message=message,
+            can_train=True,
+        )
 
     model_info = _build_model_info(
         symbol=symbol,
@@ -816,7 +783,7 @@ async def predict(req: PredictRequest):
 
 
 @router.get("", response_model=PredictResponse)
-async def predict_query(
+def predict_query(
     symbol: str = Query(DEFAULT_INDEX_SYMBOL),
     model: str = Query("xgboost", enum=["xgboost", "random_forest", "lstm"]),
     model_type: Optional[str] = Query(None, enum=["xgboost", "random_forest", "lstm"]),
@@ -824,7 +791,7 @@ async def predict_query(
 ):
     """Query-string friendly prediction endpoint used by browser/debug flows."""
     resolved_model = model_type or model
-    return await predict(
+    return predict(
         PredictRequest(
             symbol=symbol,
             model_type=resolved_model,
@@ -838,7 +805,7 @@ async def predict_query(
 # ---------------------------------------------------------------------------
 
 @router.get("/historical-signals/{symbol}", response_model=List[HistoricalSignal])
-async def get_historical_signals(
+def get_historical_signals(
     symbol: str,
     days: int = Query(90, ge=10, le=365),
     model_type: str = Query("xgboost", enum=["xgboost", "random_forest", "lstm"]),
@@ -883,7 +850,7 @@ async def get_historical_signals(
 # ---------------------------------------------------------------------------
 
 @router.post("/ensemble", response_model=EnsemblePredictResponse)
-async def ensemble_predict(req: EnsemblePredictRequest):
+def ensemble_predict(req: EnsemblePredictRequest):
     """
     Run the weighted ensemble price-regression forecast.
     """
@@ -1002,7 +969,7 @@ def _run_ensemble_training(job_id: str, req: EnsembleTrainRequest):
         job.error = str(exc)
 
 @router.post("/ensemble/train")
-async def train_ensemble(req: EnsembleTrainRequest):
+def train_ensemble(req: EnsembleTrainRequest):
     job_id = str(uuid.uuid4())
     _ensemble_jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
     thread = threading.Thread(target=_run_ensemble_training, args=(job_id, req), daemon=True)
@@ -1016,7 +983,7 @@ async def train_ensemble(req: EnsembleTrainRequest):
     }
 
 @router.get("/ensemble/train/status/{job_id}")
-async def get_ensemble_training_status(job_id: str):
+def get_ensemble_training_status(job_id: str):
     if job_id not in _ensemble_jobs:
         raise HTTPException(404, f"Ensemble job {job_id} not found")
     return _ensemble_jobs[job_id]

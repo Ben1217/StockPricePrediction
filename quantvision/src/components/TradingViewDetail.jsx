@@ -151,77 +151,6 @@ function DecisionPanel({ sentiment, srSummary, loading }) {
     );
 }
 
-// ── Pattern Catalogue (simplified for Pattern Mode) ────────
-const PATTERN_CATALOGUE = [
-    { category: "Chart Patterns", patterns: [
-        "Head & Shoulders", "Double Bottom",
-        "Bull Flag", "Symmetrical Triangle",
-    ]},
-];
-const MAX_PATTERNS = 4;
-
-// ── Pattern Dropdown Component ────────────────────────────
-function PatternDropdown({ selected, onToggle, onClear, onClose }) {
-    const dropRef = useRef(null);
-
-    useEffect(() => {
-        const handler = (e) => { if (dropRef.current && !dropRef.current.contains(e.target)) onClose(); };
-        document.addEventListener("mousedown", handler);
-        return () => document.removeEventListener("mousedown", handler);
-    }, [onClose]);
-
-    const atMax = selected.size >= MAX_PATTERNS;
-
-    return (
-        <div ref={dropRef} style={{
-            position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 100,
-            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 10,
-            padding: "12px 14px", minWidth: 240, maxHeight: 380, overflowY: "auto",
-            backdropFilter: "blur(12px)", boxShadow: "0 8px 32px rgba(0,0,0,.55)",
-            fontFamily: "'DM Mono', monospace",
-        }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <span style={{ fontSize: 11, fontWeight: 700, color: C.text, letterSpacing: 1 }}>SELECT PATTERNS</span>
-                <button onClick={onClear} style={{
-                    background: "transparent", border: `1px solid ${C.border}`, borderRadius: 4,
-                    color: C.textDim, fontSize: 9, padding: "2px 8px", cursor: "pointer",
-                    transition: "color .2s",
-                }} onMouseEnter={e => e.target.style.color = C.red}
-                    onMouseLeave={e => e.target.style.color = C.textDim}>Clear All</button>
-            </div>
-            <div style={{ fontSize: 9, color: atMax ? C.amber : C.textDim, marginBottom: 10, transition: "color .3s" }}>
-                {selected.size}/{MAX_PATTERNS} selected {atMax && "— limit reached"}
-            </div>
-            {PATTERN_CATALOGUE.map(cat => (
-                <div key={cat.category} style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 9, color: C.textDim, fontWeight: 700, marginBottom: 4, textTransform: "uppercase", letterSpacing: .8 }}>{cat.category}</div>
-                    {cat.patterns.map(p => {
-                        const isSelected = selected.has(p);
-                        const disabled = atMax && !isSelected;
-                        return (
-                            <label key={p} title={disabled ? "Max 2 patterns allowed" : ""}
-                                style={{
-                                    display: "flex", alignItems: "center", gap: 8, padding: "4px 6px",
-                                    borderRadius: 5, cursor: disabled ? "not-allowed" : "pointer",
-                                    opacity: disabled ? 0.35 : 1,
-                                    background: isSelected ? C.amber + "15" : "transparent",
-                                    transition: "background .2s, opacity .2s",
-                                }}
-                                onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = isSelected ? C.amber + "22" : C.bg2; }}
-                                onMouseLeave={e => { e.currentTarget.style.background = isSelected ? C.amber + "15" : "transparent"; }}>
-                                <input type="checkbox" checked={isSelected} disabled={disabled}
-                                    onChange={() => { if (!disabled) onToggle(p); }}
-                                    style={{ accentColor: C.amber, cursor: disabled ? "not-allowed" : "pointer", width: 13, height: 13 }} />
-                                <span style={{ fontSize: 11, color: isSelected ? C.text : C.textMid }}>{p}</span>
-                            </label>
-                        );
-                    })}
-                </div>
-            ))}
-        </div>
-    );
-}
-
 // ── Sub-panel Chart Creator ────────────────────────────────
 function formatSetupPrice(value) {
     return value == null ? "—" : `$${Number(value).toFixed(2)}`;
@@ -364,7 +293,7 @@ function getPrimaryLevels(srData) {
     };
 }
 
-function buildIndicatorSummary({ indicators, prices, srData, interval }) {
+function buildIndicatorSummary({ indicators, prices, srData, timeframe }) {
     const latestIndicator = Array.isArray(indicators) && indicators.length > 0 ? indicators[indicators.length - 1] : null;
     const latestPrice = Array.isArray(prices) && prices.length > 0 ? prices[prices.length - 1] : null;
     const srLevels = getPrimaryLevels(srData);
@@ -397,7 +326,7 @@ function buildIndicatorSummary({ indicators, prices, srData, interval }) {
 
     return {
         mode: "INDICATOR",
-        timeframe: interval,
+        timeframe: timeframe,
         trend: trend || "neutral",
         rsi,
         volume,
@@ -994,8 +923,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
     const [error, setError] = useState(null);
     const [srSummary, setSrSummary] = useState(null);
 
-    const [interval, setInterval] = useState("1d");
-    const intervals = ["1m", "1h", "1d", "1wk", "1mo"];
+    const [timeframe, setTimeframe] = useState("1d");
+    const timeframes = ["1m", "1h", "1d", "1wk", "1mo"];
 
     // ── View Mode ──────────────────────────────────────────
     const [viewMode, setViewMode] = useState("pattern"); // "indicator" | "pattern" | "advanced"
@@ -1061,22 +990,22 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
         async function loadData() {
             setLoading(true); setError(null);
             try {
-                const priceDays = { "1m": 5, "1h": 180, "1d": 420, "1wk": 2500, "1mo": 5600 }[interval] || 120;
-                const indicatorDays = { "1m": 120, "1h": 240, "1d": 320, "1wk": 300, "1mo": 180 }[interval] || 120;
-                const lookback = { "1m": 90, "1h": 365, "1d": 420, "1wk": 2500, "1mo": 5600 }[interval] || 180;
+                const priceDays = { "1m": 5, "1h": 180, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 120;
+                const indicatorDays = { "1m": 120, "1h": 240, "1d": 320, "1wk": 300, "1mo": 180 }[timeframe] || 120;
+                const lookback = { "1m": 90, "1h": 365, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 180;
                 const [priceRes, indRes, patRes, srRes] = await Promise.all([
-                    fetchPrices(symbol, "yfinance", priceDays, interval),
-                    fetchIndicators(symbol, indicatorDays, interval),
-                    isPatternMode ? fetchPatterns(symbol, interval) : Promise.resolve(null),
-                    showSR ? fetchSupportResistance(symbol, interval, lookback) : Promise.resolve(null),
+                    fetchPrices(symbol, "yfinance", priceDays, timeframe),
+                    fetchIndicators(symbol, indicatorDays, timeframe),
+                    isPatternMode ? fetchPatterns(symbol, timeframe) : Promise.resolve(null),
+                    showSR ? fetchSupportResistance(symbol, timeframe, lookback) : Promise.resolve(null),
                 ].map(p => p.catch(e => null)));
 
                 if (cancelled) return;
                 if (!priceRes || !priceRes.bars) throw new Error("Failed to fetch price data");
 
                 let sigRes = [];
-                if (interval === "1d" && showMLSignals) {
-                    try { sigRes = await fetchHistoricalSignals(symbol, 90, "xgboost"); } catch (e) { }
+                if (timeframe === "1d" && showMLSignals) {
+                    try { sigRes = await fetchHistoricalSignals(symbol, 90, "xgboost"); } catch { /* ML signals are optional */ }
                 }
                 if (cancelled) return;
 
@@ -1093,7 +1022,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                         indicators: indRes?.data || [],
                         prices: priceRes?.bars || [],
                         srData: srRes,
-                        interval,
+                        timeframe,
                     }) : null,
                 };
 
@@ -1117,7 +1046,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
         }
 
         function cleanup() {
-            Object.values(subChartsRef.current).forEach(c => { try { c.remove(); } catch (e) { } });
+            Object.values(subChartsRef.current).forEach(c => { try { c.remove(); } catch { /* already disposed */ } });
             subChartsRef.current = {};
             if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
             seriesRefs.current = {};
@@ -1138,7 +1067,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
             const chart = createChart(chartContainerRef.current, {
                 width: w, height: h,
-                ...baseChartOpts(interval),
+                ...baseChartOpts(timeframe),
                 crosshair: { mode: 1 },
             });
             chartRef.current = chart;
@@ -1195,7 +1124,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             }
 
             // VWAP — intraday only (Advanced)
-            const isIntraday = interval.includes("m") || interval === "1h" || interval === "4h";
+            const isIntraday = timeframe.includes("m") || timeframe === "1h" || timeframe === "4h";
             if (showVWAP && isIntraday) {
                 const vwap = chart.addSeries(LineSeries, { color: "#f59e0b", lineWidth: 2, lineStyle: 0 });
                 vwap.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.VWAP })).filter(d => d.value != null));
@@ -1407,7 +1336,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
             // ── RSI Sub-panel (Indicator + Advanced) ────────
             if (showRSI && rsiContainerRef.current) {
-                const rsiChart = createSubChart(rsiContainerRef.current, interval, 100);
+                const rsiChart = createSubChart(rsiContainerRef.current, timeframe, 100);
                 if (rsiChart) {
                     subChartsRef.current.rsi = rsiChart;
                     const rsiSeries = rsiChart.addSeries(LineSeries, { color: "#a78bfa", lineWidth: 1.5 });
@@ -1422,7 +1351,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
             // ── MACD Sub-panel (Advanced only) ──────────────
             if (showMACD && macdContainerRef.current) {
-                const macdChart = createSubChart(macdContainerRef.current, interval, 100);
+                const macdChart = createSubChart(macdContainerRef.current, timeframe, 100);
                 if (macdChart) {
                     subChartsRef.current.macd = macdChart;
                     const macdLine = macdChart.addSeries(LineSeries, { color: "#60a5fa", lineWidth: 1.5 });
@@ -1442,7 +1371,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
 
             // ── Volume Sub-panel (Indicator + Advanced) ─────
             if (showVol && volContainerRef.current) {
-                const volChart = createSubChart(volContainerRef.current, interval, 80);
+                const volChart = createSubChart(volContainerRef.current, timeframe, 80);
                 if (volChart) {
                     subChartsRef.current.vol = volChart;
                     const volSeries = volChart.addSeries(HistogramSeries, {
@@ -1478,7 +1407,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             window.removeEventListener("resize", handleResize);
             cleanup();
         };
-    }, [symbol, interval, viewMode, mode, predictionData, patternScope, confluence]);
+    }, [symbol, timeframe, viewMode, mode, predictionData, patternScope, confluence]);
 
     const bestPattern = stateData.current.bestPattern;
     const bestSetup = stateData.current.bestSetup;
@@ -1499,10 +1428,10 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                             <div style={{ fontWeight: 800, color: C.text, fontSize: 16, marginRight: 6 }}>{symbol}</div>
                             {/* Interval selector */}
                             <div style={{ display: "flex", background: C.bg0, padding: 2, borderRadius: 5 }}>
-                                {intervals.map(inv => (
-                                    <button key={inv} onClick={() => setInterval(inv)} style={{
-                                        background: interval === inv ? C.amber : "transparent",
-                                        color: interval === inv ? "#000" : C.textMid,
+                                {timeframes.map(inv => (
+                                    <button key={inv} onClick={() => setTimeframe(inv)} style={{
+                                        background: timeframe === inv ? C.amber : "transparent",
+                                        color: timeframe === inv ? "#000" : C.textMid,
                                         border: "none", borderRadius: 3, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer",
                                     }}>{inv}</button>
                                 ))}
@@ -1527,37 +1456,6 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                                 </>
                             )}
 
-                            {/* Pattern selector (Pattern/Advanced mode only) */}
-                            {false && (
-                                <>
-                                    <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
-                                    <div style={{ position: "relative" }}>
-                                        <button onClick={() => setPatternDropdownOpen(v => !v)} style={{
-                                            background: patternDropdownOpen ? C.amber + '33' : (selectedPatterns.size > 0 ? C.bg3 : "transparent"),
-                                            color: selectedPatterns.size > 0 ? C.amber : C.textDim,
-                                            border: `1px solid ${selectedPatterns.size > 0 ? C.amber + '55' : C.border}`,
-                                            borderRadius: 3, padding: "3px 10px", fontSize: 10, cursor: "pointer",
-                                            fontWeight: 700, display: "flex", alignItems: "center", gap: 5,
-                                            transition: "all .2s",
-                                        }}>
-                                            <span>Patterns</span>
-                                            <span style={{
-                                                background: selectedPatterns.size > 0 ? C.amber : C.textDim,
-                                                color: C.bg0, borderRadius: 8, padding: "0 5px", fontSize: 9, fontWeight: 800,
-                                                minWidth: 18, textAlign: "center",
-                                            }}>{selectedPatterns.size}/{MAX_PATTERNS}</span>
-                                        </button>
-                                        {patternDropdownOpen && (
-                                            <PatternDropdown
-                                                selected={selectedPatterns}
-                                                onToggle={togglePattern}
-                                                onClear={clearPatterns}
-                                                onClose={() => setPatternDropdownOpen(false)}
-                                            />
-                                        )}
-                                    </div>
-                                </>
-                            )}
 
                             {/* User Level Toggle */}
                             <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />

@@ -3,9 +3,11 @@ Training API routes — trigger model training, check status, list models.
 """
 
 import logging
+import math
 import threading
 import uuid
 
+from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException
 
 from src.api.schemas.schemas import (
@@ -28,14 +30,27 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory job tracker
-_jobs = {}  # job_id -> TrainStatus
+# In-memory job tracker. Bounded and time-limited: an unbounded dict retained every
+# job ever submitted for the lifetime of the process. Jobs outlive a long training run
+# (24h) but are not kept forever.
+#
+# Note this is per-process — with more than one uvicorn worker a job created on one
+# worker is invisible to the others. Moving to Redis or the SQLite database is the
+# prerequisite for running this API with --workers > 1.
+MAX_TRACKED_JOBS = 200
+JOB_TTL_SECONDS = 24 * 3600
+_jobs: TTLCache = TTLCache(maxsize=MAX_TRACKED_JOBS, ttl=JOB_TTL_SECONDS)
+# cachetools caches are not thread-safe and these are touched from worker threads.
+_jobs_lock = threading.Lock()
 
 
 def _run_training(job_id: str, req: TrainRequest):
     """Background training worker for one symbol/model pair."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:  # evicted before the worker started
+        return
     try:
-        job = _jobs[job_id]
         job.status = "running"
         job.progress = 0.1
 
@@ -58,13 +73,17 @@ def _run_training(job_id: str, req: TrainRequest):
         job.progress = 1.0
         job.metrics = result
     except Exception as exc:
-        _jobs[job_id].status = "failed"
-        _jobs[job_id].error = str(exc)
+        logger.exception("Training job %s failed", job_id)
+        job.status = "failed"
+        job.error = str(exc)
 
 
 def _run_bootstrap_training(job_id: str, req: BootstrapTrainRequest):
     """Background training worker for multiple symbols and model types."""
-    job = _jobs[job_id]
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:  # evicted before the worker started
+        return
     job.status = "running"
     job.progress = 0.05
 
@@ -98,10 +117,11 @@ def _run_bootstrap_training(job_id: str, req: BootstrapTrainRequest):
 
 
 @router.post("/train", response_model=TrainResponse)
-async def train_model(req: TrainRequest):
+def train_model(req: TrainRequest):
     """Trigger exact-bundle training for one symbol/model pair."""
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
+    with _jobs_lock:
+        _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
 
     thread = threading.Thread(target=_run_training, args=(job_id, req), daemon=True)
     thread.start()
@@ -120,10 +140,11 @@ async def train_model(req: TrainRequest):
 
 
 @router.post("/bootstrap", response_model=BootstrapTrainResponse)
-async def bootstrap_training(req: BootstrapTrainRequest):
+def bootstrap_training(req: BootstrapTrainRequest):
     """Trigger background training for the supported stock/model grid."""
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
+    with _jobs_lock:
+        _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
 
     thread = threading.Thread(target=_run_bootstrap_training, args=(job_id, req), daemon=True)
     thread.start()
@@ -144,26 +165,46 @@ async def bootstrap_training(req: BootstrapTrainRequest):
 
 
 @router.get("/status/{job_id}", response_model=TrainStatus)
-async def get_training_status(job_id: str):
+def get_training_status(job_id: str):
     """Poll training job status."""
-    if job_id not in _jobs:
-        raise HTTPException(404, f"Job {job_id} not found")
-    return _jobs[job_id]
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"Job {job_id} not found or expired")
+    return job
+
+
+def _json_safe(value):
+    """
+    Replace non-finite floats with None.
+
+    Training metrics legitimately contain NaN (e.g. benchmark_return when the test
+    window has no benchmark), and NaN/Infinity are not valid JSON — serialising them
+    raised `ValueError: Out of range float values are not JSON compliant` and turned
+    this endpoint into a 500.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 @router.get("/models")
-async def list_models():
+def list_models():
     """List saved bundles with metadata."""
     models = list_model_metadata()
     for meta in models:
         meta["model_id"] = meta.get("version_id")
-    return {"models": models}
+    return {"models": _json_safe(models)}
 
 
 @router.get("/models/{model_id}")
-async def get_model_details(model_id: str):
+def get_model_details(model_id: str):
     """Get details for a specific bundle version."""
     meta = get_model_metadata(model_id)
     if meta is None:
         raise HTTPException(404, f"Model {model_id} not found")
-    return meta
+    return _json_safe(meta)

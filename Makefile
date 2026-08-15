@@ -1,5 +1,5 @@
 .PHONY: help install install-dev setup frontend-install run-api run-frontend run \
-	test test-unit lint format download-data train-models migrate-db docker-up docker-down clean
+	test test-unit test-cov lint format download-data train-models migrate-db docker-up docker-down clean
 
 .DEFAULT_GOAL := help
 
@@ -17,6 +17,7 @@ help:
 	@echo "  run              Alias for run-frontend"
 	@echo "  test             Run the full pytest suite"
 	@echo "  test-unit        Run unit tests only"
+	@echo "  test-cov         Run the suite with coverage (enforces the floor)"
 	@echo "  lint             Run flake8 and mypy"
 	@echo "  format           Run black and isort"
 	@echo "  download-data    Download daily market data"
@@ -27,10 +28,10 @@ help:
 	@echo "  clean            Remove local cache and coverage artifacts"
 
 install:
-	$(PIP) install -r requirements.txt
+	$(PIP) install -e .
 
 install-dev:
-	$(PIP) install -r requirements_working.txt
+	$(PIP) install -e ".[agents,postgres,dev]"
 
 setup:
 	copy .env.example .env
@@ -49,10 +50,13 @@ run:
 	cd quantvision && npm run dev
 
 test:
-	pytest tests/ -v --cov=src --cov-report=html --cov-report=term
+	pytest tests/
 
 test-unit:
-	pytest tests/unit/ -v
+	pytest tests/unit/
+
+test-cov:
+	pytest tests/ --cov --cov-report=term --cov-report=html
 
 lint:
 	flake8 src tests scripts

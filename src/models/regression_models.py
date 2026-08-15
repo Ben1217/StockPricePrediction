@@ -20,6 +20,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from ..utils.logger import get_logger
 
+from .torch_io import safe_torch_load, to_plain
+
 logger = get_logger(__name__)
 
 
@@ -243,13 +245,13 @@ class LSTMPriceRegressor:
             path += ".pt"
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model_state_dict": self.network.state_dict(),
-                    "params": self.params, "input_size": self._input_size}, path)
+                    "params": to_plain(self.params), "input_size": int(self._input_size)}, path)
 
     def load(self, path):
         path = str(path)
         if not Path(path).exists() and not path.endswith(".pt"):
             path += ".pt"
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = safe_torch_load(path, map_location=self.device)
         self.params = ckpt.get("params", self.params)
         self._input_size = ckpt["input_size"]
         self.network = _LSTMNet(self._input_size, self.params["units"],

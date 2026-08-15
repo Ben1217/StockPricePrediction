@@ -1,14 +1,26 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import "./index.css";
-import { fetchPrices, fetchIndicators, fetchDataSources } from "./utils/api";
+import { fetchPrices, askAgent } from "./utils/api";
+import { useApiHealth, useDataSources, useQuotes, usePrices, useIndicators } from "./hooks/useMarketData";
 import { C, DEFAULT_INDEX_SYMBOL, LEGACY_TICKERS, SP500_LIST, TICKERS } from "./utils/data";
 import { Tab } from "./components/UIComponents";
-import AnalysisTab from "./tabs/AnalysisTab";
-import PredictionsTab from "./tabs/PredictionsTab";
-import PortfolioTab from "./tabs/PortfolioTab";
-import OptimizationTab from "./tabs/OptimizationTab";
-import BacktestTab from "./tabs/BacktestTab";
-import HeatmapTab from "./tabs/HeatmapTab";
+
+// Tabs are code-split: only the active tab's chunk (and its charting library) is
+// downloaded, instead of shipping all six plus recharts and lightweight-charts up front.
+const AnalysisTab = lazy(() => import("./tabs/AnalysisTab"));
+const PredictionsTab = lazy(() => import("./tabs/PredictionsTab"));
+const PortfolioTab = lazy(() => import("./tabs/PortfolioTab"));
+const OptimizationTab = lazy(() => import("./tabs/OptimizationTab"));
+const BacktestTab = lazy(() => import("./tabs/BacktestTab"));
+const HeatmapTab = lazy(() => import("./tabs/HeatmapTab"));
+
+function TabFallback() {
+    return (
+        <div style={{ padding: "64px 0", textAlign: "center", color: C.textDim, fontSize: 12 }}>
+            Loading…
+        </div>
+    );
+}
 
 /* ─── Sector colour map for screener badges ──────────────────── */
 const SECTOR_COLORS = {
@@ -342,7 +354,9 @@ function ChatWidget({ apiConnected }) {
             window.removeEventListener("touchmove", onMove);
             window.removeEventListener("touchend", onEnd);
         };
-    }, [open, pos]);
+        // `pos` is deliberately not a dependency: the drag origin is read from dragRef,
+        // so listing it would rebind all four listeners on every pointer move.
+    }, [open]);
 
     // Re-clamp on window resize
     useEffect(() => {
@@ -367,12 +381,7 @@ function ChatWidget({ apiConnected }) {
         setInput("");
         setLoading(true);
         try {
-            const res = await fetch("http://localhost:8000/api/agent/query", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ question: q }),
-            });
-            const data = await res.json();
+            const data = await askAgent(q);
             setMessages(prev => [...prev, { role: "assistant", text: data.answer || data.detail || "No response received." }]);
         } catch (e) {
             setMessages(prev => [...prev, { role: "assistant", text: `⚠ Error: ${e.message}. Make sure the backend is running.` }]);
@@ -553,68 +562,35 @@ export default function App() {
     const [watchlist, setWatchlist] = useState(loadWatchlist);
     const [selectedTicker, setSelectedTicker] = useState(() => loadWatchlist()[0] || DEFAULT_INDEX_SYMBOL);
     const [dataSource, setDataSource] = useState("yfinance");
-    const [availableSources, setAvailableSources] = useState(["yfinance"]);
     const [notification, setNotif] = useState(null);
-    const [loading, setLoading] = useState(false);
     const [showModal, setShowModal] = useState(false);
     const [hoveredChip, setHoveredChip] = useState(null); // ticker string
-
-    // Live data state
-    const [priceData, setPriceData] = useState(null);
-    const [indicatorData, setIndicatorData] = useState(null);
-    const [tickerQuotes, setTickerQuotes] = useState({});
-    const [apiConnected, setApiConnected] = useState(false);
 
     // Persist watchlist on change
     useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
 
-    // Check API connection & sources on mount
-    useEffect(() => {
-        fetch("http://localhost:8000/health")
-            .then(r => r.json())
-            .then(() => {
-                setApiConnected(true);
-                fetchDataSources().then(s => setAvailableSources(s.sources || ["yfinance"])).catch(() => { });
-            })
-            .catch(() => setApiConnected(false));
-    }, []);
+    // ── Server state (cached + de-duplicated by TanStack Query) ────────────
+    const { connected: apiConnected } = useApiHealth();
+    const { data: sourcesData } = useDataSources(apiConnected);
+    const availableSources = sourcesData?.sources ?? ["yfinance"];
 
-    // Fetch prices for all watchlist tickers (ticker bar quotes)
-    useEffect(() => {
-        if (!apiConnected) return;
-        const fetchQuotes = async () => {
-            const quotes = {};
-            for (const t of watchlist) {
-                try {
-                    const resp = await fetchPrices(t, "yfinance", 5);
-                    if (resp.bars && resp.bars.length >= 2) {
-                        const last = resp.bars[resp.bars.length - 1];
-                        const prev = resp.bars[resp.bars.length - 2];
-                        quotes[t] = {
-                            price: last.close,
-                            change: ((last.close - prev.close) / prev.close) * 100,
-                        };
-                    }
-                } catch { /* skip */ }
-            }
-            setTickerQuotes(quotes);
-        };
-        fetchQuotes();
-    }, [apiConnected, watchlist]);
+    // One batched request for the whole ticker bar.
+    const { data: tickerQuotes = {} } = useQuotes(watchlist, apiConnected);
 
-    // Fetch price & indicator data when selected ticker changes
-    useEffect(() => {
-        if (!apiConnected) return;
-        setLoading(true);
-        Promise.all([
-            fetchPrices(selectedTicker, dataSource, 120).catch(() => null),
-            fetchIndicators(selectedTicker, 120).catch(() => null),
-        ]).then(([prices, indicators]) => {
-            setPriceData(prices);
-            setIndicatorData(indicators);
-            setLoading(false);
-        });
-    }, [selectedTicker, dataSource, apiConnected]);
+    const pricesQuery = usePrices(selectedTicker, {
+        source: dataSource,
+        days: 120,
+        enabled: apiConnected,
+    });
+    const indicatorsQuery = useIndicators(selectedTicker, {
+        days: 120,
+        enabled: apiConnected,
+    });
+
+    const priceData = pricesQuery.data ?? null;
+    const indicatorData = indicatorsQuery.data ?? null;
+    const loading = pricesQuery.isFetching || indicatorsQuery.isFetching;
+    const loadError = pricesQuery.error ?? indicatorsQuery.error ?? null;
 
     const notify = (msg) => { setNotif(msg); setTimeout(() => setNotif(null), 3000); };
     const handleTickerSelect = useCallback((ticker) => {
@@ -776,6 +752,28 @@ export default function App() {
                 )}
             </div>
 
+            {/* Data error banner — distinguishes "request failed" from "no data" */}
+            {loadError && !loading && (
+                <div
+                    role="alert"
+                    style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+                        background: C.red + "14", borderBottom: `1px solid ${C.red}44`,
+                        padding: "8px 28px", fontSize: 11, color: C.red,
+                    }}
+                >
+                    <span>Could not load market data for {selectedTicker}: {loadError.message}</span>
+                    <button
+                        onClick={() => { pricesQuery.refetch(); indicatorsQuery.refetch(); }}
+                        style={{
+                            background: "transparent", border: `1px solid ${C.red}66`, borderRadius: 4,
+                            color: C.red, fontSize: 10, padding: "3px 10px", cursor: "pointer",
+                            fontFamily: "'DM Mono',monospace",
+                        }}
+                    >Retry</button>
+                </div>
+            )}
+
             {/* Loading bar */}
             {loading && (
                 <div style={{
@@ -786,6 +784,7 @@ export default function App() {
 
             {/* ── Main content ─────────────────────────────────────── */}
             <div style={{ padding: "24px 28px", maxWidth: 1400, margin: "0 auto" }}>
+                <Suspense fallback={<TabFallback />}>
                 {activeTab === "analysis" && (
                     <AnalysisTab
                         selectedTicker={selectedTicker}
@@ -829,6 +828,7 @@ export default function App() {
                         setSelectedTicker={handleTickerSelect}
                     />
                 )}
+                </Suspense>
             </div>
 
             {/* Footer */}

@@ -5,7 +5,24 @@
 
 import { DEFAULT_INDEX_SYMBOL } from "./data";
 
-const API_BASE = "http://localhost:8000/api";
+/** Origin of the FastAPI server. Override with VITE_API_ORIGIN at build time. */
+export const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? "http://localhost:8000";
+const API_BASE = `${API_ORIGIN}/api`;
+
+/** Error carrying the HTTP status, so callers branch on a number rather than a message. */
+export class ApiError extends Error {
+    constructor(status, body, url) {
+        super(`API ${status}: ${body || "request failed"}`);
+        this.name = "ApiError";
+        this.status = status;
+        this.body = body;
+        this.url = url;
+    }
+}
+
+/** Statuses worth a second attempt. 404 and 422 are deterministic — retrying just doubles latency. */
+const TRANSIENT_STATUSES = new Set([502, 503, 504]);
+const isTransient = (err) => err instanceof ApiError && TRANSIENT_STATUSES.has(err.status);
 
 const INTERVAL_LIMITS = {
     "1m": { priceDays: [7, 7], indicatorDays: [60, 120], lookback: [60, 90], sentimentDays: [120, 120] },
@@ -30,16 +47,27 @@ function encodeSymbol(symbol) {
     return encodeURIComponent(String(symbol || "").trim());
 }
 
+/** Sent only when the server is configured to require it (VITE_API_KEY). */
+const API_KEY = import.meta.env.VITE_API_KEY ?? "";
+const authHeaders = () => (API_KEY ? { "X-API-Key": API_KEY } : {});
+
 async function apiFetch(path, options = {}) {
     const url = `${API_BASE}${path}`;
     const res = await fetch(url, {
-        headers: { "Content-Type": "application/json", ...options.headers },
+        headers: { "Content-Type": "application/json", ...authHeaders(), ...options.headers },
         ...options,
     });
     if (!res.ok) {
         const body = await res.text();
-        throw new Error(`API ${res.status}: ${body}`);
+        throw new ApiError(res.status, body, url);
     }
+    return res.json();
+}
+
+/** Liveness probe against the server root (not under /api). */
+export async function fetchHealth(options = {}) {
+    const res = await fetch(`${API_ORIGIN}/health`, { headers: authHeaders(), ...options });
+    if (!res.ok) throw new ApiError(res.status, await res.text(), `${API_ORIGIN}/health`);
     return res.json();
 }
 
@@ -52,12 +80,27 @@ export async function fetchPrices(symbol, source = "yfinance", days = 120, inter
     try {
         return await apiFetch(url);
     } catch (err) {
-        const msg = String(err?.message || "");
-        const shouldRetry = msg.includes("API 404") || msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
-        if (!shouldRetry) throw err;
-        const fallbackDays = maxDays;
-        return apiFetch(`/data/prices/${encodedSymbol}?source=${source}&days=${fallbackDays}&interval=${interval}`);
+        if (!isTransient(err)) throw err;
+        return apiFetch(`/data/prices/${encodedSymbol}?source=${source}&days=${maxDays}&interval=${interval}`);
     }
+}
+
+/**
+ * Batch quote lookup — one request for many symbols.
+ * Replaces the per-ticker fan-out in the ticker bar and the sector heatmap.
+ */
+export async function fetchQuotes(symbols, options = {}) {
+    const list = (Array.isArray(symbols) ? symbols : [symbols])
+        .map(s => String(s || "").trim().toUpperCase())
+        .filter(Boolean);
+    if (list.length === 0) return {};
+    const data = await apiFetch(`/data/quotes?symbols=${encodeURIComponent(list.join(","))}`, options);
+    // Normalise to the shape the ticker bar and heatmap consume.
+    const out = {};
+    for (const [symbol, q] of Object.entries(data.quotes || {})) {
+        out[symbol] = { price: q.price, change: q.change_pct, vol: q.volume };
+    }
+    return out;
 }
 
 export async function fetchLiveQuote(symbol, source = "yfinance") {
@@ -76,11 +119,8 @@ export async function fetchIndicators(symbol, days = 120, interval = "1d") {
     try {
         return await apiFetch(url);
     } catch (err) {
-        const msg = String(err?.message || "");
-        const shouldRetry = msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
-        if (!shouldRetry) throw err;
-        const fallbackDays = maxDays;
-        return apiFetch(`/data/indicators/${encodedSymbol}?days=${fallbackDays}&interval=${interval}`);
+        if (!isTransient(err)) throw err;
+        return apiFetch(`/data/indicators/${encodedSymbol}?days=${maxDays}&interval=${interval}`);
     }
 }
 
@@ -95,8 +135,13 @@ export async function fetchDataSources() {
 export async function uploadDataset(file) {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`${API_BASE}/data/upload`, { method: "POST", body: form });
-    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    // No Content-Type header — the browser sets the multipart boundary itself.
+    const res = await fetch(`${API_BASE}/data/upload`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: form,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text(), `${API_BASE}/data/upload`);
     return res.json();
 }
 
@@ -170,11 +215,8 @@ export async function fetchSentiment(symbol, days = 400, interval = "1d") {
     try {
         return await apiFetch(url);
     } catch (err) {
-        const msg = String(err?.message || "");
-        const shouldRetry = msg.includes("API 400") || msg.includes("API 422") || msg.includes("API 500") || msg.includes("API 502");
-        if (!shouldRetry) throw err;
-        const fallbackDays = maxDays;
-        return apiFetch(`/sentiment/${encodedSymbol}?days=${fallbackDays}&interval=${interval}`);
+        if (!isTransient(err)) throw err;
+        return apiFetch(`/sentiment/${encodedSymbol}?days=${maxDays}&interval=${interval}`);
     }
 }
 
@@ -212,6 +254,15 @@ export async function fetchFrontier(params) {
 export async function fetchPortfolioMetrics(symbols, lookback = 252) {
     const sym = Array.isArray(symbols) ? symbols.join(",") : symbols;
     return apiFetch(`/portfolio/metrics?symbols=${sym}&lookback=${lookback}`);
+}
+
+// ── Agent ────────────────────────────────────────────────────
+export async function askAgent(question, options = {}) {
+    return apiFetch("/agent/query", {
+        method: "POST",
+        body: JSON.stringify({ question }),
+        ...options,
+    });
 }
 
 // ── Export ───────────────────────────────────────────────────

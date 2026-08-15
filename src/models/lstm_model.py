@@ -14,6 +14,8 @@ from .base_model import BaseModel
 from ..utils.logger import get_logger
 from ..utils.config_loader import get_config_value
 
+from .torch_io import safe_torch_load, to_plain
+
 logger = get_logger(__name__)
 
 
@@ -278,8 +280,8 @@ class LSTMModel(BaseModel):
         save_path = filepath if filepath.endswith('.pt') else filepath + '.pt'
         torch.save({
             'model_state_dict': self.model.state_dict(),
-            'params': self.params,
-            'history': self.history,
+            'params': to_plain(self.params),
+            'history': to_plain(self.history),
         }, save_path)
         logger.info(f"LSTM model saved to {save_path}")
 
@@ -291,7 +293,7 @@ class LSTMModel(BaseModel):
         if not Path(load_path).exists():
             raise FileNotFoundError(f"Model file not found: {load_path}")
 
-        checkpoint = torch.load(load_path, map_location=self.device, weights_only=False)
+        checkpoint = safe_torch_load(load_path, map_location=self.device)
         self.params = checkpoint.get('params', self.params)
         self.history = checkpoint.get('history', self.history)
 

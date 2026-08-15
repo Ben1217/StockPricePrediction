@@ -3,6 +3,7 @@ FastAPI application entry point.
 Stock Price Prediction & Portfolio Optimization API.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from src.api.routes.export import router as export_router
 from src.api.routes.patterns import router as patterns_router
 from src.api.routes.agent import router as agent_router
 from src.api.routes.sentiment import router as sentiment_router
+from src.api.security import log_auth_status, parse_origins, security_middleware
 
 
 app = FastAPI(
@@ -35,17 +37,24 @@ app = FastAPI(
 )
 logger = logging.getLogger(__name__)
 
-# CORS – allow React dev server
+# Auth (opt-in via QUANTVISION_API_KEY) + per-client rate limiting.
+app.middleware("http")(security_middleware)
+log_auth_status()
+
+# CORS. Origins come from QUANTVISION_CORS_ORIGINS (comma-separated) so the same
+# build can serve a deployed frontend; the fallback is the local dev servers.
+_DEV_ORIGINS = [
+    "http://localhost:3000",
+    *[f"http://localhost:{port}" for port in range(5173, 5181)],
+    *[f"http://127.0.0.1:{port}" for port in range(5173, 5181)],
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        *[f"http://localhost:{port}" for port in range(5173, 5181)],
-        *[f"http://127.0.0.1:{port}" for port in range(5173, 5181)],
-    ],
+    allow_origins=parse_origins(os.getenv("QUANTVISION_CORS_ORIGINS", ""), _DEV_ORIGINS),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Narrowed from "*": these are the verbs and headers the app actually uses.
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 # Register routers
