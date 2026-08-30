@@ -51,6 +51,31 @@ CORE_REGRESSION_FEATURE_COLUMNS = [
     "MACD",
     "Volatility",
 ]
+# Feature set for return-regression bundles.
+#
+# Every column is a ratio, a return, or a bounded oscillator, so its distribution
+# does not move when the price level does. CORE_REGRESSION_FEATURE_COLUMNS above
+# must not be used to train new return models: those are absolute price levels
+# fed to a model whose target is a return. A scaler fitted on a training window
+# that sits below present-day prices maps every recent bar to the top of the
+# range the trees ever saw, so the model returns whatever forward return that
+# window happened to contain and stops responding to the market. The levels stay
+# in the frame because bundles trained before this change still reference them.
+STATIONARY_REGRESSION_FEATURE_COLUMNS = [
+    "Daily_Return",
+    "Return_5d",
+    "Return_20d",
+    "Return_60d",
+    "Close_SMA20_Ratio",
+    "Close_SMA50_Ratio",
+    "SMA20_SMA50_Ratio",
+    "RSI_14",
+    "MACD_Norm",
+    "Volatility",
+    "Volatility_Ratio",
+    "Volume_Zscore",
+    "High_Low_Range",
+]
 LEGACY_REGRESSION_FEATURE_COLUMNS = [
     "Returns",
     "Log_Returns",
@@ -195,6 +220,15 @@ FEATURE_ENGINEERING_STEP_MAP = {
     "DayOfWeek": "calendar_features",
     "Month": "calendar_features",
     "Quarter": "calendar_features",
+    "Return_5d": "stationary_features",
+    "Return_20d": "stationary_features",
+    "Return_60d": "stationary_features",
+    "Close_SMA20_Ratio": "stationary_features",
+    "Close_SMA50_Ratio": "stationary_features",
+    "SMA20_SMA50_Ratio": "stationary_features",
+    "MACD_Norm": "stationary_features",
+    "Volatility_Ratio": "stationary_features",
+    "Volume_Zscore": "stationary_features",
 }
 FEATURE_MIN_HISTORY = {
     "Returns": 2,
@@ -218,6 +252,15 @@ FEATURE_MIN_HISTORY = {
     "Close_Lag_10": 11,
     "Return_Lag_10": 11,
     "Volume_Lag_10": 11,
+    "Return_5d": 6,
+    "Return_20d": 21,
+    "Return_60d": 61,
+    "Close_SMA20_Ratio": 20,
+    "Close_SMA50_Ratio": 50,
+    "SMA20_SMA50_Ratio": 50,
+    "MACD_Norm": 26,
+    "Volatility_Ratio": 21,
+    "Volume_Zscore": 20,
 }
 
 
@@ -309,7 +352,11 @@ def _regression_feature_columns_to_keep(extra_columns: Optional[List[str]] = Non
     for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
         if col not in keep_cols:
             keep_cols.append(col)
-    for col in CORE_REGRESSION_FEATURE_COLUMNS + LEGACY_REGRESSION_FEATURE_COLUMNS:
+    for col in (
+        CORE_REGRESSION_FEATURE_COLUMNS
+        + STATIONARY_REGRESSION_FEATURE_COLUMNS
+        + LEGACY_REGRESSION_FEATURE_COLUMNS
+    ):
         if col not in keep_cols:
             keep_cols.append(col)
     for col in extra_columns or []:
@@ -365,6 +412,8 @@ def build_regression_feature_frame(
     data["Month"] = data.index.month
     data["Quarter"] = data.index.quarter
 
+    data = add_stationary_regression_features(data)
+
     extra_columns: List[str] = []
     if bool(config["include_regime"]):
         try:
@@ -392,6 +441,66 @@ def build_regression_feature_frame(
     data = data[[col for col in keep_cols if col in data.columns]]
 
     logger.info("Built regression feature frame with %s columns", len(data.columns))
+    return data
+
+
+def add_stationary_regression_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add the scale-free columns listed in STATIONARY_REGRESSION_FEATURE_COLUMNS.
+
+    Each column is derived from OHLCV directly rather than read back from the
+    technical-indicator step, so the set is available whichever indicator
+    configuration produced the frame. Names are distinct from every legacy
+    column, so adding them cannot change how an existing bundle is served.
+    """
+    data = df.copy()
+    close = pd.to_numeric(data["Close"], errors="coerce")
+    safe_close = close.replace(0, np.nan)
+
+    sma_20 = data["SMA_20"] if "SMA_20" in data.columns else close.rolling(20).mean()
+    sma_50 = data["SMA_50"] if "SMA_50" in data.columns else close.rolling(50).mean()
+    sma_20 = pd.to_numeric(sma_20, errors="coerce").replace(0, np.nan)
+    sma_50 = pd.to_numeric(sma_50, errors="coerce").replace(0, np.nan)
+
+    # Where price sits relative to its own trend, and how the trends are ordered.
+    data["Close_SMA20_Ratio"] = close / sma_20 - 1.0
+    data["Close_SMA50_Ratio"] = close / sma_50 - 1.0
+    data["SMA20_SMA50_Ratio"] = sma_20 / sma_50 - 1.0
+
+    # Momentum over several lookbacks, as returns rather than levels.
+    data["Return_5d"] = close.pct_change(5)
+    data["Return_20d"] = close.pct_change(20)
+    data["Return_60d"] = close.pct_change(60)
+
+    # MACD is quoted in price units, so it grows with the share price unless divided out.
+    macd = data["MACD"] if "MACD" in data.columns else None
+    if macd is None:
+        ema_12 = close.ewm(span=12, adjust=False).mean()
+        ema_26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema_12 - ema_26
+    data["MACD_Norm"] = pd.to_numeric(macd, errors="coerce") / safe_close
+
+    daily_return = data["Daily_Return"] if "Daily_Return" in data.columns else close.pct_change()
+    daily_return = pd.to_numeric(daily_return, errors="coerce")
+    volatility = data["Volatility"] if "Volatility" in data.columns else daily_return.rolling(20).std()
+    volatility = pd.to_numeric(volatility, errors="coerce")
+
+    # Volatility relative to its own recent regime, so a calm name and a wild one
+    # are described on the same scale.
+    volatility_baseline = volatility.rolling(126, min_periods=20).median().replace(0, np.nan)
+    data["Volatility_Ratio"] = volatility / volatility_baseline
+
+    volume = pd.to_numeric(data["Volume"], errors="coerce") if "Volume" in data.columns else None
+    if volume is not None:
+        volume_mean = volume.rolling(20).mean()
+        volume_std = volume.rolling(20).std().replace(0, np.nan)
+        data["Volume_Zscore"] = (volume - volume_mean) / volume_std
+    else:
+        data["Volume_Zscore"] = np.nan
+
+    if "High_Low_Range" not in data.columns and {"High", "Low"}.issubset(data.columns):
+        data["High_Low_Range"] = (data["High"] - data["Low"]) / safe_close
+
     return data
 
 
@@ -535,6 +644,7 @@ def build_regression_dataset(
     df: pd.DataFrame,
     horizon: int,
     feature_config: Optional[Dict] = None,
+    feature_columns: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, List[str], str]:
     """
     Build a clean regression dataset for direct return forecasting.
@@ -550,6 +660,9 @@ def build_regression_dataset(
         Number of trading days ahead to predict (e.g. 7, 15, 30, 60)
     feature_config : dict, optional
         Feature pipeline configuration
+    feature_columns : List[str], optional
+        Override the feature set. Defaults to the stationary set; pass
+        CORE_REGRESSION_FEATURE_COLUMNS to reproduce a pre-existing bundle.
 
     Returns
     -------
@@ -561,6 +674,7 @@ def build_regression_dataset(
         Name of the target column (e.g. "target_return_30d")
     """
     target_col = f"target_return_{horizon}d"
+    requested_columns = list(feature_columns or STATIONARY_REGRESSION_FEATURE_COLUMNS)
 
     # 1. Build feature frame
     feature_frame = clean_market_data(build_regression_feature_frame(df, feature_config=feature_config))
@@ -574,18 +688,28 @@ def build_regression_dataset(
         col = f"target_return_{h}d"
         feature_frame[col] = adjusted_close.shift(-h) / adjusted_close - 1.0
 
-    # 3. Select the exact 11 features requested by the prediction spec.
-    feature_columns = [
+    # 3. Keep the requested features that this history is long enough to support.
+    resolved_columns = [
         col
-        for col in CORE_REGRESSION_FEATURE_COLUMNS
+        for col in requested_columns
         if col in feature_frame.columns and int(feature_frame[col].notna().sum()) >= 30
     ]
 
-    if not feature_columns:
+    if not resolved_columns:
         return feature_frame.iloc[0:0].copy(), [], target_col
 
+    dropped = [col for col in requested_columns if col not in resolved_columns]
+    if dropped:
+        logger.warning(
+            "Dropping %s feature(s) with insufficient history for horizon=%sd: %s",
+            len(dropped),
+            horizon,
+            dropped,
+        )
+
     # 4. Drop rows where the target or any feature is NaN
-    dataset = feature_frame.dropna(subset=feature_columns + [target_col]).copy()
+    dataset = feature_frame.dropna(subset=resolved_columns + [target_col]).copy()
+    feature_columns = resolved_columns
 
     logger.info(
         "Built regression dataset: %s rows, %s features, horizon=%sd, target=%s",
@@ -612,14 +736,25 @@ def split_dataset_chronologically(
     scaler_type: Optional[str] = "minmax",
     test_size: float = 0.2,
     val_size: float = 0.1,
+    embargo: int = 0,
 ) -> Dict[str, object]:
     """
     Chronologically split a supervised dataset into train/validation/test sets.
+
+    Parameters
+    ----------
+    embargo : int
+        Rows to purge from the end of the train and validation segments. An
+        h-day forward-return target makes consecutive rows overlap by h-1 days,
+        so without a gap the last rows of train resolve inside the validation
+        window and the reported error is optimistic. Pass the forecast horizon.
     """
     if dataset.empty:
         raise ValueError("Cannot split an empty dataset")
     if not feature_columns:
         raise ValueError("No feature columns available for splitting")
+    if embargo < 0:
+        raise ValueError("embargo must be zero or positive")
 
     data = dataset.dropna(subset=feature_columns + [target_column]).copy()
     n_rows = len(data)
@@ -644,8 +779,22 @@ def split_dataset_chronologically(
     train_end = n_rows - test_count - val_count
     val_end = n_rows - test_count
 
-    train_frame = data.iloc[:train_end].copy()
-    val_frame = data.iloc[train_end:val_end].copy()
+    # Purge the tail of each earlier segment so no training row's target window
+    # reaches into the segment it is scored against. Shrink the gap rather than
+    # fail when the dataset is too short to afford the full embargo.
+    train_gap = min(embargo, max(train_end - 1, 0))
+    val_gap = min(embargo, max(val_end - train_end - 1, 0))
+    if embargo and (train_gap < embargo or val_gap < embargo):
+        logger.warning(
+            "Embargo reduced to train_gap=%s val_gap=%s (requested %s); dataset has only %s rows",
+            train_gap,
+            val_gap,
+            embargo,
+            n_rows,
+        )
+
+    train_frame = data.iloc[: train_end - train_gap].copy()
+    val_frame = data.iloc[train_end : val_end - val_gap].copy()
     test_frame = data.iloc[val_end:].copy()
 
     if train_frame.empty or val_frame.empty or test_frame.empty:
@@ -667,10 +816,11 @@ def split_dataset_chronologically(
         X_train, X_val, X_test = X_train_raw, X_val_raw, X_test_raw
 
     logger.info(
-        "Chronological split complete: train=%s, val=%s, test=%s",
+        "Chronological split complete: train=%s, val=%s, test=%s (embargo=%s)",
         len(train_frame),
         len(val_frame),
         len(test_frame),
+        embargo,
     )
 
     return {
@@ -678,6 +828,7 @@ def split_dataset_chronologically(
         "train_frame": train_frame,
         "val_frame": val_frame,
         "test_frame": test_frame,
+        "embargo": embargo,
         "X_train": X_train,
         "X_val": X_val,
         "X_test": X_test,

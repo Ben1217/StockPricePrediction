@@ -550,6 +550,8 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
         if (t && setSelectedTicker) { setSelectedTicker(t); setSearchInput(""); }
     };
 
+    const availableBars = priceData?.bars?.length ?? 0;
+
     const chartData = useMemo(() => {
         if (!priceData?.bars || !indicatorData?.data) return [];
         const prices = priceData.bars.slice(-timeRange);
@@ -676,12 +678,27 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
 
             {/* Time range + overlay toggles */}
             <div style={{ display: "flex", gap: 6, marginBottom: 12, justifyContent: "flex-end" }}>
-                {[30, 60, 90, 120].map(d => (
-                    <button key={d} onClick={() => setTimeRange(d)} style={{
-                        background: timeRange === d ? C.amber : C.bg2, color: timeRange === d ? "#000" : C.textMid,
-                        border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11, cursor: "pointer", fontWeight: 700,
-                    }}>{d}D</button>
-                ))}
+                {[30, 60, 90, 120].map(d => {
+                    // The ranges count trading sessions. When the feed has fewer,
+                    // the button silently renders the same chart as the next one
+                    // down — so say so rather than looking inert.
+                    const short = availableBars > 0 && d > availableBars;
+                    return (
+                        <button
+                            key={d}
+                            onClick={() => setTimeRange(d)}
+                            title={short ? `Only ${availableBars} sessions available` : `Last ${d} sessions`}
+                            style={{
+                                background: timeRange === d ? C.amber : C.bg2,
+                                color: timeRange === d ? "#000" : C.textMid,
+                                border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11,
+                                cursor: "pointer", fontWeight: 700, opacity: short ? 0.5 : 1,
+                            }}
+                        >
+                            {d}D{short ? "*" : ""}
+                        </button>
+                    );
+                })}
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
                 {[

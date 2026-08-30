@@ -39,6 +39,21 @@ const SECTOR_COLORS = {
 
 const ALL_SECTORS = ["All", ...Object.keys(SECTOR_COLORS)];
 
+/**
+ * How much daily history to pull for the chart tabs.
+ *
+ * The range buttons (30/60/90/120D) slice by trading BARS, but the API takes
+ * CALENDAR days — and only ~5 of every 7 calendar days is a session. Requesting
+ * 120 calendar days returned just 83 bars, so slice(-90) and slice(-120) both
+ * yielded the same 83 rows and the 120D button appeared to do nothing.
+ *
+ * 220 calendar days is ~150 sessions, which covers the widest 120-bar view with
+ * room for holidays. Consumers slice down to what they need.
+ */
+const MAX_CHART_RANGE_BARS = 120;
+// ~5 sessions per 7 calendar days, plus an allowance for market holidays.
+const CHART_HISTORY_DAYS = Math.ceil((MAX_CHART_RANGE_BARS * 7) / 5) + 52; // 220
+
 /* ─── Helpers ────────────────────────────────────────────────── */
 function loadWatchlist() {
     const normalizeWatchlist = (list) => {
@@ -579,11 +594,11 @@ export default function App() {
 
     const pricesQuery = usePrices(selectedTicker, {
         source: dataSource,
-        days: 120,
+        days: CHART_HISTORY_DAYS,
         enabled: apiConnected,
     });
     const indicatorsQuery = useIndicators(selectedTicker, {
-        days: 120,
+        days: CHART_HISTORY_DAYS,
         enabled: apiConnected,
     });
 

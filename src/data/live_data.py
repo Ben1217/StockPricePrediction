@@ -18,6 +18,12 @@ from datetime import datetime, timedelta
 import pytz
 import yfinance as yf
 
+from src.data.alpha_vantage_provider import consume_request_slot
+from src.data.provider_errors import (
+    PremiumEndpointError,
+    classify_alpha_vantage_message,
+)
+
 logger = logging.getLogger(__name__)
 
 # US/Eastern timezone — NYSE reference
@@ -199,7 +205,14 @@ def fetch_live_quote_yfinance(symbol: str) -> dict:
 
 
 def fetch_live_quote_alpha_vantage(symbol: str) -> dict:
-    """Fetch latest price via Alpha Vantage GLOBAL_QUOTE."""
+    """
+    Fetch latest price via Alpha Vantage GLOBAL_QUOTE (free tier).
+
+    Note: on a free API key GLOBAL_QUOTE returns end-of-day data - the last
+    settled daily close and its trading date - not a live intraday price. The
+    returned timestamp is therefore the 16:00 ET close of "07. latest trading
+    day". Use source=yfinance when a true real-time price is required.
+    """
     import requests
     api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "")
     if not api_key or api_key == "your_alpha_vantage_key":
@@ -209,9 +222,20 @@ def fetch_live_quote_alpha_vantage(symbol: str) -> dict:
         f"https://www.alphavantage.co/query"
         f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
     )
+    # Shares the app-wide Alpha Vantage limiter (burst spacing + daily quota).
+    consume_request_slot()
     resp = requests.get(url, timeout=15)
     resp.raise_for_status()
-    data = resp.json().get("Global Quote", {})
+    payload = resp.json()
+    # Quota exhaustion and other API-level blocks arrive under "Information" /
+    # "Note" with no "Global Quote" key; surface the API's own message instead
+    # of reporting them as an empty response for the symbol.
+    for key in ("Error Message", "Information", "Note"):
+        if key in payload:
+            raise classify_alpha_vantage_message(
+                payload[key], endpoint="GLOBAL_QUOTE"
+            )
+    data = payload.get("Global Quote", {})
     if not data or "05. price" not in data:
         raise RuntimeError(f"Empty GLOBAL_QUOTE response for {symbol}")
 
@@ -342,47 +366,17 @@ def _extended_quote_yfinance(symbol: str, session: str) -> dict:
 
 
 def _extended_quote_alpha_vantage(symbol: str, session: str) -> dict:
-    """Alpha Vantage extended hours via TIME_SERIES_INTRADAY with extended_hours=true."""
-    import requests
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "")
-    if not api_key or api_key == "your_alpha_vantage_key":
-        raise ValueError("Alpha Vantage API key not configured")
+    """
+    Not available on a free Alpha Vantage key.
 
-    url = (
-        f"https://www.alphavantage.co/query"
-        f"?function=TIME_SERIES_INTRADAY&symbol={symbol}"
-        f"&interval=1min&outputsize=compact&extended_hours=true&apikey={api_key}"
+    Extended-hours quotes need TIME_SERIES_INTRADAY (with extended_hours=true),
+    which is a premium-only endpoint; a free key gets an "Information" block
+    back instead of data. Raise with the reason rather than a vague failure.
+    """
+    raise PremiumEndpointError(
+        f"Alpha Vantage extended-hours quotes require the TIME_SERIES_INTRADAY "
+        f"endpoint, which is premium-only and not available on a free API key "
+        f"(requested {symbol}, session={session}). Use source=yfinance for "
+        f"extended-hours data, or upgrade the Alpha Vantage plan.",
+        endpoint="TIME_SERIES_INTRADAY",
     )
-    resp = requests.get(url, timeout=15)
-    resp.raise_for_status()
-    ts = resp.json().get("Time Series (1min)", {})
-    if not ts:
-        raise RuntimeError(f"No Alpha Vantage intraday data for {symbol}")
-
-    latest_time = list(ts.keys())[0]  # first key = most recent
-    latest = ts[latest_time]
-    extended_price = float(latest["4. close"])
-
-    gq_url = (
-        f"https://www.alphavantage.co/query"
-        f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
-    )
-    gq = requests.get(gq_url, timeout=15).json().get("Global Quote", {})
-    regular_price = float(gq.get("05. price", 0)) or None
-    prev_close    = float(gq.get("08. previous close", 0)) or None
-
-    return {
-        "symbol":  symbol,
-        "session": session,
-        "market_open": session == SESSION_REGULAR,
-        "regular": {
-            "price":      round(regular_price, 4) if regular_price else None,
-            "open":       None,
-            "prev_close": round(prev_close, 4)    if prev_close   else None,
-        },
-        "pre":  {"price": None, "change": None, "change_pct": None, "time": None, "available": False},
-        "post": {"price": None, "change": None, "change_pct": None, "time": None, "available": False},
-        "low_volume_warning": False,
-        "extended_price":     round(extended_price, 4),
-        "extended_timestamp": latest_time,
-    }

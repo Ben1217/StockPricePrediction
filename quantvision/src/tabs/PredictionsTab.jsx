@@ -11,7 +11,10 @@ import {
     YAxis,
 } from "recharts";
 import { C } from "../utils/data";
-import { fetchEnsemblePrediction, fetchPredictions, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
+import { ApiError, fetchEnsemblePrediction, fetchPredictions, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
+
+/** Stop reporting progress after this long. The server-side job is unaffected. */
+const POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
 const HORIZONS = [7, 15, 30, 60];
 const MODEL_KEYS = ["xgboost", "random_forest", "lstm"];
@@ -30,6 +33,7 @@ const COLORS = {
     xgboost: "#F59E0B",
     random_forest: "#34D399",
     band: "#6366F1",
+    scenario: "#7C8AA5",
     surface: "#161B22",
     panel: "#0F1623",
 };
@@ -132,15 +136,35 @@ function buildFallbackEnsemble(models) {
             )])
             .filter(([, value]) => value !== null);
         const predicted = values.reduce((sum, [, value]) => sum + Number(value), 0) / Math.max(values.length, 1);
+        // Averaging point forecasts gives a centre but no interval. Reusing the
+        // centre as both bounds drew a zero-width band and printed the forecast
+        // price into the Upper 95% and Lower 95% cards as though it were an
+        // interval, which is why all three read the same number. Null is the
+        // honest answer: this path has no calibrated uncertainty.
+        const bounds = available.reduce(
+            (acc, [, payload]) => {
+                const p = payload.forecast_points[index];
+                acc.lower_95.push(toFiniteNumber(p?.lower_95));
+                acc.upper_95.push(toFiniteNumber(p?.upper_95));
+                acc.lower_68.push(toFiniteNumber(p?.lower_68));
+                acc.upper_68.push(toFiniteNumber(p?.upper_68));
+                return acc;
+            },
+            { lower_95: [], upper_95: [], lower_68: [], upper_68: [] },
+        );
+        const widest = (list, pick) => {
+            const finite = list.filter((v) => v !== null);
+            return finite.length ? pick(...finite) : null;
+        };
         const row = {
             date: point.date,
             ensemble: predicted,
             prediction: predicted,
             predicted,
-            lower_95: predicted,
-            upper_95: predicted,
-            lower_68: predicted,
-            upper_68: predicted,
+            lower_95: widest(bounds.lower_95, Math.min),
+            upper_95: widest(bounds.upper_95, Math.max),
+            lower_68: widest(bounds.lower_68, Math.min),
+            upper_68: widest(bounds.upper_68, Math.max),
         };
         values.forEach(([key, value]) => {
             row[key] = Number(value);
@@ -212,6 +236,11 @@ function resolveDisplayData(data, selectedModel) {
             chartModel: selectedModel,
             unavailable: payload?.status !== "ok",
             message: payload?.message || payload?.model_info?.message,
+            // The single-model route carries provenance on model_info.
+            pathType: payload?.model_info?.path_type,
+            perStepPredictions: payload?.model_info?.per_step_predictions,
+            modelOutputCount: payload?.model_info?.model_output_count,
+            scenarioPaths: payload?.scenario_paths,
         };
     }
 
@@ -235,7 +264,66 @@ function resolveDisplayData(data, selectedModel) {
         chartModel: selectedModel === "all" ? "all" : "ensemble",
         unavailable: !ensemblePayload || ensemblePayload.status !== "ok",
         message: ensemblePayload?.message,
+        pathType: ensemblePayload?.path_type,
+        perStepPredictions: ensemblePayload?.per_step_predictions,
+        modelOutputCount: ensemblePayload?.model_output_count,
+        scenarioPaths: ensemblePayload?.scenario_paths,
+        degraded: ensemblePayload?.degraded,
+        modelsAvailable: ensemblePayload?.models_available,
+        modelsUnavailable: ensemblePayload?.models_unavailable,
     };
+}
+
+/**
+ * Say where the daily points came from.
+ *
+ * In the default mode each model emits a single cumulative horizon-day return
+ * and the days in between are compounded toward it. Those points are not daily
+ * predictions, and a chart that draws them like one invites the reader to trust
+ * detail the model never produced.
+ */
+function ForecastProvenanceNote({ pathType, perStepPredictions, modelOutputCount, horizon, scenarioCount }) {
+    if (!pathType) return null;
+    // per_step_predictions is authoritative; path_type is the readable fallback.
+    const perStep = perStepPredictions ?? pathType === "recursive_per_step";
+    const interpolated = !perStep;
+    return (
+        <div
+            style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: `1px solid ${interpolated ? C.amber || "#8a6d3b" : C.border}`,
+                background: "rgba(255,255,255,0.03)",
+                color: C.sub,
+                fontSize: 12,
+                lineHeight: 1.5,
+            }}
+        >
+            <span style={{ fontWeight: 900, color: interpolated ? C.amber || "#d6a13a" : C.green }}>
+                {interpolated ? "Projected path" : "Per-step forecast"}
+            </span>
+            <span>
+                {interpolated
+                    ? `Each model produced one ${horizon}-day forecast${
+                          modelOutputCount ? ` (${modelOutputCount} model outputs total)` : ""
+                      }; the intermediate days are a compounded path to that endpoint, not daily predictions.`
+                    : `Every point is a separate model prediction${
+                          modelOutputCount ? ` (${modelOutputCount} model outputs)` : ""
+                      }. Later steps are conditioned on earlier predicted bars, so error compounds.`}
+                {scenarioCount > 0 && (
+                    <>
+                        {" "}
+                        The centre line is an average outcome and is smooth by
+                        construction — the {scenarioCount} simulated paths behind it show the
+                        day-to-day volatility any real price path would carry.
+                    </>
+                )}
+            </span>
+        </div>
+    );
 }
 
 function MetricCard({ label, value, sub, color }) {
@@ -266,12 +354,15 @@ function TrainButton({ symbol, onComplete }) {
     const pollRef = useRef(null);
 
     async function handleTrain() {
+        // A second click would otherwise leave the previous interval running forever.
+        clearInterval(pollRef.current);
         setState({ loading: true, jobId: null, message: "Starting ensemble training...", error: null });
         try {
             const result = await triggerEnsembleTraining(symbol);
             const jobId = result?.job_id;
             setState((s) => ({ ...s, jobId, message: result?.message || "Training started." }));
 
+            const startedAt = Date.now();
             pollRef.current = setInterval(async () => {
                 try {
                     const status = await getEnsembleTrainingStatus(jobId);
@@ -282,13 +373,43 @@ function TrainButton({ symbol, onComplete }) {
                     } else if (status.status === "failed") {
                         clearInterval(pollRef.current);
                         setState({ loading: false, jobId, message: null, error: status.error || "Training failed." });
+                    } else if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+                        // The job outlives this page, so this is a reporting limit, not a failure.
+                        clearInterval(pollRef.current);
+                        setState({
+                            loading: false,
+                            jobId,
+                            message: "Still training on the server. Reload later to pick up the result.",
+                            error: null,
+                        });
                     }
-                } catch {
-                    // Keep polling; transient status fetches are common while the API is busy.
+                } catch (err) {
+                    // A 4xx will repeat forever, so stop and say why. Anything else is
+                    // treated as a blip worth another poll.
+                    if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+                        clearInterval(pollRef.current);
+                        setState({
+                            loading: false,
+                            jobId,
+                            message: null,
+                            error:
+                                err.status === 429
+                                    ? "Rate limited while checking training progress. Training may still be running on the server."
+                                    : `Could not read training status (HTTP ${err.status}).`,
+                        });
+                    }
                 }
             }, 3000);
         } catch (err) {
-            setState({ loading: false, jobId: null, message: null, error: err?.message || "Training request failed." });
+            const rateLimited = err instanceof ApiError && err.status === 429;
+            setState({
+                loading: false,
+                jobId: null,
+                message: null,
+                error: rateLimited
+                    ? "Training is rate limited (10 runs per hour). Wait for the window to clear, then try again."
+                    : err?.message || "Training request failed.",
+            });
         }
     }
 
@@ -353,8 +474,8 @@ function TooltipContent({ active, payload, label }) {
     );
 }
 
-function ForecastChart({ priceData, forecastPoints, selectedModel }) {
-    const { chartData, todayDate, yDomain } = useMemo(() => {
+function ForecastChart({ priceData, forecastPoints, selectedModel, scenarioPaths, showScenarios, onToggleScenarios }) {
+    const { chartData, todayDate, yDomain, scenarioKeys } = useMemo(() => {
         const history = (priceData?.bars || []).slice(-60);
         const future = (forecastPoints || [])
             .filter((point) => point?.date)
@@ -363,10 +484,17 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
         const rows = [];
         let boundary = null;
 
+        // Monte Carlo paths, one series per scenario. Each path is [today, ...steps],
+        // so element 0 pins to the last historical bar and element i+1 to forecast
+        // point i — that alignment is what makes the fan start at today's price
+        // instead of floating free of the history.
+        const paths = showScenarios && Array.isArray(scenarioPaths) ? scenarioPaths : [];
+        const keys = paths.map((_, index) => `scenario_${index}`);
+
         history.forEach((bar, index) => {
             const isLast = index === history.length - 1;
             if (isLast) boundary = bar.date;
-            rows.push({
+            const row = {
                 date: bar.date,
                 historical: bar.close,
                 ensemble: isLast && forecastPoints.length ? bar.close : null,
@@ -379,12 +507,16 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                 lower_95: isLast && forecastPoints.length ? bar.close : null,
                 upper_68: isLast && forecastPoints.length ? bar.close : null,
                 lower_68: isLast && forecastPoints.length ? bar.close : null,
+            };
+            keys.forEach((key, pathIndex) => {
+                row[key] = isLast ? toFiniteNumber(paths[pathIndex]?.[0]) ?? bar.close : null;
             });
+            rows.push(row);
         });
 
-        future.forEach((point) => {
+        future.forEach((point, stepIndex) => {
             const prediction = firstFiniteNumber(point.prediction, point.predicted, point.ensemble);
-            rows.push({
+            const row = {
                 date: point.date,
                 historical: null,
                 ensemble: prediction,
@@ -397,13 +529,20 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                 lower_95: point.lower_95 ?? point.lower_90,
                 upper_68: point.upper_68,
                 lower_68: point.lower_68,
+            };
+            keys.forEach((key, pathIndex) => {
+                row[key] = toFiniteNumber(paths[pathIndex]?.[stepIndex + 1]);
             });
+            rows.push(row);
         });
 
         const visibleKeys = selectedModel === "all"
             ? ["historical", "ensemble", "lstm", "xgboost", "random_forest"]
             : ["historical", selectedModel];
-        const lineValues = rows.flatMap((row) => visibleKeys.map((key) => toFiniteNumber(row[key]))).filter((value) => value !== null);
+        // Scenario paths are deliberately included in the domain: clipping the fan
+        // would understate exactly the spread it exists to show.
+        const domainKeys = [...visibleKeys, ...keys];
+        const lineValues = rows.flatMap((row) => domainKeys.map((key) => toFiniteNumber(row[key]))).filter((value) => value !== null);
         const min = Math.min(...lineValues);
         const max = Math.max(...lineValues);
         const span = Number.isFinite(max - min) ? max - min : 0;
@@ -412,14 +551,15 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
             ? [Math.max(0, Number((min - pad).toFixed(2))), Number((max + pad).toFixed(2))]
             : ["auto", "auto"];
 
-        return { chartData: rows, todayDate: boundary, yDomain: domain };
-    }, [priceData, forecastPoints, selectedModel]);
+        return { chartData: rows, todayDate: boundary, yDomain: domain, scenarioKeys: keys };
+    }, [priceData, forecastPoints, selectedModel, scenarioPaths, showScenarios]);
 
     const show = (model) => selectedModel === "all" || selectedModel === model;
+    const scenarioCount = Array.isArray(scenarioPaths) ? scenarioPaths.length : 0;
 
     return (
         <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
-            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 12, color: C.textMid }}>
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 12, color: C.textMid, alignItems: "center" }}>
                 {[
                     ["historical", "Historical", null],
                     ["ensemble", "Ensemble", null],
@@ -432,6 +572,34 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                         <span>{label}</span>
                     </div>
                 ))}
+                {scenarioCount > 0 && (
+                    <button
+                        type="button"
+                        onClick={onToggleScenarios}
+                        title="Monte Carlo paths simulated by resampling this stock's own recent daily moves. They show the volatility a forecast has to live inside; the centre line is the average outcome, not a path the market is expected to trace."
+                        style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 7,
+                            marginLeft: "auto",
+                            background: "transparent",
+                            border: `1px solid ${C.border}`,
+                            borderRadius: 6,
+                            padding: "4px 9px",
+                            color: showScenarios ? C.text : C.textDim,
+                            fontSize: 12,
+                            cursor: "pointer",
+                        }}
+                    >
+                        <span style={{
+                            width: 18,
+                            height: 0,
+                            borderTop: `2px solid ${COLORS.scenario}`,
+                            opacity: showScenarios ? 0.9 : 0.3,
+                        }} />
+                        <span>{scenarioCount} simulated paths</span>
+                    </button>
+                )}
             </div>
             <ResponsiveContainer width="100%" height={366}>
                 <ComposedChart data={chartData} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
@@ -502,6 +670,25 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
                             label={{ value: "Today", position: "top", fill: C.textMid, fontSize: 11 }}
                         />
                     )}
+                    {/* Simulated paths first, so the forecast lines draw over them.
+                        `type="linear"` keeps each daily step as its own segment —
+                        monotone smoothing would round off the very step-to-step
+                        movement these paths exist to show. */}
+                    {scenarioKeys.map((key) => (
+                        <Line
+                            key={key}
+                            type="linear"
+                            dataKey={key}
+                            stroke={COLORS.scenario}
+                            strokeWidth={1}
+                            strokeOpacity={0.32}
+                            dot={false}
+                            connectNulls
+                            isAnimationActive={false}
+                            legendType="none"
+                            tooltipType="none"
+                        />
+                    ))}
                     <Line type="monotone" dataKey="historical" stroke={COLORS.historical} strokeWidth={2} dot={false} isAnimationActive={false} />
                     <Line hide={!show("lstm")} type="monotone" dataKey="lstm" stroke={COLORS.lstm} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
                     <Line hide={!show("xgboost")} type="monotone" dataKey="xgboost" stroke={COLORS.xgboost} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
@@ -514,10 +701,15 @@ function ForecastChart({ priceData, forecastPoints, selectedModel }) {
 }
 
 function WeightsPanel({ weights, consensus, signal, reliability }) {
+    // A model missing from `weights` did not contribute — it was excluded from a
+    // partial ensemble. Falling back to its nominal share showed an excluded LSTM
+    // at 40% alongside two renormalised members, so the bars summed to 140% and
+    // credited a model that never ran. Absent means zero.
+    const hasWeights = weights && Object.keys(weights).length > 0;
     const resolved = {
-        lstm: Number(weights?.lstm ?? 0.4),
-        xgboost: Number(weights?.xgboost ?? 0.35),
-        random_forest: Number(weights?.random_forest ?? 0.25),
+        lstm: Number(hasWeights ? weights.lstm ?? 0 : 0.4),
+        xgboost: Number(hasWeights ? weights.xgboost ?? 0 : 0.35),
+        random_forest: Number(hasWeights ? weights.random_forest ?? 0 : 0.25),
     };
     const signalColor = signal === "Bearish" ? C.red : signal === "Neutral" ? C.amber : C.green;
 
@@ -527,13 +719,18 @@ function WeightsPanel({ weights, consensus, signal, reliability }) {
             <div style={{ display: "grid", gap: 13 }}>
                 {["lstm", "xgboost", "random_forest"].map((key) => {
                     const pct = Math.round(resolved[key] * 100);
+                    const excluded = pct === 0;
                     return (
-                        <div key={key} style={{ display: "grid", gridTemplateColumns: "128px 1fr 44px", alignItems: "center", gap: 12 }}>
-                            <div style={{ color: C.textMid, fontSize: 12, fontWeight: 700 }}>{WEIGHT_LABELS[key]}</div>
+                        <div key={key} style={{ display: "grid", gridTemplateColumns: "128px 1fr 66px", alignItems: "center", gap: 12 }}>
+                            <div style={{ color: excluded ? C.textDim : C.textMid, fontSize: 12, fontWeight: 700 }}>
+                                {WEIGHT_LABELS[key]}
+                            </div>
                             <div style={{ height: 10, background: "#0A0F18", borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.05)" }}>
                                 <div style={{ width: `${pct}%`, height: "100%", background: COLORS[key] }} />
                             </div>
-                            <div style={{ color: C.text, fontSize: 12, fontWeight: 800, textAlign: "right" }}>{pct}%</div>
+                            <div style={{ color: excluded ? C.textDim : C.text, fontSize: 12, fontWeight: 800, textAlign: "right" }}>
+                                {excluded ? "excl." : `${pct}%`}
+                            </div>
                         </div>
                     );
                 })}
@@ -586,6 +783,7 @@ function ForecastTable({ rows, modelKey, label }) {
 export default function PredictionsTab({ selectedTicker, apiConnected, priceData }) {
     const [horizon, setHorizon] = useState(30);
     const [selectedModel, setSelectedModel] = useState("all");
+    const [showScenarios, setShowScenarios] = useState(true);
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -742,7 +940,38 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         priceData={priceData}
                         forecastPoints={(display.points || []).slice(0, horizon)}
                         selectedModel={display.chartModel}
+                        scenarioPaths={display.scenarioPaths}
+                        showScenarios={showScenarios}
+                        onToggleScenarios={() => setShowScenarios((on) => !on)}
                     />
+
+                    <ForecastProvenanceNote
+                        pathType={display.pathType}
+                        perStepPredictions={display.perStepPredictions}
+                        modelOutputCount={display.modelOutputCount}
+                        horizon={horizon}
+                        scenarioCount={showScenarios ? (display.scenarioPaths?.length ?? 0) : 0}
+                    />
+
+                    {display.degraded && display.modelsUnavailable && (
+                        <div style={{
+                            padding: "8px 12px",
+                            borderRadius: 8,
+                            border: `1px solid ${C.amber || "#8a6d3b"}`,
+                            background: "rgba(255,255,255,0.03)",
+                            color: C.sub,
+                            fontSize: 12,
+                            lineHeight: 1.5,
+                        }}>
+                            <span style={{ fontWeight: 900, color: C.amber || "#d6a13a", marginRight: 8 }}>
+                                Partial ensemble
+                            </span>
+                            Served by {(display.modelsAvailable || []).map((m) => MODEL_LABELS[m] || m).join(", ")}.{" "}
+                            {Object.entries(display.modelsUnavailable)
+                                .map(([m, why]) => `${MODEL_LABELS[m] || m} excluded — ${why}`)
+                                .join("; ")}.
+                        </div>
+                    )}
 
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14, alignItems: "start" }}>
                         <WeightsPanel

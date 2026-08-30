@@ -38,6 +38,7 @@ from src.features.feature_engineering import (
     split_dataset_chronologically,
 )
 from src.models.regression_models import REGRESSOR_FACTORIES, REGRESSOR_FILE_NAMES
+from src.models.walk_forward import walk_forward_tune
 
 from src.utils.logger import get_logger
 
@@ -47,9 +48,26 @@ REGRESSION_BUNDLES_DIR = Path("models/bundles")
 REGRESSION_METADATA_DIR = Path("models/model_metadata")
 DEFAULT_LOOKBACK_DAYS = 1825  # ~5 years
 DEFAULT_HORIZONS = [7, 15, 30, 60]
+# The 1-day step model is not a product horizon — it exists so the recursive
+# forecast mode has a bundle whose target is genuinely the next day's return.
+RECURSIVE_STEP_HORIZON = 1
+TRAINABLE_HORIZONS = [RECURSIVE_STEP_HORIZON, *DEFAULT_HORIZONS]
 DEFAULT_MODEL_TYPES = ["xgboost", "random_forest", "lstm"]
 SEQUENCE_LENGTH = 60  # LSTM lookback window
 MIN_TRAINING_ROWS = 756  # roughly 3 years of daily trading data
+
+# Chronological 70/15/15: earliest 70% trains, next 15% tunes, most recent 15%
+# is scored exactly once. A larger validation slice than the previous 10% makes
+# the walk-forward tuning below less hostage to one short window.
+DEFAULT_TEST_SIZE = 0.15
+DEFAULT_VAL_SIZE = 0.15
+
+
+# A return regressor earns its place only by beating the constant predictor that
+# always answers with the mean of the training targets. Anything at or below that
+# has learned the drift of its training window and nothing else, so the bundle is
+# stamped as failing and the predictor declines to serve it.
+MIN_SKILL_SCORE = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +134,32 @@ def _download_data(symbol: str, lookback_days: int) -> pd.DataFrame:
     return df
 
 
+def _baseline_skill(y_true: np.ndarray, y_pred: np.ndarray, train_mean: float) -> Dict[str, float]:
+    """
+    Score a model against the constant predictor that always returns `train_mean`.
+
+    skill_score is 1 - MAE(model) / MAE(constant): positive means the model adds
+    information, zero means it is indistinguishable from predicting the training
+    drift, negative means it is actively worse.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    if y_true.size == 0:
+        return {"baseline_mae": 0.0, "model_mae": 0.0, "skill_score": 0.0, "prediction_std": 0.0}
+
+    baseline_mae = float(np.mean(np.abs(y_true - train_mean)))
+    model_mae = float(np.mean(np.abs(y_true - y_pred)))
+    skill = 1.0 - model_mae / baseline_mae if baseline_mae > 0 else 0.0
+    return {
+        "baseline_mae": round(baseline_mae, 6),
+        "model_mae": round(model_mae, 6),
+        "skill_score": round(float(skill), 6),
+        # A collapsed model emits nearly the same number for every input; the
+        # spread of its predictions is the cheapest way to see that from metadata.
+        "prediction_std": round(float(np.std(y_pred)), 6),
+    }
+
+
 def _build_lstm_sequences(X_train, y_train, X_val, y_val, X_test, y_test, seq_len: int):
     """Build overlapping LSTM sequences while preserving chronological boundaries."""
     hist = max(0, seq_len - 1)
@@ -142,6 +186,55 @@ def _build_lstm_sequences(X_train, y_train, X_val, y_val, X_test, y_test, seq_le
     return X_tr_seq, y_tr_seq, X_va_seq, y_va_seq, X_te_seq, y_te_seq
 
 
+def _tune_hyperparameters(
+    *,
+    model_type: str,
+    factory,
+    split: Dict[str, Any],
+    base_params: Dict[str, Any],
+    horizon: int,
+):
+    """
+    Run walk-forward tuning over the chronological train+validation region.
+
+    The two segments are concatenated in time order so the folds can grow across
+    the boundary; the test segment is deliberately excluded so it stays a
+    genuine single-use holdout.
+    """
+    X = np.concatenate([split["X_train"], split["X_val"]], axis=0)
+    y = np.concatenate([split["y_train"], split["y_val"]], axis=0)
+
+    sequence_builder = None
+    if model_type == "lstm":
+        def sequence_builder(X_tr, y_tr, X_sc, y_sc, params):
+            seq_len = int(params.get("sequence_length", SEQUENCE_LENGTH))
+            seq_len = min(seq_len, max(10, len(X_tr) // 2))
+            hist = max(0, seq_len - 1)
+            Xtr_s, ytr_s = create_sequences(X_tr, y_tr, sequence_length=seq_len)
+            Xsc_s, ysc_s = create_sequences(
+                np.concatenate([X_tr[-hist:], X_sc], axis=0) if hist else X_sc,
+                np.concatenate([y_tr[-hist:], y_sc], axis=0) if hist else y_sc,
+                sequence_length=seq_len,
+            )
+            if len(Xtr_s) == 0 or len(Xsc_s) == 0:
+                return None
+            return Xtr_s, ytr_s, Xsc_s, ysc_s
+
+    try:
+        return walk_forward_tune(
+            model_type=model_type,
+            factory=factory,
+            X=X,
+            y=y,
+            base_params=base_params,
+            embargo=horizon,
+            sequence_builder=sequence_builder,
+        )
+    except Exception as exc:  # noqa: BLE001 - tuning must never block a retrain
+        logger.warning("Walk-forward tuning failed for %s h=%dd: %s", model_type, horizon, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Single model × horizon training
 # ---------------------------------------------------------------------------
@@ -152,10 +245,11 @@ def train_regression_bundle(
     model_type: str,
     horizon: int,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-    test_size: float = 0.2,
-    val_size: float = 0.1,
+    test_size: float = DEFAULT_TEST_SIZE,
+    val_size: float = DEFAULT_VAL_SIZE,
     params: Optional[Dict[str, Any]] = None,
     raw_df: Optional[pd.DataFrame] = None,
+    tune: bool = True,
 ) -> Dict[str, Any]:
     """
     Train one return-regression model bundle.
@@ -165,8 +259,8 @@ def train_regression_bundle(
     """
     symbol = symbol.upper()
     horizon = int(horizon)
-    if horizon not in DEFAULT_HORIZONS:
-        raise ValueError(f"Unsupported horizon {horizon}; supported horizons are {DEFAULT_HORIZONS}")
+    if horizon not in TRAINABLE_HORIZONS:
+        raise ValueError(f"Unsupported horizon {horizon}; supported horizons are {TRAINABLE_HORIZONS}")
     if model_type not in REGRESSOR_FACTORIES:
         raise ValueError(f"Unsupported model type {model_type}; supported models are {DEFAULT_MODEL_TYPES}")
 
@@ -186,6 +280,7 @@ def train_regression_bundle(
         scaler_type="standard",
         test_size=test_size,
         val_size=val_size,
+        embargo=horizon,
     )
 
     model_params = dict(params or {})
@@ -205,6 +300,26 @@ def train_regression_bundle(
         X_te, y_te = split["X_test"], split["y_test"]
 
     factory = REGRESSOR_FACTORIES[model_type]
+
+    # Hyperparameter selection by walk-forward CV over train+validation. The
+    # test segment is not visible here — it is scored exactly once, below.
+    tuning = _tune_hyperparameters(
+        model_type=model_type,
+        factory=factory,
+        split=split,
+        base_params=model_params,
+        horizon=horizon,
+    ) if tune else None
+    if tuning is not None:
+        model_params = dict(tuning.best_params)
+        if model_type == "lstm":
+            model_params["sequence_length"] = seq_len
+        logger.info(
+            "Walk-forward tuning chose %s for %s %s h=%dd (mean val %s=%.6f over %d folds)",
+            tuning.best_params, symbol, model_type, horizon, tuning.metric,
+            tuning.best_score, tuning.n_splits,
+        )
+
     model = factory(model_params if model_params else None)
     model.fit(X_tr, y_tr, X_val=X_va, y_val=y_va)
 
@@ -224,6 +339,26 @@ def train_regression_bundle(
 
     val_metrics = model.evaluate(X_va, y_va, prev_close=prev_val)
     test_metrics = model.evaluate(X_te, y_te, prev_close=prev_test)
+
+    # Skill against the constant-train-mean baseline, measured out of sample.
+    train_mean = float(np.mean(y_tr)) if len(y_tr) else 0.0
+    val_skill = _baseline_skill(y_va, model.predict(X_va), train_mean)
+    test_skill = _baseline_skill(y_te, model.predict(X_te), train_mean)
+    passes_baseline = bool(test_skill["skill_score"] > MIN_SKILL_SCORE)
+
+    if not passes_baseline:
+        logger.warning(
+            "%s %s h=%dd fails the baseline gate: skill_score=%.4f (model MAE %.4f vs "
+            "constant-baseline MAE %.4f, prediction std %.4f). The bundle is saved for "
+            "inspection but will not be served.",
+            symbol,
+            model_type,
+            horizon,
+            test_skill["skill_score"],
+            test_skill["model_mae"],
+            test_skill["baseline_mae"],
+            test_skill["prediction_std"],
+        )
 
     # Persist bundle
     bundle_dir = _regression_bundle_dir(symbol, model_type, horizon)
@@ -274,6 +409,11 @@ def train_regression_bundle(
             "validation": float(val_size),
             "test": float(test_size),
             "shuffle": False,
+            "embargo": horizon,
+            "embargo_reason": (
+                "overlapping forward-return targets; purged so no training row resolves "
+                "inside the segment it is scored against"
+            ),
         },
         "split_sizes": {
             "train": len(split["train_frame"]),
@@ -287,6 +427,15 @@ def train_regression_bundle(
             "validation": val_metrics,
             "test": test_metrics,
         },
+        "train_target_mean": round(train_mean, 6),
+        "skill": {
+            "validation": val_skill,
+            "test": test_skill,
+            "min_skill_score": MIN_SKILL_SCORE,
+            "baseline": "constant_train_target_mean",
+        },
+        "passes_baseline": passes_baseline,
+        "tuning": tuning.as_metadata() if tuning is not None else {"method": "none", "reason": "tuning disabled or dataset too short"},
         "params": model_params,
         "oob_error": getattr(model, "oob_error_", None),
         "model_path": str(model_path),
@@ -303,9 +452,10 @@ def train_regression_bundle(
     )
 
     logger.info(
-        "%s bundle saved: MAE=%.4f RMSE=%.4f error=%.2fpp DA=%.2f%%",
+        "%s bundle saved: MAE=%.4f RMSE=%.4f error=%.2fpp DA=%.2f%% skill=%.4f served=%s",
         model_type, test_metrics["mae"], test_metrics["rmse"],
         test_metrics["mape"], test_metrics["directional_accuracy"] * 100,
+        test_skill["skill_score"], passes_baseline,
     )
     return meta
 
@@ -320,13 +470,18 @@ def train_ensemble_for_symbol(
     horizons: Optional[List[int]] = None,
     model_types: Optional[List[str]] = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-    test_size: float = 0.2,
+    test_size: float = DEFAULT_TEST_SIZE,
+    val_size: float = DEFAULT_VAL_SIZE,
     params: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    tune: bool = True,
 ) -> Dict[str, Any]:
     """Train all model types × all horizons for one symbol."""
     symbol = symbol.upper()
-    horizons = horizons or DEFAULT_HORIZONS
+    # Includes the 1-day step model: without it the recursive per-step forecast
+    # has nothing to roll forward and every horizon falls back to a compounded
+    # path drawn from a single model output.
+    horizons = horizons or TRAINABLE_HORIZONS
     model_types = model_types or DEFAULT_MODEL_TYPES
 
     raw_df = _download_data(symbol, lookback_days)
@@ -344,8 +499,10 @@ def train_ensemble_for_symbol(
                     horizon=horizon,
                     lookback_days=lookback_days,
                     test_size=test_size,
+                    val_size=val_size,
                     params=(params or {}).get(model_type),
                     raw_df=raw_df,
+                    tune=tune,
                 )
                 results.append(meta)
             except Exception as exc:
@@ -376,7 +533,8 @@ def train_ensemble_batch(
     horizons: Optional[List[int]] = None,
     model_types: Optional[List[str]] = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
-    test_size: float = 0.2,
+    test_size: float = DEFAULT_TEST_SIZE,
+    val_size: float = DEFAULT_VAL_SIZE,
     params: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[Callable[[int, int, str, str], None]] = None,
 ) -> Dict[str, Any]:
@@ -394,6 +552,7 @@ def train_ensemble_batch(
                 model_types=model_types,
                 lookback_days=lookback_days,
                 test_size=test_size,
+                val_size=val_size,
                 params=params,
             )
             runs.append({"symbol": symbol, "status": "completed", "result": result})

@@ -28,8 +28,14 @@ from src.api.schemas.schemas import (
     EnsembleForecastPoint,
     SUPPORTED_FORECAST_HORIZONS,
 )
+from src.data.ohlcv_cache import cached_download
 from src.defaults import DEFAULT_INDEX_SYMBOL
-from src.models.ensemble_predictor import EnsemblePricePredictor, ensemble_bundles_available
+from src.models.ensemble_predictor import (
+    EnsemblePricePredictor,
+    ensemble_availability,
+    ensemble_bundle_status,
+    regression_bundle_status,
+)
 from src.api.schemas.schemas import BaseModel
 class TrainStatus(BaseModel):
     job_id: str
@@ -70,20 +76,36 @@ N_DISPLAY_PATHS = 12   # scenario lines sent to the frontend
 # ---------------------------------------------------------------------------
 
 def _download_prediction_data(symbol: str) -> pd.DataFrame:
-    import yfinance as yf
-
     end = pd.Timestamp.utcnow().tz_localize(None).normalize()
     start = end - pd.Timedelta(days=LOOKBACK_DAYS)
-    df = yf.download(
+
+    def _fetch() -> Optional[pd.DataFrame]:
+        import yfinance as yf
+
+        raw = yf.download(
+            symbol,
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            auto_adjust=False,
+            progress=False,
+            prepost=True,
+        )
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        return raw
+
+    # Every prediction request used to issue its own download; the disk cache
+    # collapses those into one call per symbol per TTL window. The "1d-prepost"
+    # key keeps these bars separate from the regular-hours frames training uses.
+    df = cached_download(
         symbol,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        auto_adjust=False,
-        progress=False,
-        prepost=True,
+        start.strftime("%Y-%m-%d"),
+        end.strftime("%Y-%m-%d"),
+        "1d-prepost",
+        _fetch,
     )
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    if df is None or df.empty:
+        raise HTTPException(404, f"No data for {symbol}")
     df = df.sort_index().ffill().dropna().ffill().dropna()
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
@@ -555,6 +577,10 @@ def _predict_regression_model(
         "feature_count": forecast.feature_count,
         "current_price_source": current_price_source,
         "metrics": model_result.__dict__ if model_result is not None else {},
+        "forecast_engine": forecast.forecast_engine,
+        "path_type": getattr(forecast, "path_type", "compounded_interpolation"),
+        "per_step_predictions": getattr(forecast, "per_step_predictions", False),
+        "model_output_count": getattr(forecast, "model_output_count", 0),
     }
     return PredictResponse(
         symbol=symbol,
@@ -581,6 +607,7 @@ def _predict_regression_model(
         status="ok",
         model_available=True,
         can_train=True,
+        scenario_paths=forecast.scenario_paths or None,
     )
 
 
@@ -604,22 +631,25 @@ def _predict_regression_or_unavailable(
     if response is not None:
         return response
 
+    _, status_reason = regression_bundle_status(symbol, model_type, horizon)
     logger.info(
-        "Missing or unusable regression bundle for %s %s h=%s. Client must submit training.",
+        "Unusable regression bundle for %s %s h=%s: %s. Client must submit training.",
         symbol,
         model_type,
         horizon,
+        status_reason,
     )
+    detail = status_reason or f"no usable {model_type} bundle exists"
     return _unavailable_prediction_response(
         symbol=symbol,
         model_type=model_type,
         horizon=horizon,
         current_price=current_price,
         current_price_source=current_price_source,
-        reason="missing_bundle",
+        reason="unproven_bundle" if "constant forecast" in detail else "missing_bundle",
         message=(
-            f"No usable {model_type} price bundle for {symbol} at horizon {horizon}. "
-            f"Train one via POST /api/training/train, then retry."
+            f"No forecast for {symbol} at horizon {horizon}: {detail}. "
+            f"Retrain via POST /api/predict/ensemble/train, then retry."
         ),
     )
 
@@ -866,7 +896,8 @@ def ensemble_predict(req: EnsemblePredictRequest):
 
     current_price, current_price_source = _latest_available_price(symbol, raw_df)
 
-    if not ensemble_bundles_available(symbol, horizon):
+    servable, blocked = ensemble_availability(symbol, horizon)
+    if not servable:
         return EnsemblePredictResponse(
             symbol=symbol,
             current_price=round(current_price, 2),
@@ -874,11 +905,24 @@ def ensemble_predict(req: EnsemblePredictRequest):
             horizon=horizon,
             status="unavailable",
             model_available=False,
-            message=f"No complete XGBoost + Random Forest + LSTM ensemble is trained for {symbol}.",
+            models_unavailable=blocked,
+            message=(
+                f"No ensemble forecast for {symbol} at horizon {horizon}: "
+                f"{next(iter(blocked.values()), 'no bundles are trained')}. "
+                f"Retrain via POST /api/predict/ensemble/train."
+            ),
         )
 
+    # Serve with whatever members are ready. Only the servable types are requested
+    # so a blocked bundle cannot slip in through the predictor's own loading path.
     predictor = EnsemblePricePredictor()
-    forecast = predictor.predict(symbol=symbol, horizon=horizon, raw_df=raw_df, current_price=current_price)
+    forecast = predictor.predict(
+        symbol=symbol,
+        horizon=horizon,
+        raw_df=raw_df,
+        model_types=servable,
+        current_price=current_price,
+    )
 
     if forecast is None:
         return EnsemblePredictResponse(
@@ -927,6 +971,14 @@ def ensemble_predict(req: EnsemblePredictRequest):
 
     weights_dict = {r.model_type: r.weight for r in forecast.model_predictions}
 
+    degraded_message = None
+    if blocked:
+        degraded_message = (
+            f"Partial ensemble: {', '.join(servable)} served; "
+            + "; ".join(f"{m} excluded because {why}" for m, why in blocked.items())
+            + ". Retrain via POST /api/predict/ensemble/train."
+        )
+
     return EnsemblePredictResponse(
         symbol=forecast.symbol,
         current_price=forecast.current_price,
@@ -937,6 +989,14 @@ def ensemble_predict(req: EnsemblePredictRequest):
         forecast_points=points,
         status="ok",
         model_available=True,
+        message=degraded_message,
+        models_available=servable,
+        models_unavailable=blocked,
+        degraded=bool(blocked),
+        scenario_paths=forecast.scenario_paths,
+        path_type=getattr(forecast, "path_type", "compounded_interpolation"),
+        per_step_predictions=getattr(forecast, "per_step_predictions", False),
+        model_output_count=getattr(forecast, "model_output_count", 0),
     )
 
 

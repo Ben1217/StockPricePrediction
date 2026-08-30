@@ -4,6 +4,7 @@ rebalancing, correlation, Monte Carlo simulation, sectors, alerts, drift.
 """
 
 import json
+import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 from src.api.schemas.schemas import (
     PortfolioOptimizeRequest, PortfolioOptimizeResponse, EfficientFrontierResponse
 )
+from src.data.ohlcv_cache import cached_download
 from src.portfolio.optimization import (
     optimize_portfolio, calculate_efficient_frontier, calculate_rebalancing_trades
 )
@@ -26,26 +28,75 @@ from src.portfolio.sector import get_sector_allocation
 from src.portfolio.risk_controls import check_risk_limits
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _parse_json_param(raw: Optional[str], name: str) -> Optional[dict]:
+    """
+    Parse a JSON-encoded query parameter into a dict.
+
+    A malformed value used to reach `json.loads` unguarded and escape as a 500,
+    which the browser then reported as a CORS error rather than as bad input.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(400, f"Query parameter '{name}' is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise HTTPException(400, f"Query parameter '{name}' must be a JSON object")
+    return value
+
+
 def _fetch_returns(symbols, lookback_days):
-    """Fetch historical returns for multiple symbols."""
+    """
+    Fetch aligned daily returns for `symbols`.
+
+    Downloads go through the shared OHLCV cache rather than calling yfinance
+    directly. Optimize, frontier, correlation and alerts all ask for the same
+    tickers over the same window, and a burst of identical uncached requests is
+    what earns a 429 from Yahoo. `cached_download` also retries with backoff and
+    falls back to an expired entry, so a provider hiccup degrades instead of
+    raising — an exception here is what produced the unexplained 500s.
+    """
     import yfinance as yf
+
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=lookback_days + 30)).strftime("%Y-%m-%d")
-    frames = {}
+
+    frames, failed = {}, []
     for sym in symbols:
-        df = yf.download(sym, start=start, end=end, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if not df.empty:
-            frames[sym] = df["Close"]
+        def _download(symbol=sym):
+            df = yf.download(symbol, start=start, end=end, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return df
+
+        try:
+            df = cached_download(sym, start, end, "1d", _download)
+        except Exception:  # noqa: BLE001 - provider raises many shapes
+            logger.exception("Price download failed for %s", sym)
+            df = None
+
+        if df is None or df.empty or "Close" not in df.columns:
+            failed.append(sym)
+            continue
+        frames[sym] = df["Close"]
+
     if not frames:
-        raise HTTPException(404, "No data for any of the given symbols")
+        raise HTTPException(
+            404,
+            f"No price data for {', '.join(failed) or 'the given symbols'}. "
+            "Check the tickers, or retry shortly if the data provider is rate-limiting.",
+        )
+    if failed:
+        logger.warning("Dropping symbols with no price data: %s", ", ".join(failed))
+
     prices = pd.DataFrame(frames).dropna()
     returns = prices.pct_change().dropna().tail(lookback_days)
     return returns, prices
@@ -135,10 +186,7 @@ def portfolio_metrics(
         raise HTTPException(404, "No data")
 
     # Compute portfolio returns
-    if weights:
-        w = json.loads(weights)
-    else:
-        w = {s: 1 / len(sym_list) for s in sym_list}
+    w = _parse_json_param(weights, "weights") or {s: 1 / len(sym_list) for s in sym_list}
 
     port_returns = (returns_df * pd.Series(w)).sum(axis=1)
     metrics = calculate_portfolio_metrics(port_returns)
@@ -208,7 +256,7 @@ def get_weight_drift(
     if not snapshot:
         raise HTTPException(404, "No saved weights found. Run /optimize first.")
 
-    cv = json.loads(current_values) if isinstance(current_values, str) else current_values
+    cv = _parse_json_param(current_values, "current_values") or {}
     drift = calculate_drift(
         target_weights=snapshot["weights"],
         current_values=cv,
@@ -287,7 +335,7 @@ def get_sectors(
     weights: optional JSON string, e.g. '{"AAPL": 0.4, "MSFT": 0.3, "GOOGL": 0.3}'
     """
     sym_list = [s.strip().upper() for s in symbols.split(",")]
-    w = json.loads(weights) if weights else {s: 1 / len(sym_list) for s in sym_list}
+    w = _parse_json_param(weights, "weights") or {s: 1 / len(sym_list) for s in sym_list}
     return get_sector_allocation(w)
 
 
@@ -305,7 +353,7 @@ def get_risk_alerts(
     Sharpe ratio, drawdown, correlation diversification.
     """
     sym_list = [s.strip().upper() for s in symbols.split(",")]
-    w = json.loads(weights) if weights != "{}" else {s: 1 / len(sym_list) for s in sym_list}
+    w = _parse_json_param(weights, "weights") or {s: 1 / len(sym_list) for s in sym_list}
 
     returns_df, _ = _fetch_returns(sym_list, lookback_days)
     if returns_df.empty:

@@ -27,6 +27,7 @@ from src.features.feature_engineering import (
     transform_feature_frame,
 )
 from src.models.regression_models import REGRESSOR_FACTORIES, REGRESSOR_FILE_NAMES
+from src.utils.config_loader import get_env_bool
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,6 +39,46 @@ SUPPORTED_HORIZONS = [7, 15, 30, 60]
 NEUTRAL_MIN_CHANGE_PCT = 0.5
 FIXED_ENSEMBLE_WEIGHTS = {"lstm": 0.40, "xgboost": 0.35, "random_forest": 0.25}
 HARD_GAP_LIMITS = {7: 0.08, 15: 0.12, 30: 0.20, 60: 0.30}
+
+N_SCENARIOS = 400      # Monte Carlo paths behind the percentile bands
+N_DISPLAY_PATHS = 12   # scenario lines handed to the frontend fan chart
+
+# Bundles must carry proof that they beat the constant-train-mean baseline before
+# they are served. Bundles trained before the gate existed have no such record and
+# are treated as unproven, because those are precisely the ones that returned a
+# fixed number for every input. Set QUANTVISION_ENFORCE_MODEL_SKILL=false to serve
+# them anyway while retraining.
+ENFORCE_MODEL_SKILL_ENV = "QUANTVISION_ENFORCE_MODEL_SKILL"
+
+# Which mechanism builds the days between today and the horizon.
+#
+#   auto        (default) — use the recursive path when servable 1-day step
+#                bundles exist, otherwise compound. This is the useful default:
+#                per-step inference is strictly more informative when it is
+#                available, and falling back is not an error worth configuring
+#                around.
+#   compounded  — each model emits one cumulative horizon-day return and the path
+#                compounds toward it. Honest for that target, but every
+#                intermediate day is interpolation, which is what draws the
+#                forecast as a straight line.
+#   recursive   — roll the model forward one step at a time, rebuilding features
+#                from a synthetic bar each step, so every day is a real model
+#                output. Requires a bundle whose target is the 1-day return;
+#                against a horizon-day bundle each step would re-predict the
+#                whole horizon, so the mode refuses to run and falls back.
+FORECAST_MODE_ENV = "QUANTVISION_FORECAST_MODE"
+FORECAST_MODE_COMPOUNDED = "compounded"
+FORECAST_MODE_RECURSIVE = "recursive"
+FORECAST_MODE_AUTO = "auto"
+FORECAST_MODES = (FORECAST_MODE_AUTO, FORECAST_MODE_COMPOUNDED, FORECAST_MODE_RECURSIVE)
+
+
+def forecast_mode() -> str:
+    """Resolve the configured forecast path mode."""
+    import os
+
+    mode = str(os.getenv(FORECAST_MODE_ENV, FORECAST_MODE_AUTO)).strip().lower()
+    return mode if mode in FORECAST_MODES else FORECAST_MODE_AUTO
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +117,17 @@ class EnsembleForecast:
     validation_error_pct: Optional[float] = None
     prediction_spread_pct: Optional[float] = None
     confidence_interval: Optional[Dict[str, float]] = None
+    scenario_paths: List[List[float]] = field(default_factory=list)
+    forecast_engine: str = "compounded_median_with_bootstrap_monte_carlo"
+    # How the daily points were produced. The bundles are trained on a single
+    # cumulative horizon-day return, so in "compounded" mode each model emits
+    # exactly one number and the intermediate days are a compounded path to it,
+    # not per-step inference. Stating that here keeps the chart from implying a
+    # daily forecast the models never made.
+    path_type: str = "compounded_interpolation"
+    per_step_predictions: bool = False
+    model_output_count: int = 0
+    points_per_model_output: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +150,39 @@ def _metadata_is_return_regression(meta: Dict) -> bool:
     )
 
 
+def skill_enforcement_enabled() -> bool:
+    """Whether bundles must prove out-of-sample skill before being served."""
+    return get_env_bool(ENFORCE_MODEL_SKILL_ENV, True)
+
+
+def bundle_skill_failure(meta: Dict) -> Optional[str]:
+    """
+    Return why a bundle must not be served, or None when it is fit to serve.
+
+    A bundle qualifies by recording `passes_baseline: true`, which training sets
+    when the model's out-of-sample MAE beats the constant-train-mean predictor.
+    """
+    if not skill_enforcement_enabled():
+        return None
+
+    if "passes_baseline" not in meta:
+        return (
+            "was trained before out-of-sample skill was recorded, so there is no "
+            "evidence it beats a constant forecast"
+        )
+
+    if not meta.get("passes_baseline"):
+        test_skill = (meta.get("skill") or {}).get("test") or {}
+        score = test_skill.get("skill_score")
+        spread = test_skill.get("prediction_std")
+        detail = f"skill score {score:+.4f}" if isinstance(score, (int, float)) else "no skill"
+        if isinstance(spread, (int, float)):
+            detail += f", prediction spread {spread:.4f}"
+        return f"does not beat a constant forecast ({detail})"
+
+    return None
+
+
 def _load_regression_bundle(symbol: str, model_type: str, horizon: int) -> Optional[Dict]:
     """Load a single regression bundle. Returns dict with model, scaler, meta, feature_cols."""
     bdir = _bundle_dir(symbol, model_type, horizon)
@@ -116,6 +201,18 @@ def _load_regression_bundle(symbol: str, model_type: str, horizon: int) -> Optio
                 model_type,
                 horizon,
                 meta_path,
+            )
+            return None
+        skill_failure = bundle_skill_failure(meta)
+        if skill_failure:
+            logger.warning(
+                "Refusing to serve %s %s h=%d: the bundle %s. Retrain via "
+                "POST /api/predict/ensemble/train, or set %s=false to serve it anyway.",
+                symbol,
+                model_type,
+                horizon,
+                skill_failure,
+                ENFORCE_MODEL_SKILL_ENV,
             )
             return None
         factory = REGRESSOR_FACTORIES[model_type]
@@ -418,6 +515,165 @@ def _spec_reliability_score(
     return signal, "Low", consensus_base + " (High variance / volatility warning)", spread_pct, avg_error_pct
 
 
+def _compound_path(current_price: float, total_return: float, horizon: int) -> np.ndarray:
+    """
+    The median price path implied by a terminal return, compounded per step.
+
+    The bundles predict one cumulative `horizon`-day return, so the only honest
+    reading of the days in between is constant compounding toward that endpoint:
+    price(t) = current * (1 + total_return) ** (t / horizon). This is the median
+    of the simulated distribution below, and it lands exactly on the headline
+    number at t = horizon. It is smooth, as a conditional expectation should be,
+    but it is a curve rather than a straight ramp because growth compounds.
+    """
+    steps = np.arange(1, horizon + 1, dtype=np.float64)
+    total_log_return = np.log1p(max(float(total_return), -0.999999))
+    return float(current_price) * np.exp(total_log_return * steps / float(horizon))
+
+
+def _bundle_step_horizon(bundle: Dict) -> int:
+    """The horizon a bundle's target actually spans, in trading days."""
+    meta = bundle.get("meta", {})
+    target_col = str(meta.get("target_col") or "")
+    if target_col.startswith("target_return_") and target_col.endswith("d"):
+        try:
+            return int(target_col[len("target_return_"):-1])
+        except ValueError:
+            pass
+    try:
+        return int(meta.get("horizon") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+RECURSIVE_STEP_HORIZON = 1
+
+
+def load_step_bundles(symbol: str, model_types: List[str]) -> Dict[str, Dict]:
+    """
+    Load the 1-day-return bundles that recursive mode rolls forward.
+
+    Recursive mode cannot use the requested-horizon bundles: a 30-day-return
+    model stepped forward 30 times would apply the same 30-day forecast at every
+    step. It needs models whose target *is* the next day, which live under
+    horizon 1 in the same bundle tree.
+    """
+    bundles: Dict[str, Dict] = {}
+    for mtype in model_types:
+        bundle = _load_regression_bundle(symbol, mtype, RECURSIVE_STEP_HORIZON)
+        if bundle is not None:
+            bundles[mtype] = bundle
+    return bundles
+
+
+def recursive_path_supported(bundles: Dict[str, Dict]) -> Tuple[bool, Optional[str]]:
+    """
+    Whether per-step recursive inference is meaningful for these bundles.
+
+    Rolling a model forward day by day only produces a daily forecast if the
+    model's target *is* the next-day return. A 30-day-return bundle asked for 30
+    steps would predict the next 30 days at every step and compound that 30
+    times, which is not a per-step forecast — it is the same number applied
+    repeatedly. So the mode is gated on the trained target.
+    """
+    offenders = {
+        mtype: _bundle_step_horizon(bundle)
+        for mtype, bundle in bundles.items()
+        if _bundle_step_horizon(bundle) != 1
+    }
+    if offenders:
+        detail = ", ".join(f"{m} targets a {h}d return" for m, h in offenders.items())
+        return False, (
+            f"recursive mode needs bundles trained on the 1-day return, but {detail}. "
+            "Retrain with horizon=1 to enable per-step inference."
+        )
+    return True, None
+
+
+def _bootstrap_shock_pool(raw_df: pd.DataFrame, lookback: int = 504) -> np.ndarray:
+    """Demeaned recent daily log returns, used as the sampling pool for path noise."""
+    source = raw_df["Adj Close"] if "Adj Close" in raw_df.columns else raw_df["Close"]
+    log_returns = np.log(pd.to_numeric(source, errors="coerce")).diff().dropna()
+    log_returns = log_returns.replace([np.inf, -np.inf], np.nan).dropna()
+    pool = log_returns.tail(lookback).to_numpy(dtype=np.float64)
+    if pool.size < 20:
+        return np.zeros(0, dtype=np.float64)
+    # The drift is supplied by the model; the pool contributes shape only.
+    return pool - pool.mean()
+
+
+def _simulate_price_paths(
+    *,
+    current_price: float,
+    total_return: float,
+    horizon: int,
+    shock_pool: np.ndarray,
+    terminal_sigma: float,
+    n_scenarios: int,
+    seed: int,
+    block_size: int = 5,
+) -> np.ndarray:
+    """
+    Simulate `n_scenarios` price paths of length `horizon`.
+
+    Shocks are drawn as contiguous blocks from the asset's own recent log returns
+    rather than from a normal distribution, which keeps the fat tails and the
+    volatility clustering that make a real price series look the way it does.
+    The whole shock matrix is then rescaled so the spread of terminal outcomes
+    matches `terminal_sigma`, the uncertainty the model and the market jointly
+    justify.
+
+    Returns an array of shape (n_scenarios, horizon).
+    """
+    rng = np.random.default_rng(seed)
+    total_log_return = np.log1p(max(float(total_return), -0.999999))
+    drift = np.full(horizon, total_log_return / float(horizon), dtype=np.float64)
+
+    if shock_pool.size >= block_size * 2:
+        n_blocks = int(np.ceil(horizon / block_size))
+        starts = rng.integers(0, max(shock_pool.size - block_size, 1), size=(n_scenarios, n_blocks))
+        offsets = np.arange(block_size)
+        # (scenarios, blocks, block_size) -> flatten to (scenarios, blocks*block_size)
+        indices = (starts[:, :, None] + offsets[None, None, :]) % shock_pool.size
+        shocks = shock_pool[indices].reshape(n_scenarios, -1)[:, :horizon]
+    else:
+        # No usable history to resample: fall back to Gaussian steps. The bands stay
+        # honest and still grow with sqrt(t); only the fat tails and the volatility
+        # clustering are lost.
+        shocks = rng.standard_normal((n_scenarios, horizon))
+
+    # Match the simulated terminal spread to the target uncertainty.
+    realised_sigma = float(np.std(shocks.sum(axis=1)))
+    if realised_sigma > 1e-12:
+        shocks = shocks * (terminal_sigma / realised_sigma)
+    else:
+        shocks = np.zeros((n_scenarios, horizon), dtype=np.float64)
+
+    log_paths = np.log(float(current_price)) + np.cumsum(drift + shocks, axis=1)
+    return np.exp(log_paths)
+
+
+def _terminal_sigma(
+    *,
+    horizon: int,
+    model_rmse_return: float,
+    recent_volatility: float,
+    spread_pct: float,
+) -> float:
+    """
+    Width of the terminal forecast distribution, in log-return units.
+
+    Three quantities have a claim on it and the widest wins: the model's own
+    out-of-sample error, the diffusion the market produces on its own over the
+    horizon, and the disagreement between the ensemble members. A band narrower
+    than any of these would assert precision nobody has.
+    """
+    sigma_model = float(np.log1p(max(model_rmse_return, 0.0)))
+    sigma_market = max(float(recent_volatility), 0.0) * np.sqrt(max(int(horizon), 1))
+    sigma_spread = max(float(spread_pct), 0.0) / 100.0 / 2.0
+    return max(sigma_model, sigma_market, sigma_spread, 1e-4)
+
+
 def _build_forecast_points(
     predicted_price: float,
     current_price: float,
@@ -428,35 +684,155 @@ def _build_forecast_points(
     spread_pct: float,
     recent_volatility: float,
     raw_predictions: Dict[str, float],
-) -> List[Dict]:
-    """Generate interpolated daily forecast points with uncertainty bands."""
+    raw_df: Optional[pd.DataFrame] = None,
+    seed: int = 0,
+    n_scenarios: int = N_SCENARIOS,
+    model_paths_override: Optional[Dict[str, np.ndarray]] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> Tuple[List[Dict], List[List[float]]]:
+    """
+    Build the daily forecast timeline and the scenario paths behind it.
+
+    The reported `predicted` series is the compounded median path, so it agrees
+    exactly with the headline endpoint. The bands come from Monte Carlo
+    percentiles, applied as offsets around that median so the interval can never
+    invert and so the centre line carries no simulation noise.
+
+    Returns (points, scenario_paths).
+    """
     future_dates = list(pd.bdate_range(start=last_date, periods=horizon + 1)[1:])
-    points = []
-    daily_vol = max(float(recent_volatility), 0.0)
+    total_return = (float(predicted_price) - float(current_price)) / max(float(current_price), 1e-6)
+
+    if model_paths_override:
+        # Recursive mode: the centre line is the weighted blend of genuine
+        # per-step model paths, so it carries the models' own step-to-step
+        # shape instead of a smooth compounded curve.
+        stacked = np.vstack([model_paths_override[m] for m in model_paths_override])
+        w = np.array([(weights or {}).get(m, 1.0) for m in model_paths_override], dtype=np.float64)
+        w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
+        median_path = (stacked * w[:, None]).sum(axis=0)
+    else:
+        median_path = _compound_path(current_price, total_return, horizon)
+
+    model_rmse_return = max(float(weighted_rmse), 0.0) / max(float(current_price), 1e-6)
+    terminal_sigma = _terminal_sigma(
+        horizon=horizon,
+        model_rmse_return=model_rmse_return,
+        recent_volatility=recent_volatility,
+        spread_pct=spread_pct,
+    )
+    shock_pool = _bootstrap_shock_pool(raw_df) if raw_df is not None else np.zeros(0)
+    paths = _simulate_price_paths(
+        current_price=current_price,
+        total_return=total_return,
+        horizon=horizon,
+        shock_pool=shock_pool,
+        terminal_sigma=terminal_sigma,
+        n_scenarios=n_scenarios,
+        seed=seed,
+    )
+
+    # Two-sided 95% and 68% intervals.
+    p2_5, p16, p50, p84, p97_5 = np.percentile(paths, [2.5, 16.0, 50.0, 84.0, 97.5], axis=0)
+
+    model_paths = model_paths_override or {
+        model: _compound_path(
+            current_price,
+            (float(price) - float(current_price)) / max(float(current_price), 1e-6),
+            horizon,
+        )
+        for model, price in raw_predictions.items()
+    }
+
+    points: List[Dict] = []
     for i, dt in enumerate(future_dates):
-        frac = (i + 1) / horizon
-        p = current_price + (predicted_price - current_price) * frac
-        validation_band = p * (max(avg_mape, 0.1) / 100.0) * np.sqrt(frac)
-        rmse_band = max(weighted_rmse, 0.0) * np.sqrt(frac)
-        spread_band = current_price * (max(spread_pct, 0.0) / 100.0) * 0.50 * frac
-        volatility_band = p * daily_vol * np.sqrt(i + 1) * 0.50
-        band = validation_band + 0.50 * rmse_band + spread_band + volatility_band
-        band68 = band / 1.96
+        centre = float(median_path[i])
+        lower_95 = max(centre + float(p2_5[i] - p50[i]), 0.01)
+        upper_95 = centre + float(p97_5[i] - p50[i])
+        lower_68 = max(centre + float(p16[i] - p50[i]), 0.01)
+        upper_68 = centre + float(p84[i] - p50[i])
         point = {
             "date": str(dt.date()),
-            "predicted": round(float(p), 2),
-            "lower": round(float(max(p - band, 0.0)), 2),
-            "upper": round(float(p + band), 2),
-            "lower_95": round(float(max(p - band, 0.0)), 2),
-            "upper_95": round(float(p + band), 2),
-            "lower_68": round(float(max(p - band68, 0.0)), 2),
-            "upper_68": round(float(p + band68), 2),
+            "predicted": round(centre, 2),
+            "lower": round(lower_95, 2),
+            "upper": round(upper_95, 2),
+            "lower_95": round(lower_95, 2),
+            "upper_95": round(upper_95, 2),
+            "lower_68": round(lower_68, 2),
+            "upper_68": round(upper_68, 2),
         }
-        for m, m_pred in raw_predictions.items():
-            m_p = current_price + (m_pred - current_price) * frac
-            point[m] = round(float(m_p), 2)
+        for model, path in model_paths.items():
+            point[model] = round(float(path[i]), 2)
         points.append(point)
-    return points
+
+    display_indices = np.linspace(0, n_scenarios - 1, min(N_DISPLAY_PATHS, n_scenarios), dtype=int)
+    scenario_paths = [
+        [round(float(current_price), 2)] + [round(float(v), 2) for v in paths[idx]]
+        for idx in display_indices
+    ]
+    return points, scenario_paths
+
+
+def _synthetic_next_bar(history: pd.DataFrame, next_date: pd.Timestamp, close: float) -> pd.DataFrame:
+    """A plausible OHLCV bar for a predicted close, to feed the next feature build."""
+    last_close = float(history["Close"].iloc[-1])
+    rng = ((history["High"] - history["Low"]) / history["Close"]).replace(
+        [np.inf, -np.inf], np.nan).dropna().tail(20)
+    band = float(np.clip(rng.median() if not rng.empty else 0.015, 0.002, 0.08))
+    volume = history["Volume"].replace(0, np.nan).dropna().tail(20)
+    row = {
+        "Open": [last_close],
+        "High": [max(last_close, close) * (1 + band / 2)],
+        "Low": [min(last_close, close) * (1 - band / 2)],
+        "Close": [close],
+        "Volume": [int(volume.median()) if not volume.empty else 0],
+    }
+    if "Adj Close" in history.columns:
+        row["Adj Close"] = [close]
+    return pd.DataFrame(row, index=pd.DatetimeIndex([pd.Timestamp(next_date)]))
+
+
+def recursive_model_path(
+    bundle: Dict,
+    model_type: str,
+    raw_df: pd.DataFrame,
+    horizon: int,
+    current_price: float,
+    feature_config: Dict,
+) -> Optional[np.ndarray]:
+    """
+    Roll a 1-day-return bundle forward `horizon` steps, one real inference each.
+
+    Unlike the compounded path this calls the model `horizon` times and returns
+    `horizon` genuine outputs. The cost is that step t is conditioned on t-1
+    synthetic bars, so the further out it goes the more it is forecasting its own
+    output rather than the market. Returns None if any step fails.
+    """
+    history = raw_df.copy()
+    dates = list(pd.bdate_range(start=raw_df.index[-1], periods=horizon + 1)[1:])
+    price = float(current_price)
+    path: List[float] = []
+
+    for step, next_date in enumerate(dates, start=1):
+        try:
+            frame = build_regression_feature_frame(history, feature_config=feature_config)
+            inference = _run_inference(bundle, frame, model_type)
+            if inference is None:
+                logger.warning("Recursive step %d/%d returned no inference for %s", step, horizon, model_type)
+                return None
+            step_return, _ = inference
+            price = price * (1.0 + float(step_return))
+            path.append(price)
+            history = pd.concat([history, _synthetic_next_bar(history, next_date, price)])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Recursive step %d/%d failed for %s: %s", step, horizon, model_type, exc)
+            return None
+
+    logger.info(
+        "RECURSIVE path for %s: %d model calls -> %d genuine per-step outputs "
+        "(first=%.4f last=%.4f)", model_type, horizon, len(path), path[0], path[-1],
+    )
+    return np.asarray(path, dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -519,9 +895,87 @@ class EnsemblePricePredictor:
         if not raw_predictions:
             return None
 
+        # Diagnostic: state plainly how many numbers actually came out of the
+        # models versus how many points the chart will draw. One output per
+        # model is correct for a cumulative-return target — it is the chart that
+        # must not pretend otherwise.
+        logger.info(
+            "RAW MODEL OUTPUTS for %s h=%dd: %d model call(s), one cumulative "
+            "%dd return each -> %s | ensemble path will contain %d points, "
+            "%d of which are model outputs and %d interpolated",
+            symbol, horizon, len(model_returns), horizon,
+            {m: round(r, 6) for m, r in model_returns.items()},
+            horizon, 1, horizon - 1,
+        )
+
         # 4. Fixed ensemble weights from the spec
         active_bundles = {m: bundles[m] for m in raw_predictions}
         weights = _compute_weights(active_bundles, current_price)
+
+        # 4b. Resolve the path mode. Recursive is gated on the trained target,
+        # so an unsupported request degrades to the compounded path with a
+        # warning rather than silently producing a meaningless daily series.
+        resolved_path_type = "compounded_interpolation"
+        recursive_paths: Dict[str, np.ndarray] = {}
+        mode = forecast_mode()
+        # In auto mode a missing step bundle is the expected path, not a
+        # misconfiguration, so it is logged at info. An explicit recursive request
+        # that cannot be honoured stays a warning.
+        fallback_log = logger.warning if mode == FORECAST_MODE_RECURSIVE else logger.info
+        if mode in (FORECAST_MODE_RECURSIVE, FORECAST_MODE_AUTO):
+            step_bundles = load_step_bundles(symbol, list(active_bundles))
+            if not step_bundles:
+                fallback_log(
+                    "%s=%s for %s h=%dd but no servable horizon-%d step "
+                    "bundles exist. Train them first. Falling back to the compounded path.",
+                    FORECAST_MODE_ENV, mode, symbol, horizon,
+                    RECURSIVE_STEP_HORIZON,
+                )
+            else:
+                supported, why_not = recursive_path_supported(step_bundles)
+                if not supported:
+                    fallback_log(
+                        "%s=%s for %s h=%dd but %s Falling back to the compounded path.",
+                        FORECAST_MODE_ENV, mode, symbol, horizon, why_not,
+                    )
+                else:
+                    step_config = normalize_feature_config(
+                        next(iter(step_bundles.values()))["meta"].get("feature_config")
+                    )
+                    for mtype, bundle in step_bundles.items():
+                        path = recursive_model_path(
+                            bundle, mtype, raw_df, horizon, current_price, step_config
+                        )
+                        if path is not None:
+                            recursive_paths[mtype] = path
+                    if recursive_paths:
+                        resolved_path_type = "recursive_per_step"
+                        # The endpoint now comes from the rolled-forward path itself,
+                        # so the headline agrees with the line the chart draws.
+                        for mtype, path in recursive_paths.items():
+                            raw_predictions[mtype] = float(path[-1])
+                            model_returns[mtype] = float(path[-1]) / max(current_price, 1e-6) - 1.0
+                        active_bundles = {m: step_bundles[m] for m in recursive_paths}
+                        weights = _compute_weights(active_bundles, current_price)
+                    else:
+                        fallback_log(
+                            "Recursive mode produced no usable path for %s h=%dd; "
+                            "falling back to the compounded path.", symbol, horizon,
+                        )
+
+        # Final composition of the series the client will receive.
+        if resolved_path_type == "recursive_per_step":
+            logger.info(
+                "FORECAST PATH for %s h=%dd: recursive_per_step — %d points, all %d "
+                "from model inference (%d calls per model across %d model(s))",
+                symbol, horizon, horizon, horizon, horizon, len(recursive_paths),
+            )
+        else:
+            logger.info(
+                "FORECAST PATH for %s h=%dd: compounded_interpolation — %d points from "
+                "1 model output per model; %d points are interpolated, not predicted",
+                symbol, horizon, horizon, horizon - 1,
+            )
 
         # 5. Weighted ensemble return, then convert to price
         ensemble_return = sum(model_returns[m] * weights.get(m, 0.0) for m in model_returns)
@@ -577,8 +1031,9 @@ class EnsemblePricePredictor:
         )
         weighted_rmse = current_price * weighted_rmse_return
 
-        # 9. Forecast timeline
-        forecast_points = _build_forecast_points(
+        # 9. Forecast timeline. The seed is derived from the symbol and horizon so a
+        # chart is reproducible across refreshes but different names differ.
+        forecast_points, scenario_paths = _build_forecast_points(
             ensemble_pred,
             current_price,
             horizon,
@@ -588,6 +1043,10 @@ class EnsemblePricePredictor:
             spread_pct,
             recent_vol,
             raw_predictions,
+            raw_df=raw_df,
+            seed=abs(hash((symbol, horizon))) % (2**32),
+            model_paths_override=recursive_paths or None,
+            weights=weights,
         )
         final_interval = forecast_points[-1] if forecast_points else None
         confidence_width_pct = (
@@ -642,21 +1101,87 @@ class EnsemblePricePredictor:
             validation_error_pct=round(float(avg_mape), 2),
             prediction_spread_pct=round(float(spread_pct), 2),
             confidence_interval=confidence_interval,
+            scenario_paths=scenario_paths,
+            path_type=resolved_path_type,
+            per_step_predictions=resolved_path_type == "recursive_per_step",
+            model_output_count=(
+                len(model_returns) * horizon
+                if resolved_path_type == "recursive_per_step"
+                else len(model_returns)
+            ),
+            points_per_model_output=(
+                1.0 if resolved_path_type == "recursive_per_step" else float(horizon)
+            ),
         )
 
 
-def ensemble_bundles_available(symbol: str, horizon: int) -> bool:
-    """Return True when the complete three-model regression ensemble exists."""
+def regression_bundle_status(symbol: str, model_type: str, horizon: int) -> Tuple[bool, Optional[str]]:
+    """
+    Report whether one bundle is servable, and why not if it isn't.
+
+    The reason is worded to be shown to a user, since it tells them what to do.
+    """
+    canonical = _bundle_dir(symbol, model_type, horizon) / "metadata.json"
+    legacy = _legacy_price_regression_bundle_dir(symbol, model_type, horizon) / "metadata.json"
+    meta_path = canonical if canonical.exists() else legacy if legacy.exists() else None
+    if meta_path is None:
+        return False, f"no {model_type} bundle is trained for {symbol.upper()} at horizon {horizon}"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except Exception as exc:
+        return False, f"the {model_type} bundle metadata could not be read ({exc})"
+    if not _metadata_is_return_regression(meta):
+        return False, f"the {model_type} bundle predicts prices rather than returns and must be retrained"
+    skill_failure = bundle_skill_failure(meta)
+    if skill_failure:
+        return False, f"the {model_type} bundle {skill_failure}"
+    return True, None
+
+
+def ensemble_availability(symbol: str, horizon: int) -> Tuple[List[str], Dict[str, str]]:
+    """
+    Split the ensemble members into those that can be served and those that cannot.
+
+    Returns (servable_model_types, {model_type: reason_it_cannot_be_served}).
+    """
+    servable: List[str] = []
+    blocked: Dict[str, str] = {}
     for mtype in MODEL_TYPES:
-        canonical = _bundle_dir(symbol, mtype, horizon) / "metadata.json"
-        legacy = _legacy_price_regression_bundle_dir(symbol, mtype, horizon) / "metadata.json"
-        meta_path = canonical if canonical.exists() else legacy if legacy.exists() else None
-        if meta_path is None:
-            return False
-        try:
-            meta = json.loads(meta_path.read_text())
-        except Exception:
-            return False
-        if not _metadata_is_return_regression(meta):
-            return False
-    return True
+        available, reason = regression_bundle_status(symbol, mtype, horizon)
+        if available:
+            servable.append(mtype)
+        else:
+            blocked[mtype] = reason or "unavailable"
+    return servable, blocked
+
+
+def ensemble_bundle_status(symbol: str, horizon: int) -> Tuple[bool, Optional[str]]:
+    """
+    Report whether an ensemble forecast can be served, and why not if it cannot.
+
+    A three-member ensemble that refuses to answer because one member is
+    unservable is the wrong trade: the remaining models still carry a forecast,
+    and the honest response is that forecast plus a note about what is missing.
+    Requiring all three made every horizon for a symbol go dark whenever a single
+    bundle failed the skill gate, which is what put "Prediction model unavailable"
+    on a tab whose other two models were ready to serve.
+
+    So availability means "at least one member is servable". The reason string is
+    still populated when members are missing, so callers can degrade reliability
+    and tell the user which models are absent.
+    """
+    servable, blocked = ensemble_availability(symbol, horizon)
+    if not servable:
+        # Nothing to serve — report the first reason, which is the actionable one.
+        first = next(iter(blocked.values()), None) if blocked else None
+        return False, first or f"no bundles are trained for {symbol.upper()} at horizon {horizon}"
+    if blocked:
+        detail = "; ".join(f"{m} excluded because {why}" for m, why in blocked.items())
+        return True, f"partial ensemble ({len(servable)} of {len(MODEL_TYPES)} models): {detail}"
+    return True, None
+
+
+def ensemble_bundles_available(symbol: str, horizon: int) -> bool:
+    """Return True when the complete three-model regression ensemble is servable."""
+    available, _ = ensemble_bundle_status(symbol, horizon)
+    return available

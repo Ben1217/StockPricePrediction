@@ -12,6 +12,13 @@ from src.defaults import DEFAULT_INDEX_SYMBOL
 
 SUPPORTED_FORECAST_HORIZONS = [7, 15, 30, 60]
 
+# The 1-day model is not a horizon the UI offers — it is the step model the
+# recursive forecast rolls forward to produce a genuine prediction for every day.
+# It has to be trainable through the API or per-step forecasting can never be
+# switched on: the tab's train button is the only way bundles ever get built.
+STEP_FORECAST_HORIZON = 1
+TRAINABLE_HORIZONS = [STEP_FORECAST_HORIZON, *SUPPORTED_FORECAST_HORIZONS]
+
 
 # ── Enums ──────────────────────────────────────────────────────
 class DataSourceEnum(str, Enum):
@@ -217,7 +224,10 @@ class EnsemblePredictRequest(BaseModel):
 
 class EnsembleTrainRequest(BaseModel):
     symbol: str = Field(default=DEFAULT_INDEX_SYMBOL)
-    horizons: List[int] = Field(default_factory=lambda: SUPPORTED_FORECAST_HORIZONS.copy())
+    # Defaults to every trainable horizon, step model included. Training only the
+    # four display horizons leaves the per-step forecast permanently unavailable,
+    # because the 1-day bundles it rolls forward would never be built.
+    horizons: List[int] = Field(default_factory=lambda: TRAINABLE_HORIZONS.copy())
     lookback_days: int = Field(default=1825, ge=365, le=3650)
     model_types: List[str] = Field(default_factory=lambda: ["xgboost", "random_forest", "lstm"])
 
@@ -225,11 +235,13 @@ class EnsembleTrainRequest(BaseModel):
     @classmethod
     def validate_supported_horizons(cls, value: List[int]) -> List[int]:
         requested = sorted({int(item) for item in value})
-        unsupported = [item for item in requested if item not in SUPPORTED_FORECAST_HORIZONS]
+        unsupported = [item for item in requested if item not in TRAINABLE_HORIZONS]
         if unsupported:
             raise ValueError(
                 f"Unsupported forecast horizon(s): {unsupported}. "
-                f"Supported horizons are {SUPPORTED_FORECAST_HORIZONS}."
+                f"Trainable horizons are {TRAINABLE_HORIZONS} "
+                f"(forecast horizons {SUPPORTED_FORECAST_HORIZONS} plus the "
+                f"{STEP_FORECAST_HORIZON}-day step model used for per-step forecasts)."
             )
         return requested
 
@@ -296,6 +308,23 @@ class EnsemblePredictResponse(BaseModel):
     status: str = Field(default="ok")
     model_available: bool = Field(default=True)
     message: Optional[str] = None
+    scenario_paths: List[List[float]] = Field(default_factory=list)  # fan-chart sample paths
+
+    # Provenance of the daily points. In "compounded_interpolation" mode each
+    # model contributes one cumulative horizon-day return and the days between
+    # are a compounded path to it — so `forecast_points` is one prediction plus
+    # interpolation, not a per-day forecast. Consumers should not present the
+    # intermediate points as independent daily predictions.
+    path_type: str = Field(default="compounded_interpolation")
+    per_step_predictions: bool = Field(default=False)
+    model_output_count: int = Field(default=0)
+
+    # Which ensemble members actually contributed. A forecast built from two of
+    # three models is still a forecast, but the client has to be able to say so
+    # rather than presenting it as the full ensemble.
+    models_available: List[str] = Field(default_factory=list)
+    models_unavailable: Dict[str, str] = Field(default_factory=dict)
+    degraded: bool = Field(default=False)
 
 
 # ── Pattern Detection Schemas ──────────────────────────────────

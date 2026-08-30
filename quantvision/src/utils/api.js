@@ -9,10 +9,27 @@ import { DEFAULT_INDEX_SYMBOL } from "./data";
 export const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? "http://localhost:8000";
 const API_BASE = `${API_ORIGIN}/api`;
 
+/**
+ * FastAPI reports errors as {"detail": "..."}. Pull that out so panels render the
+ * server's explanation instead of a raw JSON envelope; `body` keeps the original.
+ */
+function errorDetail(body) {
+    if (!body) return "";
+    try {
+        const detail = JSON.parse(body)?.detail;
+        if (typeof detail === "string") return detail;
+        // Pydantic validation errors arrive as [{loc, msg, type}, ...].
+        if (Array.isArray(detail)) return detail.map(d => d?.msg || JSON.stringify(d)).join("; ");
+    } catch {
+        // Not JSON — the raw body is the best message available.
+    }
+    return body;
+}
+
 /** Error carrying the HTTP status, so callers branch on a number rather than a message. */
 export class ApiError extends Error {
     constructor(status, body, url) {
-        super(`API ${status}: ${body || "request failed"}`);
+        super(`API ${status}: ${errorDetail(body) || "request failed"}`);
         this.name = "ApiError";
         this.status = status;
         this.body = body;

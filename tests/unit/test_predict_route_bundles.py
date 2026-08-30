@@ -111,11 +111,8 @@ def test_predict_uses_recursive_one_step_bundle_when_available():
     assert len(payload["forecasts"]) == 5
 
 
-def test_ensemble_predict_returns_daily_prediction_series():
-    app = FastAPI()
-    app.include_router(predict_route.router, prefix="/api/predict")
-    client = TestClient(app)
-
+def _fake_forecast():
+    """A seven-day ensemble forecast with a distinct value on every day."""
     dates = ["2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06"]
     forecast_points = [
         {
@@ -131,7 +128,7 @@ def test_ensemble_predict_returns_daily_prediction_series():
         }
         for index, value in enumerate([270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5])
     ]
-    forecast = SimpleNamespace(
+    return SimpleNamespace(
         symbol="SHOP",
         current_price=272.0,
         horizon=7,
@@ -147,7 +144,16 @@ def test_ensemble_predict_returns_daily_prediction_series():
             SimpleNamespace(model_type="lstm", weight=0.4),
         ],
         forecast_points=forecast_points,
+        scenario_paths=[[272.0, 271.0, 268.0], [272.0, 274.0, 269.0]],
     )
+
+
+def test_ensemble_predict_returns_daily_prediction_series():
+    app = FastAPI()
+    app.include_router(predict_route.router, prefix="/api/predict")
+    client = TestClient(app)
+
+    forecast = _fake_forecast()
 
     class FakePredictor:
         def predict(self, **_kwargs):
@@ -156,7 +162,11 @@ def test_ensemble_predict_returns_daily_prediction_series():
     with (
         patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
         patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
-        patch.object(predict_route, "ensemble_bundles_available", return_value=True),
+        patch.object(
+            predict_route,
+            "ensemble_availability",
+            return_value=(["xgboost", "random_forest", "lstm"], {}),
+        ),
         patch.object(predict_route, "EnsemblePricePredictor", return_value=FakePredictor()),
     ):
         response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
@@ -170,6 +180,75 @@ def test_ensemble_predict_returns_daily_prediction_series():
     assert values == [270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5]
     assert payload["forecast_points"][0]["ensemble"] == 270.0
     assert len(set(values)) > 1
+    assert payload["scenario_paths"] == [[272.0, 271.0, 268.0], [272.0, 274.0, 269.0]]
+
+
+def test_ensemble_predict_explains_why_an_unproven_bundle_is_not_served():
+    """A bundle that fails the skill gate must say so, not read as 'not trained yet'."""
+    app = FastAPI()
+    app.include_router(predict_route.router, prefix="/api/predict")
+    client = TestClient(app)
+
+    reason = "the xgboost bundle does not beat a constant forecast (skill score -0.7563)"
+    blocked = {mtype: reason for mtype in ("xgboost", "random_forest", "lstm")}
+    with (
+        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
+        patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
+        patch.object(predict_route, "ensemble_availability", return_value=([], blocked)),
+    ):
+        response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "unavailable"
+    assert payload["model_available"] is False
+    assert "does not beat a constant forecast" in payload["message"]
+    assert "/api/predict/ensemble/train" in payload["message"]
+    assert payload["models_unavailable"] == blocked
+
+
+def test_ensemble_serves_a_partial_ensemble_when_one_member_is_blocked():
+    """
+    One unservable member must not take the whole horizon offline.
+
+    This is the regression behind "Prediction model unavailable": the gate
+    required all three bundles, so a single failing LSTM blanked a tab whose
+    XGBoost and Random Forest bundles were both ready to serve.
+    """
+    app = FastAPI()
+    app.include_router(predict_route.router, prefix="/api/predict")
+    client = TestClient(app)
+
+    forecast = _fake_forecast()
+    requested: dict = {}
+
+    class FakePredictor:
+        def predict(self, **kwargs):
+            requested.update(kwargs)
+            return forecast
+
+    blocked = {"lstm": "the lstm bundle does not beat a constant forecast"}
+    with (
+        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
+        patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
+        patch.object(
+            predict_route,
+            "ensemble_availability",
+            return_value=(["xgboost", "random_forest"], blocked),
+        ),
+        patch.object(predict_route, "EnsemblePricePredictor", return_value=FakePredictor()),
+    ):
+        response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
+
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["model_available"] is True
+    assert payload["degraded"] is True
+    assert payload["models_available"] == ["xgboost", "random_forest"]
+    assert payload["models_unavailable"] == blocked
+    assert "lstm" in payload["message"]
+    # The blocked member must not be handed to the predictor.
+    assert requested["model_types"] == ["xgboost", "random_forest"]
 
 
 def test_predict_reports_stale_bundle_instead_of_retraining_inline():

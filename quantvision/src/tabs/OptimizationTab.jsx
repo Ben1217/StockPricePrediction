@@ -6,7 +6,31 @@ import {
 } from "recharts";
 import { C } from "../utils/data";
 import { optimizePortfolio, fetchFrontier } from "../utils/api";
-import { StatCard, Section, ChartTooltip } from "../components/UIComponents";
+import { StatCard, Section, ChartTooltip, Hint } from "../components/UIComponents";
+
+/**
+ * The four objectives the backend actually accepts (OptimizationMethod in
+ * schemas.py). Hints describe what each one really solves for — `max_sharpe`
+ * is a return-maximisation under a volatility cap, not a true Sharpe maximum.
+ */
+const METHODS = {
+    max_sharpe: {
+        label: "Max Sharpe",
+        hint: "Aims for the best return per unit of risk. Solved as: highest expected return while keeping annual volatility under 20%.",
+    },
+    min_volatility: {
+        label: "Min Volatility",
+        hint: "The calmest mix — the smallest expected price swings, even if that means lower returns.",
+    },
+    max_return: {
+        label: "Max Return",
+        hint: "Chases the highest expected return and ignores risk. Usually concentrates into one or two names.",
+    },
+    risk_parity: {
+        label: "Risk Parity",
+        hint: "Every holding contributes the same amount of risk, so no single stock dominates the portfolio.",
+    },
+};
 
 export default function OptimizationTab({ apiConnected, notify }) {
     const [symbols, setSymbols] = useState("AAPL,MSFT,GOOGL,AMZN,NVDA");
@@ -61,22 +85,27 @@ export default function OptimizationTab({ apiConnected, notify }) {
                 ⚡ Portfolio Optimization
             </h1>
             <div style={{ fontSize: 11, color: C.textDim, marginBottom: 20 }}>
-                Mean-Variance · Risk-Parity · Max Sharpe · Min Volatility
+                Max Sharpe · Min Volatility · Max Return · Risk Parity
             </div>
 
             {/* Config */}
-            <Section title="CONFIGURATION">
+            <Section
+                title="CONFIGURATION"
+                hint="Pick the stocks you want to hold and how you want them weighted. The optimizer looks at the last 12 months of daily returns to decide the split."
+            >
                 <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
                     <div style={{ flex: 1 }}>
                         <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Symbols (comma-separated)</label>
                         <input value={symbols} onChange={e => setSymbols(e.target.value.toUpperCase())} style={{ ...inputStyle, width: "100%" }} />
                     </div>
                     <div>
-                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>Method</label>
+                        <label style={{ fontSize: 10, color: C.textDim, display: "block", marginBottom: 4 }}>
+                            Method<Hint text={METHODS[method].hint} />
+                        </label>
                         <select value={method} onChange={e => setMethod(e.target.value)} style={inputStyle}>
-                            <option value="max_sharpe">Max Sharpe</option>
-                            <option value="min_volatility">Min Volatility</option>
-                            <option value="max_return">Max Return</option>
+                            {Object.entries(METHODS).map(([key, m]) => (
+                                <option key={key} value={key}>{m.label}</option>
+                            ))}
                         </select>
                     </div>
                     <button onClick={runOptimize} disabled={loading} style={{
@@ -93,15 +122,25 @@ export default function OptimizationTab({ apiConnected, notify }) {
             {result && <>
                 {/* Metrics */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginTop: 20, marginBottom: 20 }}>
-                    <StatCard label="EXP. RETURN" value={`${((result.expected_return || 0) * 100).toFixed(1)}%`} sub="Annualized" color={C.green} />
-                    <StatCard label="VOLATILITY" value={`${((result.volatility || 0) * 100).toFixed(1)}%`} sub="Annualized" color={C.red} />
-                    <StatCard label="SHARPE" value={(result.sharpe_ratio || 0).toFixed(2)} sub="Risk-adjusted" color={C.cyan} />
-                    <StatCard label="METHOD" value={method.replace("_", " ").toUpperCase()} sub="Optimization" color={C.amber} />
+                    <StatCard label="EXP. RETURN" value={`${((result.expected_return || 0) * 100).toFixed(1)}%`}
+                        sub="Annualized" color={C.green}
+                        hint="What this mix would have earned per year over the lookback window. A historical average, not a forecast." />
+                    <StatCard label="VOLATILITY" value={`${((result.volatility || 0) * 100).toFixed(1)}%`}
+                        sub="Annualized" color={C.red}
+                        hint="How much the portfolio value swings in a typical year. Higher means a bumpier ride in both directions." />
+                    <StatCard label="SHARPE" value={(result.sharpe_ratio || 0).toFixed(2)}
+                        sub="Risk-adjusted" color={C.cyan}
+                        hint="Return earned per unit of risk, above the risk-free rate. Above 1 is good, above 2 is excellent." />
+                    {/* result.method, not the dropdown — shows what the server actually ran. */}
+                    <StatCard label="METHOD" value={(METHODS[result.method] || METHODS[method]).label}
+                        sub="Objective" color={C.amber}
+                        hint={(METHODS[result.method] || METHODS[method]).hint} />
                 </div>
 
                 {/* Weights + Frontier */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                    <Section title="OPTIMAL WEIGHTS">
+                    <Section title="OPTIMAL WEIGHTS"
+                        hint="How much of every $100 to put in each stock. Positions are capped at 40% and floored at 2% by default.">
                         {weightData.map((d, i) => (
                             <div key={d.name} style={{ marginBottom: 12 }}>
                                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
@@ -118,7 +157,8 @@ export default function OptimizationTab({ apiConnected, notify }) {
                         ))}
                     </Section>
 
-                    <Section title="EFFICIENT FRONTIER">
+                    <Section title="EFFICIENT FRONTIER"
+                        hint="Every dot is one possible mix of these stocks. The curve is the best return available at each level of risk — the amber triangle is the pick with the best risk/return trade-off.">
                         {frontierPts.length > 0 ? (
                             <ResponsiveContainer width="100%" height={250}>
                                 <ScatterChart>
@@ -150,7 +190,8 @@ export default function OptimizationTab({ apiConnected, notify }) {
                             </RadarChart>
                         </ResponsiveContainer>
                     </Section>
-                    <Section title="OPTIMIZATION METRICS">
+                    <Section title="OPTIMIZATION METRICS"
+                        hint="How this mix would have behaved over the lookback window, had you held it the whole time.">
                         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                             <thead><tr style={{ borderBottom: `1px solid ${C.border}` }}>
                                 <th style={{ padding: "8px 12px", color: C.textDim, textAlign: "left" }}>Metric</th>

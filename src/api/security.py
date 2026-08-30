@@ -6,7 +6,9 @@ Both are **opt-in** so the default local-development experience is unchanged:
 * Auth activates only when ``QUANTVISION_API_KEY`` is set. Until then every request
   is allowed and a warning is logged once at startup.
 * Rate limiting is always on but with generous defaults, and is stricter on the
-  endpoints that start expensive work (training, backtests, agent calls).
+  requests that start expensive work (training, backtests, agent calls). The strict
+  budgets apply to state-changing methods only, so polling a job's status does not
+  consume the budget for starting jobs.
 
 The limiter is per-process and in-memory. That is the right scope for a single
 uvicorn worker; running multiple workers needs a shared store (Redis) for both the
@@ -34,6 +36,13 @@ API_KEY_HEADER = "X-API-Key"
 PUBLIC_PATHS = frozenset({"/", "/health", "/docs", "/redoc", "/openapi.json"})
 
 # (requests, window_seconds) per client, by path prefix. First match wins.
+#
+# These apply to state-changing methods only. Several of these endpoints have a
+# status sub-resource — GET /api/predict/ensemble/train/status/{job_id} sits under
+# the training prefix — and a job that runs for minutes is polled far more often
+# than it is started. Charging those polls against the hourly training budget
+# exhausts it in seconds and then 429s the poll and the next training request
+# alike, which is exactly what a client sees as "I clicked train once and got 429".
 EXPENSIVE_LIMITS = (
     ("/api/training/bootstrap", (2, 3600)),
     ("/api/training/train", (10, 3600)),
@@ -41,6 +50,8 @@ EXPENSIVE_LIMITS = (
     ("/api/backtest/run", (20, 3600)),
     ("/api/predict/ensemble/train", (10, 3600)),
 )
+# Methods that can start expensive work. Reads fall through to DEFAULT_LIMIT.
+EXPENSIVE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DEFAULT_LIMIT = (600, 60)  # 10 requests/second sustained, per client
 
 
@@ -64,10 +75,11 @@ def log_auth_status() -> None:
         )
 
 
-def _limit_for(path: str) -> tuple[int, int]:
-    for prefix, limit in EXPENSIVE_LIMITS:
-        if path.startswith(prefix):
-            return limit
+def _limit_for(path: str, method: str) -> tuple[int, int]:
+    if method.upper() in EXPENSIVE_METHODS:
+        for prefix, limit in EXPENSIVE_LIMITS:
+            if path.startswith(prefix):
+                return limit
     return DEFAULT_LIMIT
 
 
@@ -118,11 +130,39 @@ def _client_id(request: Request) -> str:
     return f"ip:{request.client.host if request.client else 'unknown'}"
 
 
-def _bucket(path: str) -> str:
-    for prefix, _ in EXPENSIVE_LIMITS:
-        if path.startswith(prefix):
-            return prefix
+def _bucket(path: str, method: str) -> str:
+    """
+    Counter key for this request. Must agree with `_limit_for`: a read charged to
+    the training bucket would still consume the hourly training budget even though
+    it is measured against the default limit.
+    """
+    if method.upper() in EXPENSIVE_METHODS:
+        for prefix, _ in EXPENSIVE_LIMITS:
+            if path.startswith(prefix):
+                return prefix
     return "default"
+
+
+async def error_middleware(request: Request, call_next):
+    """
+    Turn any unhandled exception into a 500 *below* the CORS layer.
+
+    Starlette builds the stack as ``ServerErrorMiddleware -> user middleware ->
+    ExceptionMiddleware -> router``, so a 500 produced by an ``@app.exception_handler
+    (Exception)`` is created above CORSMiddleware and carries none of its headers.
+    The browser then reports a plain server error as "No 'Access-Control-Allow-Origin'
+    header is present", which points the investigation at CORS instead of at the
+    traceback that actually caused it. Catching here — inside CORSMiddleware — means
+    the 500 travels back out through it and arrives labelled as what it is.
+
+    HTTPException and request-validation errors never reach this: ExceptionMiddleware
+    sits below and converts those to responses first.
+    """
+    try:
+        return await call_next(request)
+    except Exception:  # noqa: BLE001 - deliberately the catch-all for the CORS layer
+        logger.exception("Unhandled exception handling %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 async def security_middleware(request: Request, call_next):
@@ -141,8 +181,10 @@ async def security_middleware(request: Request, call_next):
                 content={"detail": f"Missing or invalid {API_KEY_HEADER} header"},
             )
 
-    limit, window = _limit_for(path)
-    allowed, retry_after = limiter.check(_client_id(request), _bucket(path), limit, window)
+    limit, window = _limit_for(path, request.method)
+    allowed, retry_after = limiter.check(
+        _client_id(request), _bucket(path, request.method), limit, window
+    )
     if not allowed:
         return JSONResponse(
             status_code=429,
@@ -157,3 +199,26 @@ def parse_origins(raw: str, fallback: Iterable[str]) -> list[str]:
     """Parse a comma-separated CORS origin list, falling back to local dev origins."""
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     return origins or list(fallback)
+
+
+def cors_headers_for(request: Request, allowed_origins: Iterable[str]) -> dict[str, str]:
+    """
+    CORS headers for a response built above CORSMiddleware, which cannot add its own.
+
+    Only ``ServerErrorMiddleware`` is up there — it is the outermost layer and holds
+    the ``Exception`` handler — so this covers the narrow case of a failure inside the
+    CORS or security middleware itself. Everything below is handled by
+    `error_middleware`. The origin is echoed only when it is on the allow list, so
+    this stays as strict as CORSMiddleware rather than becoming a wildcard back door.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return {}
+    allowed = list(allowed_origins)
+    if "*" not in allowed and origin not in allowed:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": "*" if allowed == ["*"] else origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+    }

@@ -1302,6 +1302,33 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             // ── Prediction Overlays ────────────────────────
             if (mode === "prediction" && predictionData?.forecasts) {
                 const { forecasts } = predictionData;
+                const lastBar = ohlcData[ohlcData.length - 1];
+
+                // Simulated sample paths, drawn first so the median sits on top of them.
+                // The median line is a conditional expectation and so is smooth by
+                // construction; these paths are what carries the volatility a viewer
+                // needs to judge the spread.
+                const scenarioPaths = predictionData.scenario_paths;
+                if (Array.isArray(scenarioPaths)) {
+                    scenarioPaths.forEach(path => {
+                        if (!Array.isArray(path) || path.length < 2) return;
+                        const series = chart.addSeries(LineSeries, {
+                            color: C.amber + '26',
+                            lineWidth: 1,
+                            priceLineVisible: false,
+                            lastValueVisible: false,
+                            crosshairMarkerVisible: false,
+                        });
+                        // path[0] anchors on the last close; path[i + 1] pairs with forecasts[i].
+                        const dS = lastBar ? [{ time: lastBar.time, value: lastBar.close }] : [];
+                        forecasts.forEach((f, i) => {
+                            const t = parseChartTime(f.date);
+                            if (t && path[i + 1] != null) dS.push({ time: t, value: path[i + 1] });
+                        });
+                        series.setData(processChartData(dS));
+                    });
+                }
+
                 const predSeries = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2 });
                 const u95 = chart.addSeries(LineSeries, { color: C.amber + '55', lineWidth: 1, lineStyle: 3 });
                 const l95 = chart.addSeries(LineSeries, { color: C.amber + '55', lineWidth: 1, lineStyle: 3 });
@@ -1318,9 +1345,8 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                     dU68.push({ time: t, value: f.upper68 });
                     dL68.push({ time: t, value: f.lower68 });
                 });
-                const lastH = ohlcData[ohlcData.length - 1];
-                if (lastH) {
-                    [dP, dU95, dL95, dU68, dL68].forEach(arr => arr.unshift({ time: lastH.time, value: lastH.close }));
+                if (lastBar) {
+                    [dP, dU95, dL95, dU68, dL68].forEach(arr => arr.unshift({ time: lastBar.time, value: lastBar.close }));
                 }
                 predSeries.setData(processChartData(dP)); u95.setData(processChartData(dU95)); l95.setData(processChartData(dL95)); u68.setData(processChartData(dU68)); l68.setData(processChartData(dL68));
             }

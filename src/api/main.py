@@ -12,6 +12,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load .env before anything reads os.getenv. It was only ever loaded as a side
+# effect of importing src.utils.config_loader further down the import graph, which
+# made QUANTVISION_CORS_ORIGINS and QUANTVISION_API_KEY depend on import order.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:  # python-dotenv is optional; real env vars still apply
+    pass
+
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +37,13 @@ from src.api.routes.export import router as export_router
 from src.api.routes.patterns import router as patterns_router
 from src.api.routes.agent import router as agent_router
 from src.api.routes.sentiment import router as sentiment_router
-from src.api.security import log_auth_status, parse_origins, security_middleware
+from src.api.security import (
+    cors_headers_for,
+    error_middleware,
+    log_auth_status,
+    parse_origins,
+    security_middleware,
+)
 
 
 app = FastAPI(
@@ -37,9 +53,13 @@ app = FastAPI(
 )
 logger = logging.getLogger(__name__)
 
-# Auth (opt-in via QUANTVISION_API_KEY) + per-client rate limiting.
-app.middleware("http")(security_middleware)
-log_auth_status()
+# Uvicorn configures its own loggers but leaves the root logger bare, so without
+# this the tracebacks below are formatted by logging's last-resort handler.
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
 
 # CORS. Origins come from QUANTVISION_CORS_ORIGINS (comma-separated) so the same
 # build can serve a deployed frontend; the fallback is the local dev servers.
@@ -48,9 +68,29 @@ _DEV_ORIGINS = [
     *[f"http://localhost:{port}" for port in range(5173, 5181)],
     *[f"http://127.0.0.1:{port}" for port in range(5173, 5181)],
 ]
+CORS_ORIGINS = parse_origins(os.getenv("QUANTVISION_CORS_ORIGINS", ""), _DEV_ORIGINS)
+
+# ── Middleware order ─────────────────────────────────────────────────────────
+# This does NOT read top-to-bottom. Starlette inserts each registration at the
+# front of the list, so the LAST one registered is the OUTERMOST at runtime:
+#
+#     ServerErrorMiddleware        <- holds the @app.exception_handler(Exception) below
+#       CORSMiddleware             <- the only layer that adds CORS headers
+#         error_middleware         <- unhandled exceptions become a 500 *under* CORS
+#           security_middleware    <- API key + rate limit; its 401/429 get CORS headers
+#             ExceptionMiddleware  <- HTTPException / 422 validation
+#               router
+#
+# error_middleware has to stay below CORSMiddleware. A 500 raised above it reaches
+# the browser with no Access-Control-Allow-Origin, and Chrome then reports a working
+# server as a CORS failure — hiding the traceback that is the real problem.
+app.middleware("http")(security_middleware)
+app.middleware("http")(error_middleware)
+log_auth_status()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=parse_origins(os.getenv("QUANTVISION_CORS_ORIGINS", ""), _DEV_ORIGINS),
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     # Narrowed from "*": these are the verbs and headers the app actually uses.
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -90,5 +130,15 @@ async def health():
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Last resort for failures in the CORS/security layers themselves — route errors
+    are caught by `error_middleware` below them. Starlette runs this handler in
+    ServerErrorMiddleware, which sits *above* CORSMiddleware, so the CORS headers
+    have to be attached by hand or the browser reports this 500 as a CORS error.
+    """
     logger.exception("Unhandled API exception at %s", request.url.path)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=cors_headers_for(request, CORS_ORIGINS),
+    )

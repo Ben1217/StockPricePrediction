@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union
 
 from ..utils.logger import get_logger
+from .ohlcv_cache import cached_download
 
 logger = get_logger(__name__)
 
@@ -17,10 +18,16 @@ def download_stock_data(
     ticker: str,
     start_date: Union[str, datetime],
     end_date: Union[str, datetime],
-    interval: str = "1d"
+    interval: str = "1d",
+    use_cache: bool = True,
 ) -> Optional[pd.DataFrame]:
     """
     Download historical stock data from Yahoo Finance
+
+    Results are cached on disk (see :mod:`src.data.ohlcv_cache`), so repeated
+    calls for the same ticker and range — a full ensemble retrain issues one per
+    model per horizon — hit the network once instead of a dozen times. Pass
+    ``use_cache=False`` to force a fresh fetch.
 
     Parameters
     ----------
@@ -32,13 +39,15 @@ def download_stock_data(
         End date for data download
     interval : str
         Data interval ('1d', '1h', '15m', '5m', '1m')
+    use_cache : bool
+        Serve from the on-disk cache when a fresh entry exists.
 
     Returns
     -------
     pandas.DataFrame or None
         Historical OHLCV data, or None if download fails
     """
-    try:
+    def _fetch() -> Optional[pd.DataFrame]:
         data = yf.download(
             ticker,
             start=start_date,
@@ -47,21 +56,25 @@ def download_stock_data(
             auto_adjust=False,
             progress=False,
         )
-        
+
         # Fix MultiIndex columns if present
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
-        
-        if not data.empty:
-            logger.info(f"Downloaded {len(data)} records for {ticker}")
-            return data
-        else:
+
+        if data.empty:
             logger.warning(f"No data returned for {ticker}")
             return None
-            
-    except Exception as e:
-        logger.error(f"Error downloading {ticker}: {e}")
-        return None
+        logger.info(f"Downloaded {len(data)} records for {ticker}")
+        return data
+
+    return cached_download(
+        str(ticker),
+        str(pd.Timestamp(start_date).date()) if start_date is not None else "",
+        str(pd.Timestamp(end_date).date()) if end_date is not None else "",
+        interval,
+        _fetch,
+        use_cache=use_cache,
+    )
 
 
 def load_multiple_stocks(

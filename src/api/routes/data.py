@@ -4,7 +4,7 @@ Data API routes — fetch prices, indicators, S&P 500, upload CSV.
 Changes from original:
 - Dynamic cache TTL: 60 s when market open, 3600 s when closed.
 - _fetch_yfinance: uses period="1d" interval="1m" for intraday, always .iloc[-1].
-- _fetch_alpha_vantage: uses GLOBAL_QUOTE (live) instead of TIME_SERIES_DAILY_ADJUSTED.
+- _fetch_alpha_vantage: uses GLOBAL_QUOTE (live) instead of a daily time series.
 - All responses include market_open + data_timestamp metadata.
 - Freshness validation via src.data.live_data.validate_freshness.
 - New GET /quote/{symbol} lightweight live-price endpoint.
@@ -34,6 +34,13 @@ from src.data.live_data import (
     validate_freshness, fetch_live_quote, fetch_extended_quote
 )
 from src.data.ohlcv import cache_get, cache_set, cache_stats, download_lock, fetch_ohlcv
+from src.data.alpha_vantage_provider import consume_request_slot
+from src.data.provider_errors import (
+    PremiumEndpointError,
+    ProviderError,
+    QuotaExceededError,
+    classify_alpha_vantage_message,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -106,11 +113,21 @@ def _fetch_alpha_vantage_history(symbol: str, start: str, end: str) -> pd.DataFr
         raise HTTPException(400, "Alpha Vantage API key not configured")
 
     url = (
-        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED"
+        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
         f"&symbol={symbol}&outputsize=compact&apikey={api_key}"
     )
+    # Shares the app-wide Alpha Vantage limiter: spaces this call against the
+    # free tier's per-second burst limit and counts it against the daily quota.
+    consume_request_slot()
     resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
     data = resp.json()
+    # A throttled or quota-blocked call still returns HTTP 200 with the reason
+    # under "Information"/"Note" and no time series. Without this check it lands
+    # on the "no data" branch below and is reported as an unknown symbol.
+    for key in ("Error Message", "Information", "Note"):
+        if key in data:
+            raise classify_alpha_vantage_message(data[key], endpoint="TIME_SERIES_DAILY")
     ts = data.get("Time Series (Daily)", {})
     if not ts:
         raise HTTPException(404, f"No Alpha Vantage data for {symbol}")
@@ -123,7 +140,7 @@ def _fetch_alpha_vantage_history(symbol: str, start: str, end: str) -> pd.DataFr
             "High": float(vals["2. high"]),
             "Low": float(vals["3. low"]),
             "Close": float(vals["4. close"]),
-            "Volume": int(vals["6. volume"]),
+            "Volume": int(vals["5. volume"]),
         })
     df = pd.DataFrame(rows)
     df["Date"] = pd.to_datetime(df["Date"])
@@ -133,6 +150,21 @@ def _fetch_alpha_vantage_history(symbol: str, start: str, end: str) -> pd.DataFr
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _provider_http_error(exc: Exception, context: str) -> HTTPException:
+    """
+    Map a provider failure onto an honest status code.
+
+    A premium-only endpoint and an exhausted quota are deterministic refusals,
+    not upstream faults: 502 would both misdescribe them and mark them as
+    retryable to clients that treat 5xx as transient.
+    """
+    if isinstance(exc, PremiumEndpointError):
+        return HTTPException(501, str(exc))
+    if isinstance(exc, QuotaExceededError):
+        return HTTPException(429, str(exc))
+    return HTTPException(502, f"{context}: {exc}")
+
 
 def _df_to_bars(df: pd.DataFrame) -> list[PriceBar]:
     bars = []
@@ -291,7 +323,7 @@ def get_live_quote(
         result = fetch_live_quote(symbol, source=source)
         return result
     except Exception as e:
-        raise HTTPException(502, f"Live quote fetch failed for {symbol}: {e}")
+        raise _provider_http_error(e, f"Live quote fetch failed for {symbol}")
 
 
 @router.get("/extended-quote/{symbol}")
@@ -309,7 +341,7 @@ def get_extended_quote(
         result = fetch_extended_quote(symbol, source=source)
         return result
     except Exception as e:
-        raise HTTPException(502, f"Extended quote fetch failed for {symbol}: {e}")
+        raise _provider_http_error(e, f"Extended quote fetch failed for {symbol}")
 
 
 @router.get("/prices/{symbol}", response_model=PriceResponse)
@@ -336,6 +368,8 @@ def get_prices(
             df = _fetch_yfinance(symbol, start, end, interval=interval)
     except HTTPException:
         raise
+    except ProviderError as e:
+        raise _provider_http_error(e, "Data fetch failed")
     except Exception as e:
         raise HTTPException(500, f"Data fetch failed: {e}")
 
