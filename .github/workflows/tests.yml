@@ -1,0 +1,60 @@
+# Offline test suite.
+#
+# Runs `tests/unit` only. The two suites under `tests/` root (`test_api_keys.py`,
+# `test_yfinance_freshness.py`) call Yahoo and Alpha Vantage live, so they belong
+# in a human's terminal, not a gate — a red build caused by Yahoo rate-limiting
+# teaches nobody anything and trains people to ignore the badge.
+#
+# Two checks in here are the ones that matter for the direction classifier, and
+# both are assertions rather than reports:
+#
+#   test_shuffled_labels_collapse_to_chance_on_clean_data
+#       permutes training labels and requires accuracy to collapse to chance.
+#       If this ever goes red, a feature has started reading the future and
+#       every accuracy number the pipeline produces is void.
+#
+#   test_constant_classifier_comparison_is_always_present
+#       requires every fold to score all four naive baselines on the same
+#       training window, so a model can never be reported without the constant
+#       classifier it has to beat sitting beside it.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest tests/unit -q
+
+      - name: Lint the direction pipeline
+        run: |
+          flake8 --max-line-length=110 \
+            src/data/direction_data.py \
+            src/features/direction_features.py \
+            src/models/direction_models.py \
+            src/models/direction_metrics.py \
+            src/models/direction_pipeline.py \
+            src/backtesting/direction_backtest.py \
+            src/api/routes/direction.py \
+            scripts/direction_backtest.py

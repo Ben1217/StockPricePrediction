@@ -17,6 +17,7 @@ reported error is optimistic.
 
 Public API:
     walk_forward_splits(n_rows, n_splits, embargo) -> list[(train_idx, score_idx)]
+    expanding_window_splits(n_rows, test_size, n_splits, embargo) -> list[(train_idx, test_idx)]
     walk_forward_tune(...) -> TuningResult
 """
 
@@ -207,3 +208,68 @@ def walk_forward_tune(
         embargo=embargo,
         metric=metric,
     )
+
+
+def expanding_window_splits(
+    n_rows: int,
+    *,
+    test_size: int = 63,
+    n_splits: int = 4,
+    embargo: int = 1,
+    min_train: int = 252,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Expanding-window splits with a *fixed* test length.
+
+    Differs from :func:`walk_forward_splits`, which derives its fold size from
+    the row count: here the caller pins the test window (63 rows is one trading
+    quarter) and the number of folds flexes to fit. That is what a direction
+    backtest needs, because every fold's accuracy carries a confidence interval
+    whose width is set by the test size — folds of drifting length are not
+    comparable to each other.
+
+    The test windows are contiguous, non-overlapping, and cover the tail of the
+    series, so the most recent data is always scored:
+
+        fold 1:  [--- train ---][gap][test]
+        fold 2:  [------ train ------][gap][test]
+        fold 3:  [--------- train --------][gap][test]
+
+    ``embargo`` rows are purged between each training window and the test window
+    that follows it. For a next-day target one row is enough: the last training
+    row's label resolves on the first test bar, so without the gap that bar is
+    in both. A target ``h`` bars ahead needs ``embargo >= h``.
+
+    Folds whose training window would fall below ``min_train`` are dropped
+    rather than shrunk, so no fold is scored off a model fit on too little data.
+
+    Returns
+    -------
+    list of (train_positions, test_positions)
+        Empty when the series cannot support even one fold.
+    """
+    n_rows = int(n_rows)
+    test_size = max(1, int(test_size))
+    n_splits = max(1, int(n_splits))
+    embargo = max(0, int(embargo))
+    min_train = max(1, int(min_train))
+
+    splits: List[Tuple[np.ndarray, np.ndarray]] = []
+    for i in range(n_splits):
+        # Fold i tests the window (n_splits - i) blocks back from the end, so
+        # the folds come out in chronological order.
+        test_start = n_rows - (n_splits - i) * test_size
+        test_end = test_start + test_size
+        train_end = test_start - embargo
+        if test_start < 0 or train_end < min_train:
+            continue
+        splits.append((np.arange(0, train_end), np.arange(test_start, min(test_end, n_rows))))
+
+    if not splits:
+        logger.warning(
+            "No expanding-window folds fit: n_rows=%s, test_size=%s, n_splits=%s, "
+            "embargo=%s, min_train=%s (need at least %s rows)",
+            n_rows, test_size, n_splits, embargo, min_train,
+            min_train + embargo + test_size,
+        )
+    return splits

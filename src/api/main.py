@@ -37,6 +37,7 @@ from src.api.routes.export import router as export_router
 from src.api.routes.patterns import router as patterns_router
 from src.api.routes.agent import router as agent_router
 from src.api.routes.sentiment import router as sentiment_router
+from src.api.routes.direction import router as direction_router
 from src.api.security import (
     cors_headers_for,
     error_middleware,
@@ -107,6 +108,7 @@ app.include_router(export_router,    prefix="/api/export",    tags=["Export"])
 app.include_router(patterns_router,  prefix="/api/patterns",  tags=["Patterns"])
 app.include_router(agent_router,     prefix="/api/agent",     tags=["Agents"])
 app.include_router(sentiment_router, prefix="/api/sentiment", tags=["Sentiment"])
+app.include_router(direction_router, prefix="/api/direction", tags=["Direction"])
 
 
 @app.get("/")

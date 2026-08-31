@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import { C } from "../utils/data";
 import { ApiError, fetchEnsemblePrediction, fetchPredictions, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
+import DirectionPanel from "../components/DirectionPanel";
 
 /** Stop reporting progress after this long. The server-side job is unaffected. */
 const POLL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -307,9 +308,13 @@ function ForecastProvenanceNote({ pathType, perStepPredictions, modelOutputCount
             </span>
             <span>
                 {interpolated
-                    ? `Each model produced one ${horizon}-day forecast${
+                    ? `Each model produced exactly one number — the ${horizon}-day return${
                           modelOutputCount ? ` (${modelOutputCount} model outputs total)` : ""
-                      }; the intermediate days are a compounded path to that endpoint, not daily predictions.`
+                      }. The dashed line is not a forecast of the days it passes through: it is
+                       P(t) = P(0) x (1 + r) ^ (t/${horizon}), the compounding that reaches that
+                       endpoint. Being monotone by construction, it cannot show a direction change,
+                       and a turn in it would be arithmetic, not a prediction. Read the endpoint and
+                       the band; ignore the shape between them.`
                     : `Every point is a separate model prediction${
                           modelOutputCount ? ` (${modelOutputCount} model outputs)` : ""
                       }. Later steps are conditioned on earlier predicted bars, so error compounds.`}
@@ -474,7 +479,7 @@ function TooltipContent({ active, payload, label }) {
     );
 }
 
-function ForecastChart({ priceData, forecastPoints, selectedModel, scenarioPaths, showScenarios, onToggleScenarios }) {
+function ForecastChart({ priceData, forecastPoints, selectedModel, scenarioPaths, showScenarios, onToggleScenarios, interpolated }) {
     const { chartData, todayDate, yDomain, scenarioKeys } = useMemo(() => {
         const history = (priceData?.bars || []).slice(-60);
         const future = (forecastPoints || [])
@@ -693,7 +698,22 @@ function ForecastChart({ priceData, forecastPoints, selectedModel, scenarioPaths
                     <Line hide={!show("lstm")} type="monotone" dataKey="lstm" stroke={COLORS.lstm} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
                     <Line hide={!show("xgboost")} type="monotone" dataKey="xgboost" stroke={COLORS.xgboost} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
                     <Line hide={!show("random_forest")} type="monotone" dataKey="random_forest" stroke={COLORS.random_forest} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
-                    <Line hide={!show("ensemble")} type="monotone" dataKey="ensemble" stroke={COLORS.ensemble} strokeWidth={4} dot={false} connectNulls isAnimationActive={false} />
+                    {/* Dashed whenever the path is interpolated. A solid, heavy
+                        line reads as a series of forecasts; when each model
+                        emitted one endpoint and the days between it are
+                        P_0*(1+r)^(t/H), that reading is wrong — the curve is
+                        monotone by construction and cannot show a turn. */}
+                    <Line
+                        hide={!show("ensemble")}
+                        type="monotone"
+                        dataKey="ensemble"
+                        stroke={COLORS.ensemble}
+                        strokeWidth={interpolated ? 3 : 4}
+                        strokeDasharray={interpolated ? "7 5" : undefined}
+                        dot={false}
+                        connectNulls
+                        isAnimationActive={false}
+                    />
                 </ComposedChart>
             </ResponsiveContainer>
         </div>
@@ -894,6 +914,13 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                 </div>
             </div>
 
+            {/* Next-day direction sits above the multi-day forecast on purpose.
+                It is the part with a measured out-of-sample track record and a
+                costed backtest; the price cone below it is a single scalar per
+                model with the intermediate days interpolated. Reading order
+                should follow evidence, not horizon length. */}
+            <DirectionPanel symbol={selectedTicker} />
+
             {loading && (
                 <div style={{ padding: 46, color: C.textDim, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, textAlign: "center" }}>
                     Loading forecast...
@@ -943,6 +970,11 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         scenarioPaths={display.scenarioPaths}
                         showScenarios={showScenarios}
                         onToggleScenarios={() => setShowScenarios((on) => !on)}
+                        interpolated={
+                            display.perStepPredictions === false ||
+                            (display.perStepPredictions == null &&
+                                display.pathType !== "recursive_per_step")
+                        }
                     />
 
                     <ForecastProvenanceNote

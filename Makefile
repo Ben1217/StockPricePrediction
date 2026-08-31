@@ -1,5 +1,6 @@
 .PHONY: help install install-dev setup frontend-install run-api run-frontend run \
-	test test-unit test-cov lint format download-data train-models migrate-db docker-up docker-down clean
+	test test-unit test-cov lint format download-data train-models direction direction-all setup-kronos \
+	migrate-db docker-up docker-down clean
 
 .DEFAULT_GOAL := help
 
@@ -22,6 +23,9 @@ help:
 	@echo "  format           Run black and isort"
 	@echo "  download-data    Download daily market data"
 	@echo "  train-models     Train local model artifacts"
+	@echo "  direction        Walk-forward next-day direction backtest (TICKER=AAPL)"
+	@echo "  direction-all    Same, across every model slot, as a comparison table"
+	@echo "  setup-kronos     Vendor the Kronos candlestick foundation model"
 	@echo "  migrate-db       Migrate SQLite data to PostgreSQL/TimescaleDB"
 	@echo "  docker-up        Start the Docker stack"
 	@echo "  docker-down      Stop the Docker stack"
@@ -71,6 +75,28 @@ download-data:
 
 train-models:
 	$(PYTHON) scripts/train_models.py
+
+# Walk-forward evaluation + costed long/flat backtest for the next-day direction
+# classifier. Exit 0 means every ship criterion passed, 2 means it ran cleanly
+# but the model did not clear the bar, so `make direction` doubles as a gate.
+#   make direction TICKER=MSFT MODEL=gradient_boosting COST_BPS=5
+TICKER ?= AAPL
+MODEL ?= logistic
+FOLDS ?= 8
+COST_BPS ?= 10
+
+direction:
+	$(PYTHON) scripts/direction_backtest.py --ticker $(TICKER) --model $(MODEL) --folds $(FOLDS) --cost-bps $(COST_BPS)
+
+# Vendor the Kronos candlestick foundation model (MIT) into vendor/kronos and
+# verify the weights load. Needs `pip install -e ".[foundation]"` first.
+setup-kronos:
+	$(PYTHON) scripts/setup_kronos.py
+
+# Every model slot on one ticker, printed as a comparison table. Kronos is a
+# transformer forward pass per test row -- budget hours on CPU, minutes on CUDA.
+direction-all:
+	$(PYTHON) scripts/direction_backtest.py --ticker $(TICKER) --all-models --folds $(FOLDS) --cost-bps $(COST_BPS)
 
 migrate-db:
 	$(PYTHON) scripts/migrate_sqlite_to_postgres.py

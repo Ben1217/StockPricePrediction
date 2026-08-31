@@ -36,7 +36,14 @@ dependencies = [
     "python-multipart>=0.0.9",
     "httpx>=0.27",
     "reportlab>=4.2",
-    "yfinance>=0.2.54",
+    # Upper-bounded on purpose. yfinance scrapes a third party and has changed
+    # defaults across minor releases (auto_adjust flipped to True in 1.0), which
+    # silently changes what a model was trained on. Every call site here passes
+    # auto_adjust explicitly so 0.2.x and 1.x both behave, but a 2.x is free to
+    # move the ground again. src/data/direction_data.py records the installed
+    # version and a content hash of the bars in every report, so two runs can be
+    # shown to have seen the same data rather than assumed to have.
+    "yfinance>=0.2.54,<2",
     "scikit-learn>=1.4",
     "xgboost>=2.0",
     "torch>=2.2",
@@ -54,6 +61,15 @@ agents = [
     "crewai>=0.28",
     "langchain>=0.1",
     "langchain-anthropic>=0.1",
+]
+
+# Kronos (candlestick foundation model) and TabPFN (tabular foundation model).
+# Kronos model code is vendored under vendor/kronos/ (cloned from GitHub);
+# these are its Python-level dependencies plus TabPFN.
+foundation = [
+    "tabpfn>=2.0",
+    "einops>=0.8",
+    "huggingface_hub>=0.23",
 ]
 
 # Only needed for the optional PostgreSQL/TimescaleDB path in src/data/data_storage.py

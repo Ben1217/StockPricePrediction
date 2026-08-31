@@ -44,11 +44,20 @@ data/cache/
 *.csv
 *.parquet
 
+# Direction backtest artifacts (regenerate via scripts/direction_backtest.py).
+# Derived outputs, and the report JSON embeds a data hash tied to the exact bars
+# it was run on — committing one invites comparing two runs that never saw the
+# same data.
+data/direction_backtests/
+
 # Model files (too large for git — regenerate via POST /api/training/bootstrap)
 models/bundles/
 models/model_metadata/
 models/saved_models/
 models/scalers/
+
+# Vendored third-party model repos (cloned, not committed)
+vendor/
 
 # Database
 database/*.db

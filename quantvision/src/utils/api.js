@@ -190,6 +190,27 @@ export async function fetchHistoricalSignals(symbol, days = 90, modelType = "xgb
     return apiFetch(`/predict/historical-signals/${encodeSymbol(symbol)}?days=${days}&model_type=${modelType}`);
 }
 
+// ── Next-day direction ───────────────────────────────────────
+/**
+ * Walk-forward evaluation, the gated P(up tomorrow) gauge, the rolling hit-rate
+ * strip, and the equity curve for one symbol.
+ *
+ * 404 means no walk-forward report has been generated yet; the server's detail
+ * message names the command that produces one. That is not an error state to
+ * paper over — the gauge is meaningless without the evaluation beside it.
+ */
+export async function fetchDirection(symbol, model = "logistic", includeGauge = true) {
+    return apiFetch(
+        `/direction/${encodeSymbol(symbol)}?model=${encodeURIComponent(model)}` +
+        `&include_gauge=${includeGauge ? "true" : "false"}`
+    );
+}
+
+/** Every symbol/model pair with a stored direction report. */
+export async function listDirectionReports() {
+    return apiFetch("/direction/");
+}
+
 // ── Ensemble Predictions ─────────────────────────────────────
 export async function fetchEnsemblePrediction(symbol, horizon = 30) {
     return apiFetch("/predict/ensemble", {
