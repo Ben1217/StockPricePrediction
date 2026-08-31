@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   api:
     build:
@@ -10,11 +8,17 @@ services:
       - "8000:8000"
     env_file:
       - ../.env
+    environment:
+      # Overrides .env, where POSTGRES_HOST is localhost for a host-run API.
+      # Inside this container localhost is the container itself, so the database
+      # has to be addressed by its compose service name.
+      - POSTGRES_HOST=timescaledb
     volumes:
       - ../models:/app/models
       - ../data:/app/data
     depends_on:
-      - timescaledb
+      timescaledb:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -39,6 +43,13 @@ services:
       - "5432:5432"
     volumes:
       - timescale_data:/var/lib/postgresql/data
+      # Runs on first init (empty volume), after the image's own timescaledb setup
+      - ../database/schema_timescale.sql:/docker-entrypoint-initdb.d/010_schema_timescale.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stock_data"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: always
 
 volumes:

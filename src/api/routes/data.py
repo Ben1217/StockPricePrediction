@@ -34,6 +34,11 @@ from src.data.live_data import (
     validate_freshness, fetch_live_quote, fetch_extended_quote
 )
 from src.data.ohlcv import cache_get, cache_set, cache_stats, download_lock, fetch_ohlcv
+from src.data.timescale_store import (
+    load_daily_prices,
+    save_daily_prices,
+    timescale_enabled,
+)
 from src.data.alpha_vantage_provider import consume_request_slot
 from src.data.provider_errors import (
     PremiumEndpointError,
@@ -194,6 +199,25 @@ def _get_data_timestamp(df: pd.DataFrame) -> datetime:
     if ts.tzinfo is None:
         ts = _UTC.localize(ts)
     return ts
+
+
+def _daily_store_covers(df: pd.DataFrame, start: str, end: str) -> bool:
+    """
+    Whether the stored bars can answer a request outright.
+
+    Matching the window exactly would never hold: the endpoints are calendar dates
+    while the bars are trading days, so a Friday-to-Monday request has no bar on
+    either edge. Both ends get enough slack to span a weekend plus a holiday;
+    anything short of that falls through to the provider, which refreshes the
+    hypertable on the way past.
+    """
+    if df is None or df.empty:
+        return False
+    slack = pd.Timedelta(days=5)
+    return (
+        df.index[0] <= pd.Timestamp(start) + slack
+        and df.index[-1] >= pd.Timestamp(end) - slack
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -361,17 +385,47 @@ def get_prices(
     if start is None:
         start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-    try:
-        if source == "alpha_vantage":
-            df = _fetch_alpha_vantage_history(symbol, start, end)
-        else:
-            df = _fetch_yfinance(symbol, start, end, interval=interval)
-    except HTTPException:
-        raise
-    except ProviderError as e:
-        raise _provider_http_error(e, "Data fetch failed")
-    except Exception as e:
-        raise HTTPException(500, f"Data fetch failed: {e}")
+    # Read-through TimescaleDB for daily bars, when DB_TYPE selects it. The
+    # hypertable is the store of record: a covered window skips the provider
+    # entirely, and whatever a miss fetches is written back. Limited to daily
+    # yfinance requests because `daily_prices` is a daily table — intraday belongs
+    # in `intraday_prices`, which nothing populates yet.
+    use_store = timescale_enabled() and source == "yfinance" and interval == "1d"
+    df = None
+    served_from = source
+
+    if use_store:
+        try:
+            stored = load_daily_prices(symbol, start, end)
+            if _daily_store_covers(stored, start, end):
+                df = stored
+                served_from = "timescaledb"
+                logger.info("Served %s (%s..%s) from TimescaleDB: %d bars", symbol, start, end, len(df))
+        except Exception as e:
+            # A database problem must not take the endpoint down — the provider
+            # path below is still a complete answer.
+            logger.warning("TimescaleDB read failed for %s, falling back to provider: %s", symbol, e)
+
+    if df is None:
+        try:
+            if source == "alpha_vantage":
+                df = _fetch_alpha_vantage_history(symbol, start, end)
+            else:
+                df = _fetch_yfinance(symbol, start, end, interval=interval)
+        except HTTPException:
+            raise
+        except ProviderError as e:
+            raise _provider_http_error(e, "Data fetch failed")
+        except Exception as e:
+            raise HTTPException(500, f"Data fetch failed: {e}")
+
+        if use_store and not df.empty:
+            try:
+                save_daily_prices(symbol, df)
+            except Exception as e:
+                # Persistence is a side effect of answering; failing it must not
+                # discard bars the caller already has.
+                logger.warning("TimescaleDB write failed for %s: %s", symbol, e)
 
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
@@ -392,7 +446,7 @@ def get_prices(
     bars = _df_to_bars(df)
     return PriceResponse(
         symbol=symbol,
-        source=source,
+        source=served_from,
         bars=bars,
         count=len(bars),
     )

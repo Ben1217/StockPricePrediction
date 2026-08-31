@@ -128,6 +128,40 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/health/db")
+async def health_db():
+    """
+    Report the backend's own connection to TimescaleDB.
+
+    Always 200, never raises: this is a diagnostic, and a caller checking whether
+    the database is reachable should read the answer rather than handle an error.
+    `connected: false` with a `detail` is the useful response when it is down.
+    """
+    from src.data.timescale_store import (
+        ping,
+        safe_connection_string,
+        timescale_enabled,
+    )
+
+    if not timescale_enabled():
+        return {
+            "connected": False,
+            "backend": "sqlite",
+            "detail": "DB_TYPE is not set to timescale; the API is not using PostgreSQL.",
+        }
+
+    try:
+        return {"backend": "timescaledb", **ping()}
+    except Exception as exc:
+        logger.warning("TimescaleDB health check failed: %s", exc)
+        return {
+            "connected": False,
+            "backend": "timescaledb",
+            "connection": safe_connection_string(),
+            "detail": str(exc),
+        }
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """

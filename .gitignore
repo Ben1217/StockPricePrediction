@@ -67,3 +67,4 @@ Thumbs.db
 *.temp
 *.diff
 temp_hist.txt
+data/sector_cache.json

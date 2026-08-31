@@ -33,7 +33,8 @@ API_KEY_ENV = "QUANTVISION_API_KEY"
 API_KEY_HEADER = "X-API-Key"
 
 # Paths that never require a key: liveness, service metadata, and the docs.
-PUBLIC_PATHS = frozenset({"/", "/health", "/docs", "/redoc", "/openapi.json"})
+# /health/db reports reachability and a password-masked DSN, nothing queryable.
+PUBLIC_PATHS = frozenset({"/", "/health", "/health/db", "/docs", "/redoc", "/openapi.json"})
 
 # (requests, window_seconds) per client, by path prefix. First match wins.
 #
