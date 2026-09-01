@@ -1115,6 +1115,27 @@ class EnsemblePricePredictor:
         )
 
 
+def regression_bundle_dir(symbol: str, model_type: str, horizon: int) -> Path:
+    """
+    The directory a bundle is served from, canonical layout preferred.
+
+    Public because :mod:`src.models.model_manager` has to classify the same
+    directory this module serves. Two independent notions of "where the bundle
+    lives" would eventually disagree, and the disagreement would show up as a
+    model the manager calls ready and the predictor cannot load.
+    """
+    canonical = _bundle_dir(symbol, model_type, horizon)
+    if (canonical / "metadata.json").exists():
+        return canonical
+    legacy = _legacy_price_regression_bundle_dir(symbol, model_type, horizon)
+    return legacy if (legacy / "metadata.json").exists() else canonical
+
+
+def metadata_is_return_regression(meta: Dict) -> bool:
+    """Public alias: the objective check the predictor screens bundles with."""
+    return _metadata_is_return_regression(meta)
+
+
 def regression_bundle_status(symbol: str, model_type: str, horizon: int) -> Tuple[bool, Optional[str]]:
     """
     Report whether one bundle is servable, and why not if it isn't.

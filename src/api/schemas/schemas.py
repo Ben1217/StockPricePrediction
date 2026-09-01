@@ -27,9 +27,40 @@ class DataSourceEnum(str, Enum):
 
 
 class ModelTypeEnum(str, Enum):
+    """
+    Every model the prediction route can serve.
+
+    The bare names are the legacy multi-horizon regression bundles. The
+    ``unified_`` names are the next-timeframe models that return a price and a
+    direction probability together. Not all of them can be trained: the
+    foundation models are pre-trained and zero-shot, so only the rest appear in
+    :data:`TRAINABLE_MODEL_TYPES`.
+    """
+
     lstm = "lstm"
     xgboost = "xgboost"
     random_forest = "random_forest"
+    unified_lstm = "unified_lstm"
+    unified_xgboost = "unified_xgboost"
+    unified_random_forest = "unified_random_forest"
+    unified_kronos = "unified_kronos"
+    unified_timesfm = "unified_timesfm"
+    unified_chronos = "unified_chronos"
+
+
+#: Model types a training request can target. The foundation models are
+#: pre-trained and do no gradient updates here, so asking to train one is a
+#: request the API cannot honour and rejects rather than silently no-ops.
+TRAINABLE_MODEL_TYPES = frozenset(
+    {
+        ModelTypeEnum.lstm,
+        ModelTypeEnum.xgboost,
+        ModelTypeEnum.random_forest,
+        ModelTypeEnum.unified_lstm,
+        ModelTypeEnum.unified_xgboost,
+        ModelTypeEnum.unified_random_forest,
+    }
+)
 
 
 class ValidationModeEnum(str, Enum):
@@ -205,6 +236,12 @@ class PredictResponse(BaseModel):
     can_train: bool = Field(default=False)
     scenario_paths: Optional[List[List[float]]] = None  # Monte Carlo price paths for fan chart
 
+    # Set when the symbol had nothing servable and training was started for it.
+    # `status` is then "preparing", and this is the job to poll — so a client that
+    # knows only this endpoint still learns that work is underway, instead of
+    # being handed a dead end that says "train the model yourself".
+    preparation: Optional[Dict] = None
+
 
 class HistoricalSignal(BaseModel):
     date: str
@@ -325,6 +362,10 @@ class EnsemblePredictResponse(BaseModel):
     models_available: List[str] = Field(default_factory=list)
     models_unavailable: Dict[str, str] = Field(default_factory=dict)
     degraded: bool = Field(default=False)
+
+    # Populated when nothing was servable and preparation was started. See the
+    # note on PredictResponse.preparation.
+    preparation: Optional[Dict] = None
 
 
 # ── Pattern Detection Schemas ──────────────────────────────────

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react"
 import "./index.css";
 import { fetchPrices, askAgent } from "./utils/api";
 import { useApiHealth, useDataSources, useQuotes, usePrices, useIndicators } from "./hooks/useMarketData";
+import { useModelPreparation } from "./hooks/useModelPreparation";
 import { C, DEFAULT_INDEX_SYMBOL, LEGACY_TICKERS, SP500_LIST, TICKERS } from "./utils/data";
 import { Tab } from "./components/UIComponents";
 
@@ -602,6 +603,11 @@ export default function App() {
         enabled: apiConnected,
     });
 
+    // Model readiness is hoisted here so Predictions and Analysis observe one
+    // preparation run rather than each starting their own. Selecting a ticker is
+    // what triggers it; no tab has a training button, and none needs one.
+    const modelPrep = useModelPreparation(selectedTicker, { enabled: apiConnected });
+
     const priceData = pricesQuery.data ?? null;
     const indicatorData = indicatorsQuery.data ?? null;
     const loading = pricesQuery.isFetching || indicatorsQuery.isFetching;
@@ -808,6 +814,7 @@ export default function App() {
                         indicatorData={indicatorData}
                         dataSource={dataSource}
                         apiConnected={apiConnected}
+                        modelPrep={modelPrep}
                     />
                 )}
                 {activeTab === "predictions" && (
@@ -815,6 +822,7 @@ export default function App() {
                         selectedTicker={selectedTicker}
                         apiConnected={apiConnected}
                         priceData={priceData}
+                        modelPrep={modelPrep}
                     />
                 )}
                 {activeTab === "portfolio" && (

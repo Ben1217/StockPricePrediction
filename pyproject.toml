@@ -72,6 +72,14 @@ foundation = [
     "huggingface_hub>=0.23",
 ]
 
+# The optional comparison foundation models in scripts/unified_benchmark.py.
+# Neither is required: Kronos is the primary model under test, and the benchmark
+# reports the comparison without whichever of these is absent.
+comparison = [
+    "timesfm>=2.0",
+    "chronos-forecasting>=1.5",
+]
+
 # Only needed for the optional PostgreSQL/TimescaleDB path in src/data/data_storage.py
 # and scripts/migrate_sqlite_to_postgres.py. The default storage backend is SQLite,
 # which is in the standard library.

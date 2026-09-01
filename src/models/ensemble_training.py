@@ -117,7 +117,15 @@ def validate_historical_data(df: pd.DataFrame, symbol: str):
         raise ValueError(f"Abnormal adjusted-close daily price spike (>50%) detected for {symbol}")
 
 
-def _download_data(symbol: str, lookback_days: int) -> pd.DataFrame:
+def download_training_data(symbol: str, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> pd.DataFrame:
+    """
+    Validated OHLCV history for one symbol, ready to train on.
+
+    Public because the preparation service fetches once and hands the same frame
+    to every bundle it trains, instead of re-downloading fifteen times. Raises
+    with a readable reason — an unknown ticker, a short history, a stale feed —
+    which is what a caller shows the user when preparation fails.
+    """
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     df = download_stock_data(symbol, start, end)
@@ -266,7 +274,7 @@ def train_regression_bundle(
 
     logger.info("Training %s return-regression bundle for %s horizon=%dd", model_type, symbol, horizon)
 
-    df = raw_df.copy() if raw_df is not None else _download_data(symbol, lookback_days)
+    df = raw_df.copy() if raw_df is not None else download_training_data(symbol, lookback_days)
     feature_config = normalize_feature_config()
 
     dataset, feature_cols, target_col = build_regression_dataset(df, horizon=horizon, feature_config=feature_config)
@@ -484,7 +492,7 @@ def train_ensemble_for_symbol(
     horizons = horizons or TRAINABLE_HORIZONS
     model_types = model_types or DEFAULT_MODEL_TYPES
 
-    raw_df = _download_data(symbol, lookback_days)
+    raw_df = download_training_data(symbol, lookback_days)
     total = len(horizons) * len(model_types)
     completed = 0
     results: List[Dict] = []

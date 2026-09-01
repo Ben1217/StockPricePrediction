@@ -11,6 +11,7 @@ from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException
 
 from src.api.schemas.schemas import (
+    TRAINABLE_MODEL_TYPES,
     BootstrapTrainRequest,
     BootstrapTrainResponse,
     TrainRequest,
@@ -119,6 +120,16 @@ def _run_bootstrap_training(job_id: str, req: BootstrapTrainRequest):
 @router.post("/train", response_model=TrainResponse)
 def train_model(req: TrainRequest):
     """Trigger exact-bundle training for one symbol/model pair."""
+    if req.model_type not in TRAINABLE_MODEL_TYPES:
+        # Kronos, TimesFM and Chronos are pre-trained and do no gradient updates
+        # here. Accepting the job and reporting success would be a lie.
+        raise HTTPException(
+            400,
+            f"{req.model_type.value} is a zero-shot foundation model and is served without "
+            f"training. Trainable model types: "
+            f"{', '.join(sorted(m.value for m in TRAINABLE_MODEL_TYPES))}.",
+        )
+
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
@@ -133,8 +144,7 @@ def train_model(req: TrainRequest):
         model_type=req.model_type.value,
         symbol=req.symbol.upper(),
         message=(
-            f"Training {req.model_type.value} next-day direction bundle for "
-            f"{req.symbol.upper()} started"
+            f"Training {req.model_type.value} bundle for {req.symbol.upper()} started"
         ),
     )
 

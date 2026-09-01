@@ -20,6 +20,7 @@ from ..utils.logger import get_logger
 from .lstm_model import LSTMModel
 from .random_forest_model import RandomForestModel
 from .xgboost_model import XGBoostModel
+from .unified_models import UNIFIED_FACTORIES
 
 logger = get_logger(__name__)
 
@@ -31,12 +32,16 @@ MODEL_FILE_NAMES = {
     "xgboost": "model.json",
     "random_forest": "model.joblib",
     "lstm": "model.pt",
+    "unified_xgboost": "model.joblib",
+    "unified_random_forest": "model.joblib",
+    "unified_lstm": "model.joblib",
 }
 
 MODEL_FACTORIES = {
     "xgboost": XGBoostModel,
     "random_forest": RandomForestModel,
     "lstm": LSTMModel,
+    **UNIFIED_FACTORIES,
 }
 
 CANONICAL_BUNDLE_LAYOUT = "canonical_symbol_model"

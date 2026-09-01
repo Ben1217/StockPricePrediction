@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     Area,
     CartesianGrid,
@@ -11,20 +11,38 @@ import {
     YAxis,
 } from "recharts";
 import { C } from "../utils/data";
-import { ApiError, fetchEnsemblePrediction, fetchPredictions, getEnsembleTrainingStatus, triggerEnsembleTraining } from "../utils/api";
+import { fetchEnsemblePrediction, fetchPredictions } from "../utils/api";
 import DirectionPanel from "../components/DirectionPanel";
-
-/** Stop reporting progress after this long. The server-side job is unaffected. */
-const POLL_TIMEOUT_MS = 30 * 60 * 1000;
+import ModelPreparation from "../components/ModelPreparation";
 
 const HORIZONS = [7, 15, 30, 60];
-const MODEL_KEYS = ["xgboost", "random_forest", "lstm"];
+
+/** Multi-horizon regression bundles. These draw the forecast fan. */
+const LEGACY_MODEL_KEYS = ["xgboost", "random_forest", "lstm"];
+
+/**
+ * Unified next-timeframe models: one price and one P(up) for the next bar.
+ *
+ * Fetched only when one is actually selected, never as part of the "All
+ * Models" sweep. Kronos runs a transformer forward pass per request, so
+ * firing it on every ticker change would stall the tab for everyone who
+ * never opened it.
+ */
+const UNIFIED_MODEL_KEYS = ["unified_xgboost", "unified_random_forest", "unified_lstm", "unified_kronos"];
+
+const MODEL_KEYS = [...LEGACY_MODEL_KEYS, ...UNIFIED_MODEL_KEYS];
+
+const isUnifiedModel = (modelType) => UNIFIED_MODEL_KEYS.includes(modelType);
 const MODEL_OPTIONS = [
     { value: "all", label: "All Models" },
     { value: "ensemble", label: "Ensemble" },
     { value: "lstm", label: "LSTM" },
     { value: "xgboost", label: "XGBoost" },
     { value: "random_forest", label: "Random Forest" },
+    { value: "unified_xgboost", label: "Unified XGBoost" },
+    { value: "unified_random_forest", label: "Unified Random Forest" },
+    { value: "unified_lstm", label: "Unified LSTM" },
+    { value: "unified_kronos", label: "Unified Kronos" },
 ];
 
 const COLORS = {
@@ -33,6 +51,10 @@ const COLORS = {
     lstm: "#60A5FA",
     xgboost: "#F59E0B",
     random_forest: "#34D399",
+    unified_xgboost: "#FB923C",
+    unified_random_forest: "#4ADE80",
+    unified_lstm: "#818CF8",
+    unified_kronos: "#E879F9",
     band: "#6366F1",
     scenario: "#7C8AA5",
     surface: "#161B22",
@@ -52,6 +74,10 @@ const MODEL_LABELS = {
     lstm: "LSTM",
     xgboost: "XGBoost",
     random_forest: "Random Forest",
+    unified_xgboost: "Unified XGBoost",
+    unified_random_forest: "Unified Random Forest",
+    unified_lstm: "Unified LSTM",
+    unified_kronos: "Unified Kronos",
 };
 
 function formatPrice(value) {
@@ -242,6 +268,9 @@ function resolveDisplayData(data, selectedModel) {
             perStepPredictions: payload?.model_info?.per_step_predictions,
             modelOutputCount: payload?.model_info?.model_output_count,
             scenarioPaths: payload?.scenario_paths,
+            probabilityUp: payload?.probability_up,
+            probabilityDown: payload?.probability_down,
+            headsNote: payload?.model_info?.heads_note,
         };
     }
 
@@ -350,97 +379,6 @@ function MetricCard({ label, value, sub, color }) {
                 {value}
             </div>
             {sub && <div style={{ fontSize: 12, color: C.textMid }}>{sub}</div>}
-        </div>
-    );
-}
-
-function TrainButton({ symbol, onComplete }) {
-    const [state, setState] = useState({ loading: false, jobId: null, message: null, error: null });
-    const pollRef = useRef(null);
-
-    async function handleTrain() {
-        // A second click would otherwise leave the previous interval running forever.
-        clearInterval(pollRef.current);
-        setState({ loading: true, jobId: null, message: "Starting ensemble training...", error: null });
-        try {
-            const result = await triggerEnsembleTraining(symbol);
-            const jobId = result?.job_id;
-            setState((s) => ({ ...s, jobId, message: result?.message || "Training started." }));
-
-            const startedAt = Date.now();
-            pollRef.current = setInterval(async () => {
-                try {
-                    const status = await getEnsembleTrainingStatus(jobId);
-                    if (status.status === "completed") {
-                        clearInterval(pollRef.current);
-                        setState({ loading: false, jobId, message: "Training complete.", error: null });
-                        setTimeout(() => onComplete?.(), 1200);
-                    } else if (status.status === "failed") {
-                        clearInterval(pollRef.current);
-                        setState({ loading: false, jobId, message: null, error: status.error || "Training failed." });
-                    } else if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-                        // The job outlives this page, so this is a reporting limit, not a failure.
-                        clearInterval(pollRef.current);
-                        setState({
-                            loading: false,
-                            jobId,
-                            message: "Still training on the server. Reload later to pick up the result.",
-                            error: null,
-                        });
-                    }
-                } catch (err) {
-                    // A 4xx will repeat forever, so stop and say why. Anything else is
-                    // treated as a blip worth another poll.
-                    if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-                        clearInterval(pollRef.current);
-                        setState({
-                            loading: false,
-                            jobId,
-                            message: null,
-                            error:
-                                err.status === 429
-                                    ? "Rate limited while checking training progress. Training may still be running on the server."
-                                    : `Could not read training status (HTTP ${err.status}).`,
-                        });
-                    }
-                }
-            }, 3000);
-        } catch (err) {
-            const rateLimited = err instanceof ApiError && err.status === 429;
-            setState({
-                loading: false,
-                jobId: null,
-                message: null,
-                error: rateLimited
-                    ? "Training is rate limited (10 runs per hour). Wait for the window to clear, then try again."
-                    : err?.message || "Training request failed.",
-            });
-        }
-    }
-
-    useEffect(() => () => clearInterval(pollRef.current), []);
-
-    return (
-        <div style={{ display: "grid", gap: 8, justifyItems: "start" }}>
-            <button
-                type="button"
-                onClick={handleTrain}
-                disabled={state.loading}
-                style={{
-                    background: state.loading ? C.bg3 : COLORS.ensemble,
-                    color: state.loading ? C.textDim : "#10131A",
-                    border: "none",
-                    borderRadius: 8,
-                    padding: "9px 16px",
-                    fontSize: 13,
-                    fontWeight: 800,
-                    cursor: state.loading ? "default" : "pointer",
-                }}
-            >
-                {state.loading ? "Training in progress..." : `Train ensemble for ${symbol}`}
-            </button>
-            {state.message && <div style={{ fontSize: 12, color: C.textMid }}>{state.message}</div>}
-            {state.error && <div style={{ fontSize: 12, color: C.red }}>{state.error}</div>}
         </div>
     );
 }
@@ -800,14 +738,30 @@ function ForecastTable({ rows, modelKey, label }) {
     );
 }
 
-export default function PredictionsTab({ selectedTicker, apiConnected, priceData }) {
+export default function PredictionsTab({ selectedTicker, apiConnected, priceData, modelPrep }) {
     const [horizon, setHorizon] = useState(30);
     const [selectedModel, setSelectedModel] = useState("all");
     const [showScenarios, setShowScenarios] = useState(true);
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
-    const [refreshKey, setRefreshKey] = useState(0);
+
+    // Preparation is App's, shared with the Analysis tab. `readyVersion` ticks
+    // when a training run finishes, which is what re-runs the fetch below —
+    // there is no button, and nothing here decides what gets trained.
+    const readyVersion = modelPrep?.readyVersion ?? 0;
+    // Only a live training run suppresses the normal loading state. The brief
+    // readiness check on every ticker change must not flash a panel over a
+    // forecast that is about to render perfectly well.
+    const preparing = modelPrep?.status === "preparing";
+
+    // Only the models the current view actually shows. A unified model is a
+    // single next-day number that the fan chart has no room for, so selecting
+    // one asks for that model alone; everything else asks for the fan.
+    const activeModelKeys = useMemo(
+        () => (isUnifiedModel(selectedModel) ? [selectedModel] : LEGACY_MODEL_KEYS),
+        [selectedModel],
+    );
 
     useEffect(() => {
         if (!apiConnected) return;
@@ -815,13 +769,15 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
         setError(null);
         Promise.allSettled([
             fetchEnsemblePrediction(selectedTicker, horizon),
-            ...MODEL_KEYS.map((modelType) => fetchPredictions(selectedTicker, modelType, horizon)),
+            ...activeModelKeys.map((modelType) =>
+                fetchPredictions(selectedTicker, modelType, isUnifiedModel(modelType) ? 1 : horizon),
+            ),
         ])
             .then((results) => {
                 const [ensembleResult, ...modelResults] = results;
                 const models = {};
                 const errors = {};
-                MODEL_KEYS.forEach((modelType, index) => {
+                activeModelKeys.forEach((modelType, index) => {
                     const result = modelResults[index];
                     if (result.status === "fulfilled") {
                         models[modelType] = normalizeSingleForecast(result.value, modelType);
@@ -829,7 +785,7 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         models[modelType] = {
                             status: "unavailable",
                             model_available: false,
-                            message: result.reason?.message || "Prediction model not available. Please train or load model bundle.",
+                            message: result.reason?.message || "This model produced no forecast for the current request.",
                             forecasts: [],
                             forecast_points: [],
                         };
@@ -847,7 +803,7 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                 setError(err?.message || "Forecast request failed.");
                 setLoading(false);
             });
-    }, [selectedTicker, horizon, apiConnected, refreshKey]);
+    }, [selectedTicker, horizon, apiConnected, readyVersion, activeModelKeys]);
 
     if (!apiConnected) {
         return (
@@ -862,6 +818,8 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
     const modelUnavailable = !loading && !error && display.unavailable;
     const bullish = Number(display.changePct || 0) >= 0;
     const reliabilityColor = display.reliability === "Low" ? C.red : display.reliability === "Medium" ? C.amber : C.green;
+    // A unified model answers for the next bar whatever the horizon selector says.
+    const horizonLocked = isUnifiedModel(selectedModel);
 
     return (
         <div style={{ display: "grid", gap: 18, paddingBottom: 36 }}>
@@ -894,6 +852,8 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                             <button
                                 key={days}
                                 type="button"
+                                disabled={horizonLocked}
+                                title={horizonLocked ? "Unified models forecast the next bar only" : undefined}
                                 onClick={() => setHorizon(days)}
                                 style={{
                                     background: horizon === days ? COLORS.ensemble : "transparent",
@@ -904,7 +864,8 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                                     minWidth: 42,
                                     fontSize: 12,
                                     fontWeight: 900,
-                                    cursor: "pointer",
+                                    cursor: horizonLocked ? "not-allowed" : "pointer",
+                                    opacity: horizonLocked ? 0.5 : 1,
                                 }}
                             >
                                 {days}D
@@ -919,29 +880,30 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                 costed backtest; the price cone below it is a single scalar per
                 model with the intermediate days interpolated. Reading order
                 should follow evidence, not horizon length. */}
-            <DirectionPanel symbol={selectedTicker} />
+            <DirectionPanel symbol={selectedTicker} modelPrep={modelPrep} />
 
-            {loading && (
+            {/* One panel covers every reason there is nothing to draw, and the
+                server decides which: training under way with its stages, a real
+                failure with a retry, or a model that trained and did not clear
+                its out-of-sample baseline. None of them is a button asking the
+                user to start a training run.
+
+                It renders while preparation is live even if a partial forecast
+                is also on screen — a degraded ensemble filling in its missing
+                member should say so while it happens. */}
+            {(preparing || (!loading && !error && modelUnavailable)) && (
+                <ModelPreparation preparation={modelPrep} context="forecast" />
+            )}
+
+            {!preparing && loading && (
                 <div style={{ padding: 46, color: C.textDim, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, textAlign: "center" }}>
                     Loading forecast...
                 </div>
             )}
 
-            {!loading && error && (
+            {!preparing && !loading && error && (
                 <div style={{ padding: 18, color: C.red, background: "rgba(244,63,94,.08)", border: "1px solid rgba(244,63,94,.35)", borderRadius: 8 }}>
                     {error}
-                </div>
-            )}
-
-            {!loading && !error && modelUnavailable && (
-                <div style={{ padding: 28, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, display: "grid", gap: 16 }}>
-                    <div>
-                        <div style={{ color: C.text, fontSize: 18, fontWeight: 900, marginBottom: 6 }}>Prediction model unavailable</div>
-                        <div style={{ color: C.textMid, fontSize: 13 }}>
-                            {display.message || "Prediction model not available. Please train or load model bundle."}
-                        </div>
-                    </div>
-                    <TrainButton symbol={selectedTicker} onComplete={() => setRefreshKey((key) => key + 1)} />
                 </div>
             )}
 
@@ -954,13 +916,26 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                             sub={display.currentPriceSource ? display.currentPriceSource.replace("_", " ") : null}
                         />
                         <MetricCard
-                            label={`${modelLabel(display.chartModel)} Forecast`}
+                            label={`${modelLabel(display.chartModel)} ${horizonLocked ? "Next Bar" : "Forecast"}`}
                             value={formatPrice(display.target)}
                             sub={`${formatPct(display.changePct)} ${display.signal || ""} | ${display.reliability || "Model"}`}
                             color={bullish ? COLORS.ensemble : C.red}
                         />
-                        <MetricCard label="Upper 95%" value={formatPrice(display.upper95)} color={C.green} />
-                        <MetricCard label="Lower 95%" value={formatPrice(display.lower95)} color={C.red} />
+                        {Number.isFinite(Number(display.probabilityUp)) ? (
+                            <MetricCard
+                                label="Direction"
+                                value={display.probabilityUp >= 0.5 ? "UP" : "DOWN"}
+                                sub={`Up ${(display.probabilityUp * 100).toFixed(1)}% | Down ${((display.probabilityDown ?? 1 - display.probabilityUp) * 100).toFixed(1)}%`}
+                                color={display.probabilityUp >= 0.5 ? C.green : C.red}
+                            />
+                        ) : (
+                            <MetricCard label="Upper 95%" value={formatPrice(display.upper95)} color={C.green} />
+                        )}
+                        <MetricCard
+                            label={horizonLocked ? "Forecast Horizon" : "Lower 95%"}
+                            value={horizonLocked ? "Next 1 Bar" : formatPrice(display.lower95)}
+                            color={horizonLocked ? COLORS.band : C.red}
+                        />
                     </div>
 
                     <ForecastChart
@@ -984,6 +959,19 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         horizon={horizon}
                         scenarioCount={showScenarios ? (display.scenarioPaths?.length ?? 0) : 0}
                     />
+
+                    {display.headsNote && (
+                        <div style={{
+                            padding: "8px 12px",
+                            borderRadius: 8,
+                            background: "rgba(245, 200, 66, 0.08)",
+                            border: `1px solid ${COLORS.ensemble}44`,
+                            color: C.sub,
+                            fontSize: 12,
+                        }}>
+                            {display.headsNote}
+                        </div>
+                    )}
 
                     {display.degraded && display.modelsUnavailable && (
                         <div style={{

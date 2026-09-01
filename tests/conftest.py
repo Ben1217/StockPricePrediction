@@ -7,6 +7,27 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
+from src.models.model_manager import AUTO_PREPARE_ENV
+from src.models.preparation import registry as preparation_registry
+
+
+@pytest.fixture(autouse=True)
+def _no_automatic_training(monkeypatch):
+    """
+    Keep the suite offline.
+
+    Serving routes now start model preparation when they find nothing to serve,
+    and preparation downloads years of bars and fits models on a background
+    thread. A test that hits one of those routes would otherwise kick off a real
+    multi-minute training run whose output lands in the working tree — so
+    automatic starts are off by default and a test that wants one turns it on
+    explicitly with `monkeypatch.setenv(AUTO_PREPARE_ENV, "true")`.
+    """
+    monkeypatch.setenv(AUTO_PREPARE_ENV, "false")
+    preparation_registry.reset()
+    yield
+    preparation_registry.reset()
+
 
 @pytest.fixture
 def sample_ohlcv_data():

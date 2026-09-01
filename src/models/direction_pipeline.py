@@ -29,14 +29,17 @@ enough for an accuracy edge to clear its own standard error.
 
 Public API:
     run_walk_forward(...) -> DirectionRunResult
+    write_direction_outputs(...) -> list[Path]
     run_shuffled_label_check(...) -> dict
     predict_next_session(...) -> dict
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -92,6 +95,16 @@ LEAKAGE_ALPHA = 0.01
 DEFAULT_LEAKAGE_REPEATS = 10
 MIN_LEAKAGE_FITS = 20
 
+# Where a completed run is written and where /api/direction reads it back.
+# One constant, because a report written under a name the route does not look
+# for is a run that silently never happened.
+DEFAULT_REPORT_DIR = Path("data/direction_backtests")
+
+
+def report_stem(ticker: str, model_name: str) -> str:
+    """Filename stem shared by a run's report, predictions, and equity curve."""
+    return f"{ticker.upper().replace('^', '')}_{model_name}"
+
 
 @dataclass
 class DirectionRunResult:
@@ -104,6 +117,36 @@ class DirectionRunResult:
     @property
     def ship(self) -> bool:
         return bool(self.report.get("verdict", {}).get("ship", False))
+
+
+def write_direction_outputs(
+    result: DirectionRunResult,
+    ticker: str,
+    model_name: str,
+    out_dir: Path = DEFAULT_REPORT_DIR,
+) -> List[Path]:
+    """
+    Persist one run's report, predictions, and equity curve.
+
+    Shared by ``scripts/direction_backtest.py`` and the API's preparation
+    service so a run started from a browser lands in exactly the same three
+    files, under the same names, as one started from a terminal. The route that
+    serves them cannot tell the two apart, which is the point.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = report_stem(ticker, model_name)
+
+    report_path = out_dir / f"{stem}_report.json"
+    report_path.write_text(json.dumps(result.report, indent=2), encoding="utf-8")
+
+    equity_path = out_dir / f"{stem}_equity_curve.csv"
+    result.equity_curve.to_csv(equity_path)
+
+    predictions_path = out_dir / f"{stem}_predictions.csv"
+    result.predictions.to_csv(predictions_path)
+
+    return [report_path, equity_path, predictions_path]
 
 
 def _jsonable(value: Any) -> Any:

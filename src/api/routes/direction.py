@@ -14,9 +14,12 @@ skill (see ``bundle_skill_failure`` in :mod:`src.models.ensemble_predictor`):
 a model that cannot beat a constant classifier does not get to look confident.
 
 Evaluation results are read from disk rather than computed per request. A
-walk-forward run is dozens of model fits over a decade of bars; it belongs in a
-scheduled job or a terminal, not inside an HTTP handler. When no report exists
-the response says so and names the command that produces one.
+walk-forward run is dozens of model fits over a decade of bars; it belongs on a
+background worker, not inside an HTTP handler. But "not in this request" is not
+the same as "not our problem": when no report exists, the route starts one
+through :mod:`src.models.preparation` and answers ``status: "preparing"`` with
+the job to poll. The gauge still never ships without its evaluation — it is just
+that the evaluation now gets produced rather than demanded of the user.
 
 Routes:
     GET /api/direction/            list available reports
@@ -35,14 +38,15 @@ from fastapi import APIRouter, HTTPException, Query
 from src.data.direction_data import load_daily_bars
 from src.features.direction_features import build_direction_dataset
 from src.models.direction_models import MODEL_FACTORIES
-from src.models.direction_pipeline import predict_next_session
+from src.models.direction_pipeline import DEFAULT_REPORT_DIR, predict_next_session, report_stem
+from src.models.preparation import preparation_state
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-REPORT_DIR = Path("data/direction_backtests")
+REPORT_DIR = DEFAULT_REPORT_DIR
 
 # Window for the rolling hit-rate strip. 60 sessions is about a quarter: long
 # enough that the number is not pure noise, short enough to show a model
@@ -54,8 +58,11 @@ ROLLING_HIT_RATE_WINDOW = 60
 GAUGE_LOOKBACK_DAYS = 365 * 6
 
 
+# The naming is the writer's, imported rather than restated. A reader with its
+# own copy of the rule is a run that silently never happened the day one of them
+# changes — and ^GSPC, whose caret is stripped, is exactly where they would.
 def _stem(symbol: str, model: str) -> str:
-    return f"{symbol.upper().replace('^', '')}_{model}"
+    return report_stem(symbol, model)
 
 
 def _report_path(symbol: str, model: str) -> Path:
@@ -209,6 +216,36 @@ def _gate_reason(report: Dict[str, Any]) -> Optional[str]:
     return "Not tradeable: " + "; ".join(reasons) + "."
 
 
+def _no_evaluation_message(symbol: str, model: str, preparation: Optional[Dict[str, Any]]) -> str:
+    """
+    Why there is still no evaluation, when one is not being produced right now.
+
+    Three different situations, and reporting the wrong one is how a broken
+    pipeline gets mistaken for a disabled setting: the last run failed, a run
+    finished without leaving a report, or nothing ever started.
+    """
+    status = (preparation or {}).get("status")
+
+    if status == "failed":
+        return (
+            f"The walk-forward evaluation for {symbol} ({model}) failed: "
+            f"{preparation.get('error') or 'unknown error'}."
+        )
+
+    if status == "completed":
+        warnings = preparation.get("warnings") or []
+        suffix = f" ({warnings[0]})" if warnings else ""
+        return (
+            f"Preparation for {symbol} finished without producing a walk-forward "
+            f"evaluation for {model}{suffix}."
+        )
+
+    return (
+        f"No walk-forward evaluation exists for {symbol} ({model}) and automatic "
+        f"preparation did not start. Request one with POST /api/models/{symbol}/prepare."
+    )
+
+
 @router.get("/")
 def list_direction_reports() -> Dict[str, Any]:
     """Every symbol/model pair that has a stored walk-forward report."""
@@ -240,14 +277,15 @@ def get_direction(
     """
     Evaluation, gated live probability, rolling hit rate, and equity curve.
 
-    A 404 here means no walk-forward report has been produced for this
-    symbol/model. That is deliberate: the alternative is serving a probability
-    with nothing to say whether it is worth anything, which is the failure mode
-    the whole pipeline was built to remove.
+    When no report exists the response is a 200 with ``status: "preparing"`` and
+    no ``evaluation`` — the walk-forward run has been started, and the client
+    polls ``preparation.job_id`` until it lands. What has *not* changed is the
+    rule underneath: no gauge is served here without the evaluation beside it.
+    Only the remedy has, from telling a user to run a command to running it.
     """
     # `enum=` on a plain str Query is an OpenAPI hint, not a validator, so an
-    # unknown model would otherwise fall through to the 404 below and tell the
-    # user to run a command with a model name that does not exist.
+    # unknown model would otherwise fall through and start a preparation run for
+    # an estimator that does not exist.
     if model not in MODEL_FACTORIES:
         raise HTTPException(
             status_code=422,
@@ -257,17 +295,32 @@ def get_direction(
     symbol = symbol.upper().strip()
     report = _load_report(symbol, model)
     if report is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No direction report for {symbol} ({model}). Generate one with: "
-                f"python scripts/direction_backtest.py --ticker {symbol} --model {model}"
+        preparation = preparation_state(symbol, direction_model=model)
+        preparing = bool(preparation and preparation.get("status") in ("queued", "running"))
+        return {
+            "symbol": symbol,
+            "model": model,
+            "status": "preparing" if preparing else "unavailable",
+            "evaluation": None,
+            "verdict": None,
+            "backtest": None,
+            "rolling_hit_rate": [],
+            "equity_curve": [],
+            "next_session": None,
+            "preparation": preparation,
+            "message": (
+                f"Running the walk-forward evaluation for {symbol} ({model}). "
+                f"The gauge appears once it has an out-of-sample record to stand on."
+                if preparing
+                else _no_evaluation_message(symbol, model, preparation)
             ),
-        )
+        }
 
     payload: Dict[str, Any] = {
         "symbol": symbol,
         "model": model,
+        "status": "ok",
+        "preparation": None,
         "horizon_days": report["config"]["horizon"],
         "data": {
             key: report.get("data", {}).get(key)

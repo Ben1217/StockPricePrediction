@@ -25,7 +25,6 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -46,15 +45,17 @@ from src.models.direction_pipeline import (  # noqa: E402
     DEFAULT_COST_BPS,
     DEFAULT_MIN_TRAIN,
     DEFAULT_N_FOLDS,
+    DEFAULT_REPORT_DIR,
     DEFAULT_SEED,
     DEFAULT_TEST_SIZE,
     run_walk_forward,
+    write_direction_outputs,
 )
 from src.utils.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
-DEFAULT_OUT_DIR = Path("data/direction_backtests")
+DEFAULT_OUT_DIR = DEFAULT_REPORT_DIR
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -335,19 +336,8 @@ def print_comparison_table(ticker: str, results: Dict[str, Any], cost_bps: float
 
 
 def write_outputs(out_dir: Path, ticker: str, model_name: str, result) -> List[Path]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{ticker.upper().replace('^', '')}_{model_name}"
-
-    report_path = out_dir / f"{stem}_report.json"
-    report_path.write_text(json.dumps(result.report, indent=2), encoding="utf-8")
-
-    equity_path = out_dir / f"{stem}_equity_curve.csv"
-    result.equity_curve.to_csv(equity_path)
-
-    predictions_path = out_dir / f"{stem}_predictions.csv"
-    result.predictions.to_csv(predictions_path)
-
-    return [report_path, equity_path, predictions_path]
+    """Thin wrapper kept for the CLI's argument order; the writer is shared."""
+    return write_direction_outputs(result, ticker, model_name, out_dir)
 
 
 def parse_tickers(raw_tickers: List[str]) -> List[str]:

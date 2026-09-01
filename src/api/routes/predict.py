@@ -60,6 +60,7 @@ from src.models.direction_utils import (
     signal_from_probability,
 )
 from src.models.model_bundle import load_model_bundle
+from src.models.preparation import preparation_state
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -477,7 +478,60 @@ def _monte_carlo_recursive_forecast(
 # Direct multi-horizon forecast (when per-horizon bundles exist)
 # ---------------------------------------------------------------------------
 
-PREDICTION_MODEL_UNAVAILABLE = "Prediction model not available. Please train or load model bundle."
+
+
+def _unavailable_message(
+    symbol: str,
+    horizon: int,
+    detail: str,
+    preparation: Optional[Dict],
+) -> str:
+    """
+    Say which of four things is true, rather than assuming the common one.
+
+    The distinction that matters is between a model that is *not yet* trained and
+    one that *was* trained and did not earn the right to be served. Telling a user
+    to retrain the second kind sends them round a loop that ends here again, since
+    refitting the same bars reproduces the same verdict. But the reverse mistake
+    is just as bad: reporting a missing bundle as a settled measurement would hide
+    a training run that failed or never started.
+    """
+    status = (preparation or {}).get("status")
+    unproven = "constant forecast" in detail
+
+    if status in ("queued", "running"):
+        return (
+            f"Preparing {symbol} models. Training is running in the background; "
+            f"this view updates as soon as it finishes."
+        )
+
+    if status == "failed":
+        return (
+            f"Could not prepare {symbol} models: "
+            f"{(preparation or {}).get('error') or 'training failed'}."
+        )
+
+    if unproven:
+        return (
+            f"No forecast for {symbol} at horizon {horizon}: {detail}. This is a "
+            f"measured out-of-sample result, not a missing model — retraining the "
+            f"same history reproduces the same verdict, so none is scheduled."
+        )
+
+    if status == "completed":
+        # Training ran and the bundle still is not servable. The per-model
+        # reasons live in `warnings`; the first one is the actionable one.
+        warnings = (preparation or {}).get("warnings") or []
+        suffix = f" ({warnings[0]})" if warnings else ""
+        return (
+            f"Preparation finished for {symbol} but no forecast is available at "
+            f"horizon {horizon}: {detail}{suffix}."
+        )
+
+    return (
+        f"No forecast for {symbol} at horizon {horizon}: {detail}. Automatic "
+        f"preparation did not start — request it with POST /api/models/{symbol}/prepare."
+    )
 
 
 def _unavailable_prediction_response(
@@ -489,16 +543,19 @@ def _unavailable_prediction_response(
     current_price_source: str,
     reason: str,
     message: str,
+    preparation: Optional[Dict] = None,
 ) -> PredictResponse:
+    preparing = bool(preparation and preparation.get("status") in ("queued", "running"))
+    status = "preparing" if preparing else "unavailable"
     model_info = {
         "requested_model": model_type,
         "requested_horizon": horizon,
         "model_available": False,
-        "status": "unavailable",
+        "status": status,
         "reason": reason,
         "message": message,
         "can_train": True,
-        "source": "missing_bundle" if reason == "missing_bundle" else "unavailable",
+        "source": "missing_bundle" if reason == "missing_bundle" else status,
     }
     return PredictResponse(
         symbol=symbol,
@@ -509,11 +566,12 @@ def _unavailable_prediction_response(
         prediction_date=None,
         forecasts=[],
         model_info=model_info,
-        status="unavailable",
+        status=status,
         model_available=False,
         reason=reason,
         message=message,
         can_train=True,
+        preparation=preparation,
     )
 
 
@@ -632,14 +690,21 @@ def _predict_regression_or_unavailable(
         return response
 
     _, status_reason = regression_bundle_status(symbol, model_type, horizon)
+    detail = status_reason or f"no usable {model_type} bundle exists"
+
+    # Nothing to serve — so start the training that would fix it, rather than
+    # returning a dead end with a command for the user to run. `preparation` is
+    # None when training cannot help: the bundle exists and failed its skill
+    # gate, and refitting the same bars would fail it again.
+    preparation = preparation_state(symbol)
     logger.info(
-        "Unusable regression bundle for %s %s h=%s: %s. Client must submit training.",
+        "Unusable regression bundle for %s %s h=%s: %s. Preparation %s.",
         symbol,
         model_type,
         horizon,
-        status_reason,
+        detail,
+        "started/joined" if preparation else "not applicable",
     )
-    detail = status_reason or f"no usable {model_type} bundle exists"
     return _unavailable_prediction_response(
         symbol=symbol,
         model_type=model_type,
@@ -647,11 +712,371 @@ def _predict_regression_or_unavailable(
         current_price=current_price,
         current_price_source=current_price_source,
         reason="unproven_bundle" if "constant forecast" in detail else "missing_bundle",
-        message=(
-            f"No forecast for {symbol} at horizon {horizon}: {detail}. "
-            f"Retrain via POST /api/predict/ensemble/train, then retry."
-        ),
+        message=_unavailable_message(symbol, horizon, detail, preparation),
+        preparation=preparation,
     )
+
+
+# ---------------------------------------------------------------------------
+# Unified models: next-timeframe price and direction from one call
+# ---------------------------------------------------------------------------
+
+# The unified bundles are trained on the direction feature set, not the
+# regression one, so serving has to rebuild features the same way training did.
+# Reaching for build_feature_frame here would silently hand the model a
+# different, wider matrix and fail on the column check.
+
+
+def _unified_feature_rows(
+    raw_df: pd.DataFrame,
+    feature_columns: List[str],
+    rows_needed: int,
+) -> Tuple[pd.Timestamp, np.ndarray]:
+    """
+    The most recent ``rows_needed`` complete feature rows, in training column order.
+
+    A tabular model needs one row; an LSTM needs its whole lookback window. Both
+    come from :func:`build_direction_dataset`'s own feature builder, so the
+    columns a bundle was fitted on are the columns it is served.
+    """
+    from src.features.chart_patterns import add_chart_pattern_features
+    from src.features.direction_features import (
+        DIRECTION_FEATURE_CONFIG,
+        add_direction_features,
+    )
+    from src.features.feature_engineering import build_regression_feature_frame
+
+    # Same three steps, same config, same order as build_direction_dataset.
+    frame = build_regression_feature_frame(raw_df, feature_config=dict(DIRECTION_FEATURE_CONFIG))
+    if frame.empty:
+        raise HTTPException(422, "Not enough history to build features")
+    frame = add_chart_pattern_features(add_direction_features(frame))
+
+    missing = [column for column in feature_columns if column not in frame.columns]
+    if missing:
+        raise HTTPException(
+            422,
+            f"Feature pipeline is missing {len(missing)} column(s) the bundle was trained on: "
+            f"{missing[:5]}. Retrain the bundle.",
+        )
+
+    complete = frame[feature_columns].dropna()
+    if len(complete) < rows_needed:
+        raise HTTPException(
+            422,
+            f"Need {rows_needed} complete feature rows for inference, have {len(complete)}",
+        )
+    window = complete.iloc[-rows_needed:]
+
+    # A sequence model's lookback has to be consecutive bars. Dropping
+    # incomplete rows can in principle leave a hole, and a gapped window would
+    # be served without complaint and quietly mean something else -- the model
+    # would read a jump across the gap as a real price move.
+    if rows_needed > 1:
+        expected = frame.index[frame.index.get_loc(window.index[0]) : ]
+        if not window.index.equals(expected[:rows_needed]):
+            raise HTTPException(
+                422,
+                f"The last {rows_needed} usable feature rows are not consecutive bars; "
+                "the feature window has a gap. Refresh the price history and retry.",
+            )
+
+    return window.index[-1], window.to_numpy(dtype=np.float64)
+
+
+def _predict_unified_kronos(
+    *,
+    symbol: str,
+    requested_horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+) -> PredictResponse:
+    """
+    Zero-shot next-day forecast from the candlestick foundation model.
+
+    Kronos never sees the engineered features: it samples tomorrow's candle from
+    the raw bars, and both outputs fall out of the same set of draws -- the
+    median sampled close is the price, the share of draws above today's close is
+    P(up).
+    """
+    from src.models.unified_models import foundation_model_availability, get_kronos_singleton
+
+    available, reason = foundation_model_availability("unified_kronos")
+    if not available:
+        return _unavailable_prediction_response(
+            symbol=symbol,
+            model_type="unified_kronos",
+            horizon=requested_horizon,
+            current_price=current_price,
+            current_price_source=current_price_source,
+            reason="model_not_installed",
+            message=(
+                f"Kronos is not installed ({reason}). Run scripts/setup_kronos.py and "
+                'pip install -e ".[foundation]".'
+            ),
+        )
+
+    kronos = get_kronos_singleton()
+    kronos.set_ohlcv_context(raw_df)
+    as_of = pd.Timestamp(raw_df.index[-1])
+    # Kronos rebases its forecast onto the last *bar* close, so the band is
+    # anchored there even when current_price came from a live quote.
+    predicted_price, p_up = kronos.predict_latest(as_of, float(raw_df["Close"].iloc[-1]))
+
+    return _unified_prediction_response(
+        symbol=symbol,
+        model_type="unified_kronos",
+        requested_horizon=requested_horizon,
+        raw_df=raw_df,
+        current_price=current_price,
+        current_price_source=current_price_source,
+        predicted_price=predicted_price,
+        p_up=p_up,
+        source="zero_shot_foundation_model",
+        can_train=False,
+        extra_info={
+            "pretrained": True,
+            "gradient_updates": 0,
+            "sample_count": kronos.model.sample_count,
+            "lookback_bars": kronos.model.lookback,
+            # The Monte-Carlo standard error on P(up) at its worst (p = 0.5).
+            # Reported so a 52% reading is not mistaken for a real edge.
+            "monte_carlo_se_of_p_up": round(float(np.sqrt(0.25 / kronos.model.sample_count)), 4),
+        },
+    )
+
+
+def _predict_unified_bundle(
+    *,
+    symbol: str,
+    model_type: str,
+    requested_horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+) -> PredictResponse:
+    """Next-day forecast from a trained unified bundle (XGBoost / Random Forest / LSTM)."""
+    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+    if bundle is None:
+        # Unified bundles are not in the default preparation plan — nothing
+        # renders them until a user picks one by name. Asking for one is that
+        # signal, so it is trained on demand here rather than for every ticker.
+        preparation = preparation_state(symbol, unified_models=[model_type])
+        return _unavailable_prediction_response(
+            symbol=symbol,
+            model_type=model_type,
+            horizon=requested_horizon,
+            current_price=current_price,
+            current_price_source=current_price_source,
+            reason="missing_bundle",
+            message=_unavailable_message(
+                symbol,
+                requested_horizon,
+                f"no {model_type} bundle is trained for {symbol}",
+                preparation,
+            ),
+            preparation=preparation,
+        )
+
+    sequence_length = max(1, int(getattr(bundle.model, "sequence_length", 1)))
+    timestamp, rows = _unified_feature_rows(raw_df, bundle.feature_columns, sequence_length)
+    if bundle.scaler is not None:
+        rows = bundle.scaler.transform(rows)
+
+    predicted_price, p_up = bundle.model.predict_latest(
+        np.nan_to_num(rows, nan=0.0, posinf=0.0, neginf=0.0), current_price
+    )
+
+    return _unified_prediction_response(
+        symbol=symbol,
+        model_type=model_type,
+        requested_horizon=requested_horizon,
+        raw_df=raw_df,
+        current_price=current_price,
+        current_price_source=current_price_source,
+        predicted_price=predicted_price,
+        p_up=p_up,
+        source="trained_bundle",
+        can_train=True,
+        extra_info={
+            "version_id": bundle.version_id,
+            "trained_at": bundle.metadata.get("trained_at"),
+            "sequence_length": sequence_length,
+            "feature_count": len(bundle.feature_columns),
+            "features_as_of": str(timestamp.date()),
+        },
+    )
+
+
+def _unified_prediction_response(
+    *,
+    symbol: str,
+    model_type: str,
+    requested_horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+    predicted_price: float,
+    p_up: float,
+    source: str,
+    can_train: bool,
+    extra_info: Optional[Dict] = None,
+) -> PredictResponse:
+    """
+    Package a unified model's two outputs into the dashboard's response shape.
+
+    The horizon is pinned to one bar whatever was requested. These models are
+    trained to forecast the next timeframe only; stretching a one-step forecast
+    over 30 days would produce a curve with no model behind it.
+    """
+    expected_change_pct = ((predicted_price / current_price) - 1.0) * 100.0 if current_price else 0.0
+    prediction_date = _next_business_date(raw_df.index[-1])
+
+    # The price and the probability come from two heads trained on different
+    # losses, so they can point opposite ways on a near-coin-flip day. That is
+    # information, not a bug -- but it has to be visible, or the dashboard shows
+    # "UP 51%" above a lower target price with nothing to explain it.
+    price_says_up = predicted_price >= current_price
+    heads_agree = price_says_up == (p_up >= 0.5)
+
+    model_info = {
+        "requested_model": model_type,
+        "serving_model": model_type,
+        "requested_horizon": requested_horizon,
+        "served_horizon": NEXT_DAY_HORIZON,
+        "objective": "unified_price_and_direction",
+        "model_available": True,
+        "status": "available",
+        "source": source,
+        "can_train": can_train,
+        "heads_agree": bool(heads_agree),
+        "direction_label": "UP" if p_up >= 0.5 else "DOWN",
+        **(extra_info or {}),
+    }
+    if not heads_agree:
+        model_info["heads_note"] = (
+            "The price head and the direction head disagree on this bar; "
+            "P(up) is close to 0.5, so treat the signal as weak."
+        )
+    if requested_horizon != NEXT_DAY_HORIZON:
+        model_info["horizon_note"] = (
+            f"{model_type} forecasts one timeframe ahead; the {requested_horizon}-day "
+            "request was served as next-day."
+        )
+
+    return PredictResponse(
+        symbol=symbol,
+        model_type=model_type,
+        horizon=NEXT_DAY_HORIZON,
+        current_price=round(float(current_price), 2),
+        current_price_source=current_price_source,
+        predicted_price=round(float(predicted_price), 2),
+        target_price=round(float(predicted_price), 2),
+        expected_change_pct=round(float(expected_change_pct), 2),
+        direction=direction_from_probability(p_up),
+        signal=signal_from_probability(p_up),
+        confidence=round(confidence_from_probability(p_up), 4),
+        probability_up=round(float(p_up), 4),
+        probability_down=round(float(1.0 - p_up), 4),
+        expected_move=f"{expected_change_pct:+.2f}%",
+        prediction_date=prediction_date,
+        forecasts=[
+            ForecastPoint(
+                date=prediction_date,
+                predicted=round(float(predicted_price), 2),
+                upper95=round(float(predicted_price), 2),
+                lower95=round(float(predicted_price), 2),
+                upper68=round(float(predicted_price), 2),
+                lower68=round(float(predicted_price), 2),
+            )
+        ],
+        model_info=model_info,
+        status="ok",
+        model_available=True,
+        can_train=can_train,
+        scenario_paths=None,
+    )
+
+
+def _predict_unified_univariate(
+    *,
+    symbol: str,
+    model_type: str,
+    requested_horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+) -> PredictResponse:
+    """
+    Zero-shot next-bar forecast from TimesFM or Chronos.
+
+    These are optional comparison models: general-purpose time-series
+    forecasters rather than financial ones. When the package is absent the route
+    says so instead of failing, because the rest of the comparison stands
+    without them.
+    """
+    from src.models.unified_models import build_unified_model, foundation_model_availability
+
+    available, reason = foundation_model_availability(model_type)
+    if not available:
+        return _unavailable_prediction_response(
+            symbol=symbol,
+            model_type=model_type,
+            horizon=requested_horizon,
+            current_price=current_price,
+            current_price_source=current_price_source,
+            reason="model_not_installed",
+            message=(
+                f"{model_type} is an optional comparison model and is not installed "
+                f'({reason}). Install it with: pip install -e ".[comparison]".'
+            ),
+        )
+
+    model = build_unified_model(model_type)
+    closes = raw_df["Close"].astype(float)
+    try:
+        predicted_price, p_up = model.predict_latest(closes, float(closes.iloc[-1]))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    return _unified_prediction_response(
+        symbol=symbol,
+        model_type=model_type,
+        requested_horizon=requested_horizon,
+        raw_df=raw_df,
+        current_price=current_price,
+        current_price_source=current_price_source,
+        predicted_price=predicted_price,
+        p_up=p_up,
+        source="zero_shot_foundation_model",
+        can_train=False,
+        extra_info={"pretrained": True, "gradient_updates": 0, "context_bars": model.lookback},
+    )
+
+
+def _predict_unified_model(
+    *,
+    symbol: str,
+    model_type: str,
+    requested_horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+) -> PredictResponse:
+    """Route a ``unified_*`` request to the zero-shot or the trained-bundle path."""
+    arguments = {
+        "symbol": symbol,
+        "requested_horizon": requested_horizon,
+        "raw_df": raw_df,
+        "current_price": current_price,
+        "current_price_source": current_price_source,
+    }
+    if model_type == "unified_kronos":
+        return _predict_unified_kronos(**arguments)
+    if model_type in ("unified_timesfm", "unified_chronos"):
+        return _predict_unified_univariate(model_type=model_type, **arguments)
+    return _predict_unified_bundle(model_type=model_type, **arguments)
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +1092,20 @@ def predict(req: PredictRequest):
     raw_df = _download_prediction_data(symbol)
     current_price, current_price_source = _latest_available_price(symbol, raw_df)
 
+    # ── Unified models (Kronos, unified_xgboost, …) ──────────────────────
+    # These always produce a single next-day price + direction; they never
+    # use the legacy per-horizon regression bundles or Monte Carlo paths.
+    if model_type.startswith("unified_"):
+        return _predict_unified_model(
+            symbol=symbol,
+            model_type=model_type,
+            requested_horizon=requested_horizon,
+            raw_df=raw_df,
+            current_price=current_price,
+            current_price_source=current_price_source,
+        )
+
+    # ── Legacy per-horizon regression bundles ─────────────────────────────
     if requested_horizon in SUPPORTED_FORECAST_HORIZONS:
         return _predict_regression_or_unavailable(
             symbol=symbol,
@@ -677,10 +1116,17 @@ def predict(req: PredictRequest):
             current_price_source=current_price_source,
         )
 
+    # ── Legacy direction-only bundles (next-day) ─────────────────────────
     bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
 
     if bundle is None:
-        message = f"No trained {model_type} bundle found for {symbol}. {PREDICTION_MODEL_UNAVAILABLE}"
+        preparation = preparation_state(symbol)
+        message = _unavailable_message(
+            symbol,
+            requested_horizon,
+            f"no trained {model_type} bundle exists",
+            preparation,
+        )
         return _unavailable_prediction_response(
             symbol=symbol,
             model_type=model_type,
@@ -688,6 +1134,7 @@ def predict(req: PredictRequest):
             current_price=current_price,
             current_price_source=current_price_source,
             reason="missing_bundle",
+            preparation=preparation,
             message=message,
         )
 
@@ -898,19 +1345,24 @@ def ensemble_predict(req: EnsemblePredictRequest):
 
     servable, blocked = ensemble_availability(symbol, horizon)
     if not servable:
+        # Every member is unservable. Start the training that can fix that and
+        # report it as work in progress; the client polls instead of being told
+        # to go and run a command. When training cannot help — the bundles are
+        # there and failed their skill gate — `preparation` comes back None and
+        # the status stays "unavailable" with the measured reason.
+        preparation = preparation_state(symbol)
+        detail = next(iter(blocked.values()), "no bundles are trained")
+        preparing = bool(preparation and preparation.get("status") in ("queued", "running"))
         return EnsemblePredictResponse(
             symbol=symbol,
             current_price=round(current_price, 2),
             current_price_source=current_price_source,
             horizon=horizon,
-            status="unavailable",
+            status="preparing" if preparing else "unavailable",
             model_available=False,
             models_unavailable=blocked,
-            message=(
-                f"No ensemble forecast for {symbol} at horizon {horizon}: "
-                f"{next(iter(blocked.values()), 'no bundles are trained')}. "
-                f"Retrain via POST /api/predict/ensemble/train."
-            ),
+            message=_unavailable_message(symbol, horizon, detail, preparation),
+            preparation=preparation,
         )
 
     # Serve with whatever members are ready. Only the servable types are requested
@@ -971,12 +1423,23 @@ def ensemble_predict(req: EnsemblePredictRequest):
 
     weights_dict = {r.model_type: r.weight for r in forecast.model_predictions}
 
+    # A partial ensemble still answers, so this is served rather than blocked.
+    # Preparation is started anyway: the missing member is trained in the
+    # background and the next request gets the full ensemble, with no one having
+    # been shown a training button. `preparation_state` is a no-op when the gap
+    # is a failed skill gate, which training would not close.
     degraded_message = None
+    degraded_preparation = None
     if blocked:
+        degraded_preparation = preparation_state(symbol)
         degraded_message = (
             f"Partial ensemble: {', '.join(servable)} served; "
             + "; ".join(f"{m} excluded because {why}" for m, why in blocked.items())
-            + ". Retrain via POST /api/predict/ensemble/train."
+            + (
+                ". The missing member is training in the background."
+                if degraded_preparation and degraded_preparation.get("status") in ("queued", "running")
+                else "."
+            )
         )
 
     return EnsemblePredictResponse(
@@ -993,6 +1456,7 @@ def ensemble_predict(req: EnsemblePredictRequest):
         models_available=servable,
         models_unavailable=blocked,
         degraded=bool(blocked),
+        preparation=degraded_preparation,
         scenario_paths=forecast.scenario_paths,
         path_type=getattr(forecast, "path_type", "compounded_interpolation"),
         per_step_predictions=getattr(forecast, "per_step_predictions", False),

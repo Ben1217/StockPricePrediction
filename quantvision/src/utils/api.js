@@ -178,6 +178,41 @@ export async function listModels() {
     return apiFetch("/training/models");
 }
 
+// ── Model readiness & automatic preparation ──────────────────
+/**
+ * What a symbol can serve, and whatever preparation job is attached to it.
+ *
+ * Read-only. This is the call the dashboard makes on every ticker change, so it
+ * must never train anything by itself — `prepareModels` below is the one that
+ * starts work.
+ */
+export async function fetchModelReadiness(symbol) {
+    return apiFetch(`/models/${encodeSymbol(symbol)}`);
+}
+
+/**
+ * Train whatever `symbol` is missing, in the background.
+ *
+ * Idempotent: called while a job runs it returns that same job, and called when
+ * nothing needs training it returns readiness with no job. So the UI can fire it
+ * on every ticker change without tracking state itself.
+ *
+ * `force` skips the server's post-attempt cooldown. It belongs on a Retry button
+ * a user pressed after reading an error, and nowhere else — automatic retries
+ * with force would defeat the guard that stops a doomed run repeating.
+ */
+export async function prepareModels(symbol, { force = false } = {}) {
+    return apiFetch(`/models/${encodeSymbol(symbol)}/prepare`, {
+        method: "POST",
+        body: JSON.stringify({ force }),
+    });
+}
+
+/** Poll one preparation job. 404 once it ages out of the server's tracker. */
+export async function getPreparationStatus(jobId) {
+    return apiFetch(`/models/prepare/${encodeURIComponent(jobId)}`);
+}
+
 // ── Predictions ─────────────────────────────────────────────
 export async function fetchPredictions(symbol, modelType = "xgboost", horizon = 1) {
     return apiFetch("/predict", {

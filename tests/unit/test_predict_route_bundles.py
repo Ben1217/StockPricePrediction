@@ -79,7 +79,11 @@ def test_predict_returns_explicit_unavailable_when_no_bundle_exists():
     assert payload["reason"] == "missing_bundle"
     assert payload["model_info"]["status"] == "unavailable"
     assert payload["can_train"] is True
-    assert "No trained xgboost bundle found" in payload["model_info"]["message"]
+    assert "no trained xgboost bundle exists" in payload["model_info"]["message"]
+    # The message must not hand the user a command to run. With automatic
+    # preparation on, the server starts the training itself; with it off, the
+    # remedy named is an API call an operator makes, not a terminal session.
+    assert "scripts/" not in payload["model_info"]["message"]
 
 
 def test_predict_uses_recursive_one_step_bundle_when_available():
@@ -203,7 +207,11 @@ def test_ensemble_predict_explains_why_an_unproven_bundle_is_not_served():
     assert payload["status"] == "unavailable"
     assert payload["model_available"] is False
     assert "does not beat a constant forecast" in payload["message"]
-    assert "/api/predict/ensemble/train" in payload["message"]
+    # A failed skill gate is a measurement, not a missing artifact, so the
+    # response must not read as "come back once it is trained" — retraining the
+    # same bars reproduces the same verdict, and preparation declines to try.
+    assert "not a missing model" in payload["message"]
+    assert payload["preparation"] is None
     assert payload["models_unavailable"] == blocked
 
 

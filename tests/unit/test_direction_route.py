@@ -107,12 +107,58 @@ def _write(report_dir: Path, report: dict, symbol="TEST", model="logistic"):
     }, index=index).to_csv(report_dir / f"{stem}_equity_curve.csv")
 
 
+class _StubJob:
+    """The shape `preparation_state` returns, without a background thread."""
+
+    def as_dict(self):
+        return {
+            "job_id": "job-1",
+            "symbol": "NOPE",
+            "status": "running",
+            "progress": 0.2,
+            "stages": [],
+            "error": None,
+        }
+
+
 class TestDirectionRoute:
-    def test_missing_report_is_404_with_the_command_to_fix_it(self, client, report_dir):
+    def test_missing_report_reports_preparation_rather_than_404(self, client, report_dir):
+        """
+        A symbol with no evaluation yet is a job to start, not an error to raise.
+
+        The 404 this replaces was correct about the data and wrong about the
+        remedy: it told the user to run a Python command. What must not change is
+        that the gauge stays absent — `next_session` is None until an evaluation
+        exists to judge it by.
+        """
         response = client.get("/api/direction/NOPE?include_gauge=false")
-        assert response.status_code == 404
-        # The message has to be actionable: a bare 404 leaves the user guessing.
-        assert "scripts/direction_backtest.py" in response.json()["detail"]
+        assert response.status_code == 200
+        payload = response.json()
+        # Auto-preparation is off in tests, so this is the "cannot start it"
+        # branch; either way the status is never "ok" and no gauge is served.
+        assert payload["status"] in {"preparing", "unavailable"}
+        assert payload["evaluation"] is None
+        assert payload["next_session"] is None
+        assert "scripts/direction_backtest.py" not in (payload["message"] or "")
+
+    def test_missing_report_starts_a_walk_forward_run(self, client, report_dir, monkeypatch):
+        """With auto-preparation on, the request is what produces the evaluation."""
+        started = {}
+
+        def _fake_ensure(symbol, **kwargs):
+            started["symbol"] = symbol
+            started["direction_model"] = kwargs.get("direction_model")
+            return _StubJob()
+
+        monkeypatch.setattr(direction_route, "preparation_state",
+                            lambda symbol, **kw: _fake_ensure(symbol, **kw).as_dict())
+
+        payload = client.get("/api/direction/NOPE?include_gauge=false").json()
+        assert started["symbol"] == "NOPE"
+        assert started["direction_model"] == "logistic"
+        assert payload["status"] == "preparing"
+        assert payload["preparation"]["job_id"] == "job-1"
+        assert payload["next_session"] is None
 
     def test_evaluation_always_carries_the_interval(self, client, report_dir):
         _write(report_dir, _report(ship=False, failed=["accuracy_edge_is_significant"]))

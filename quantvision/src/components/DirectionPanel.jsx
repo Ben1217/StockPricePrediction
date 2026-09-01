@@ -36,6 +36,7 @@ import {
 import { ApiError, fetchDirection } from "../utils/api";
 import { C } from "../utils/data";
 import { Badge, Section } from "./UIComponents";
+import ModelPreparation from "./ModelPreparation";
 
 const pct = (value, digits = 1) =>
     typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
@@ -244,17 +245,34 @@ function BaselineTable({ evaluation }) {
 }
 
 /* ─── Panel ──────────────────────────────────────────────────── */
-export default function DirectionPanel({ symbol, model = "logistic" }) {
+export default function DirectionPanel({ symbol, model = "logistic", modelPrep }) {
     const [state, setState] = useState({ status: "idle", data: null, error: null });
+
+    // The walk-forward evaluation is one of the artifacts App's preparation run
+    // produces, so this refetches when that run finishes rather than polling on
+    // its own or asking the user to go and generate one.
+    const readyVersion = modelPrep?.readyVersion ?? 0;
 
     const load = useCallback(async (signal) => {
         setState((prev) => ({ ...prev, status: "loading", error: null }));
         try {
             const data = await fetchDirection(symbol, model, true);
-            if (!signal?.aborted) setState({ status: "ready", data, error: null });
+            if (signal?.aborted) return;
+            // The server answers 200 with status "preparing" or "unavailable"
+            // when no evaluation exists yet — it has started the run, or said
+            // why it cannot. Either way the gauge stays absent, which is the
+            // invariant: a probability is never shown without the measured
+            // accuracy that says whether it means anything.
+            setState({
+                status: data?.evaluation ? "ready" : "absent",
+                data,
+                error: data?.message || null,
+            });
         } catch (err) {
             if (signal?.aborted) return;
             setState({
+                // A 404 no longer means "no report" — the route stopped raising
+                // one for that — so it is treated as the transport error it now is.
                 status: err instanceof ApiError && err.status === 404 ? "absent" : "error",
                 data: null,
                 error: err.message,
@@ -266,7 +284,7 @@ export default function DirectionPanel({ symbol, model = "logistic" }) {
         const controller = new AbortController();
         load(controller.signal);
         return () => controller.abort();
-    }, [load]);
+    }, [load, readyVersion]);
 
     if (state.status === "loading" || state.status === "idle") {
         return <Section title="Next-day direction"><div style={{ color: C.textDim, fontSize: 12 }}>Loading…</div></Section>;
@@ -275,17 +293,13 @@ export default function DirectionPanel({ symbol, model = "logistic" }) {
     if (state.status === "absent") {
         return (
             <Section title="Next-day direction">
-                <div style={{ color: C.textMid, fontSize: 12, lineHeight: 1.7 }}>
-                    No walk-forward evaluation exists for <strong>{symbol}</strong> yet. The gauge is not
-                    shown without one: a probability with no measured out-of-sample accuracy beside it
-                    cannot be judged.
-                    <pre style={{
-                        background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 6,
-                        padding: "10px 12px", marginTop: 10, fontSize: 11, color: C.cyan, overflowX: "auto",
-                    }}>
-python scripts/direction_backtest.py --ticker {symbol} --model {model}
-                    </pre>
-                </div>
+                {modelPrep ? (
+                    <ModelPreparation preparation={modelPrep} context="direction evaluation" />
+                ) : (
+                    <div style={{ color: C.textMid, fontSize: 12, lineHeight: 1.7 }}>
+                        {state.error || `Preparing the walk-forward evaluation for ${symbol}.`}
+                    </div>
+                )}
             </Section>
         );
     }

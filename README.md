@@ -6,6 +6,7 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 
 - Analysis dashboard with OHLCV charts, indicator overlays, market-session data, and rule-based sentiment
 - Forecasting endpoints and UI for `xgboost`, `random_forest`, and `lstm` models, with statistical fallback forecasts when trained artifacts are unavailable
+- A **unified next-bar comparison** (`scripts/unified_benchmark.py`) that scores LSTM, XGBoost, Random Forest, the dynamic ensemble and the Kronos foundation model on identical walk-forward folds, reporting price accuracy and directional accuracy separately against the majority-class base rate — the experiment behind the question of whether a foundation model beats the existing stack
 - A next-day **direction classifier** (`P(up tomorrow)` plus a price *range*) reading candlestick shape through 46 engineered chart-pattern features or through two foundation models (TabPFN, Kronos), with walk-forward evaluation, naive-baseline comparison, a leakage test, and a costed long/flat backtest — the one forecasting path in the repo that is gated on a measured out-of-sample result
 - Multi-timeframe pattern detection, support/resistance analysis, and confluence ranking
 - Portfolio optimization with `max_sharpe`, `min_volatility`, `max_return`, and `risk_parity`, plus efficient frontier, drift, alerts, sector, correlation, and Monte Carlo endpoints
@@ -124,7 +125,38 @@ python scripts/train_models.py
 
 Trained artifacts are stored under `models/saved_models/`, and metadata is stored under `models/model_metadata/`.
 
+### Automatic model preparation
+
+Selecting a ticker in the UI is the whole action. When a serving route finds
+nothing to serve for a symbol, it starts the training in the background and the
+response carries the job to poll; the tab shows the stages and refreshes itself
+when they finish. Nobody clicks "train", and no user is asked to run a Python
+command to fill a gap the server can fill itself.
+
+```
+GET  /api/models/NVDA              what NVDA can serve, and why not
+POST /api/models/NVDA/prepare      train what is missing (idempotent)
+GET  /api/models/prepare/{job_id}  poll one job
+```
+
+Four things keep an auto-triggered pipeline from overwhelming its own server:
+one job per symbol, a bounded worker pool (`QUANTVISION_PREPARE_WORKERS`), a
+post-attempt cooldown (`QUANTVISION_PREPARE_COOLDOWN_SECONDS`), and a kill switch
+(`QUANTVISION_AUTO_PREPARE=false`). Artifacts older than
+`QUANTVISION_MODEL_MAX_AGE_DAYS` are refreshed in the background and keep serving
+while that happens.
+
+**Preparation does not retrain a bundle that failed its skill gate.** A model
+that trained cleanly and then lost to a constant forecast out-of-sample has been
+measured, not skipped, and refitting the same history reproduces the same
+verdict. Those symbols report the measurement instead of offering a training
+button — which is also why the API can safely start training on its own: there is
+no state it can get stuck retrying.
+
 ### Evaluate the next-day direction classifier
+
+The API runs this for you when a symbol has no evaluation yet. The CLI is for
+running one deliberately — a different model, a longer history, more folds:
 
 ```bash
 python scripts/direction_backtest.py --ticker AAPL --start 2015-01-01 --folds 8 --cost-bps 10
@@ -213,6 +245,87 @@ volatility, so it is genuinely per-day; the skew comes from the model's measured
 conviction. Coverage is reported out-of-sample — a band claiming 90% that covers
 60% is decoration, and the report says so.
 
+### The unified model comparison: can Kronos beat what is already here?
+
+```bash
+python scripts/unified_benchmark.py --symbols AAPL --n-splits 3        # the experiment
+python scripts/unified_benchmark.py --quick                            # fast smoke test
+python scripts/unified_benchmark.py --models unified_xgboost,unified_kronos
+python scripts/unified_benchmark.py --interval 15m --test-size 200     # intraday
+```
+
+The timeframe is a flag, not a constant. `--interval` sets the bar size and the
+forecast is always the next bar, so daily bars predict the next trading day and
+15-minute bars predict the next 15-minute candle. Nothing downstream is
+daily-specific: the label is `Close.shift(-horizon)` and the indicators are
+window counts, both bar-agnostic. (yfinance caps intraday history, so the
+lookback is clamped per interval.)
+
+The research question this repo now answers with evidence:
+
+> Can a modern financial time-series foundation model, particularly Kronos,
+> improve next-timeframe price and directional prediction over the existing
+> LSTM, XGBoost, Random Forest and ensemble models?
+
+Every model behind `src/models/unified_models.py` answers the same two questions
+about the next bar -- a price in dollars, and `P(up)` / `P(down)` -- so they can
+be scored against each other rather than described separately:
+
+| Model | What it is | Sees |
+|---|---|---|
+| `unified_xgboost` | Gradient-boosted trees, the tuned tabular baseline | 46 engineered features |
+| `unified_random_forest` | Bagged trees | 46 engineered features |
+| `unified_lstm` | Recurrent net over a 60-bar lookback window | 60 x 46 sequence |
+| `unified_ensemble` | The existing dynamic ensemble of the three above | as its members |
+| `unified_kronos` | Candlestick foundation model, zero-shot | raw OHLCV candles |
+| `unified_timesfm` | TimesFM 2.5, optional, zero-shot | close series |
+| `unified_chronos` | Chronos-2, optional, zero-shot | close series |
+
+TimesFM and Chronos are optional (`pip install -e ".[comparison]"`). When their
+packages are absent the benchmark reports the comparison without them rather
+than failing, and the API answers "not installed" rather than 500.
+
+**How the comparison is kept fair.** Every model gets the same rows, the same
+expanding-window folds, the same one-bar embargo between train and test, and the
+same metric code. Feature scaling is fitted on each fold's training rows alone.
+The LSTM is handed real 60-bar sequences rather than a flattened row, so the
+"deep learning" entry in the table is actually a sequence model. The ensemble's
+members are built from the same `DEFAULT_MODEL_PARAMS` as their standalone runs,
+so its row is a baseline rather than a fourth differently-tuned model. Its
+weights come from a chronological hold-out inside the training window, softmaxed
+the way the existing `EnsemblePredictor` softmaxes rolling Sharpe.
+
+**Two objectives, reported apart.** Price gets MAE / RMSE / MAPE / R-squared;
+direction gets accuracy, precision, recall, F1, ROC-AUC and Brier. Sharpe ratio
+is deliberately not used to rank forecasters -- it scores a *strategy*, and
+belongs to the backtesting layer.
+
+**Two columns worth understanding before reading the table:**
+
+- `price_r2` is computed against the realised price, whose variance is dominated
+  by the price level. A model that predicts "roughly today's close" scores near
+  1.0 on it. `price_r2_return` recomputes it on the forward return, where that
+  same do-nothing forecast scores 0.0. The second column is the one that
+  separates models.
+- `edge_pp` is directional accuracy minus the majority-class rate on the same
+  test windows. At or below zero, the model adds nothing over always guessing
+  the more common direction, whatever its raw accuracy looks like. It comes with
+  a one-sided `p_value` and `n_required` -- the number of test days an edge that
+  size would need before it could be called significant at 5%. On a few hundred
+  test days, a two-point edge is noise, and the table says so rather than
+  leaving the reader to assume otherwise.
+
+Results land in `artifacts/benchmark_results.csv`, `benchmark_per_fold.csv`,
+`benchmark_comparison.csv` and `benchmark_results.json`.
+
+**Serving.** The winner is servable directly: `POST /api/predict` with
+`model_type=unified_kronos` (or any `unified_*`) returns the next-bar price,
+`probability_up`, `probability_down` and the direction. The trainable ones are
+trained via `POST /api/training/train`; asking to train a zero-shot foundation
+model returns 400 rather than a job that quietly does nothing. In the dashboard
+they appear in the Predictions tab model selector, where the horizon buttons
+lock to one bar because that is what these models forecast.
+
 ### Foundation models: Kronos and TabPFN
 
 ```bash
@@ -272,6 +385,7 @@ This starts:
 | `/api/data` | Price history, indicators, sources, quotes, uploads, S&P 500 list |
 | `/api/predict` | Forecasts and historical model signals |
 | `/api/direction` | Next-day direction: walk-forward evaluation, gated `P(up)` gauge, rolling hit rate, equity curve |
+| `/api/models` | Model readiness per symbol, and the automatic preparation jobs that close the gaps |
 | `/api/training` | Background training jobs and saved model metadata |
 | `/api/patterns` | Multi-timeframe patterns, support/resistance, confluence |
 | `/api/sentiment` | Rule-based indicator sentiment |
@@ -284,7 +398,7 @@ This starts:
 
 | Tab | Current focus |
 | --- | --- |
-| Analysis | Price action, indicators, session quotes, rule-based sentiment |
+| Analysis | Price action, indicators, session quotes, rule-based sentiment, and the model output from the same pipeline Predictions serves |
 | Predictions | Next-day direction panel (gauge, rolling hit rate, equity vs buy & hold); multi-day forecast paths and confidence bands |
 | Portfolio | Holdings view and allocation snapshot |
 | Backtest | Configurable historical strategy runs |

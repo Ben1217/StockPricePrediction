@@ -50,6 +50,12 @@ EXPENSIVE_LIMITS = (
     ("/api/agent/", (20, 3600)),
     ("/api/backtest/run", (20, 3600)),
     ("/api/predict/ensemble/train", (10, 3600)),
+    # Preparation is fired automatically when a user picks a ticker, so the
+    # budget has to cover ordinary browsing rather than deliberate training
+    # runs. It can be this loose because the route is idempotent: repeat calls
+    # for a symbol join the running job, and a bounded worker pool with a
+    # post-attempt cooldown — not this limiter — is what caps the actual work.
+    ("/api/models/", (120, 3600)),
 )
 # Methods that can start expensive work. Reads fall through to DEFAULT_LIMIT.
 EXPENSIVE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})

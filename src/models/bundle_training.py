@@ -178,6 +178,47 @@ def train_model_bundles(
     supported_horizons = normalize_horizons(horizons)
     df = raw_df.copy() if raw_df is not None else download_training_frame(symbol, lookback_days)
 
+    if model_type.startswith("unified_"):
+        # Unified bundles forecast one timeframe ahead and emit a price and a
+        # direction probability from that single step. The multi-horizon
+        # machinery below does not apply: a 30-day request is served by the same
+        # next-day bundle, which the response labels rather than silently
+        # extrapolating.
+        from src.models.unified_training import DEFAULT_HORIZON, train_unified_bundle
+
+        meta = train_unified_bundle(
+            symbol=symbol,
+            model_type=model_type,
+            horizon=DEFAULT_HORIZON,
+            lookback_days=lookback_days,
+            test_size=test_size,
+            params=params,
+            raw_df=df,
+        )
+        if progress_callback is not None:
+            progress_callback(1, 1, DEFAULT_HORIZON)
+
+        bundle_info = {
+            "version_id": meta["version_id"],
+            "bundle_dir": meta["bundle_dir"],
+            "training_horizon": DEFAULT_HORIZON,
+            "objective": meta["objective"],
+            "serving_mode": "unified_price_and_direction",
+            "holdout": meta.get("holdout", {}),
+        }
+        return {
+            "model_type": model_type,
+            "symbol": symbol,
+            "training_horizon": DEFAULT_HORIZON,
+            "horizons": [DEFAULT_HORIZON],
+            "versions": [meta["version_id"]],
+            "bundle": bundle_info,
+            "per_horizon": {
+                str(horizon): dict(bundle_info)
+                for horizon in (supported_horizons or [DEFAULT_HORIZON])
+            },
+        }
+
     feature_config = normalize_feature_config()
     scaler_type = "minmax"
     validation_size = min(0.15, max(0.1, test_size / 2))

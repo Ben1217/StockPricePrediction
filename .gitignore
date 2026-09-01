@@ -50,6 +50,11 @@ data/cache/
 # same data.
 data/direction_backtests/
 
+# Benchmark outputs, for the same reason: derived from whatever bars the run
+# saw, so a committed CSV invites comparing two runs of different data.
+# Regenerate via scripts/unified_benchmark.py.
+artifacts/
+
 # Model files (too large for git — regenerate via POST /api/training/bootstrap)
 models/bundles/
 models/model_metadata/

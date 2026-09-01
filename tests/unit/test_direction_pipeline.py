@@ -36,6 +36,7 @@ from src.data.direction_data import (  # noqa: E402
     clean_daily_bars,
     frame_content_hash,
 )
+from src.features.chart_patterns import CHART_PATTERN_FEATURE_COLUMNS  # noqa: E402
 from src.features.direction_features import (  # noqa: E402
     DIRECTION_EXTRA_FEATURE_COLUMNS,
     DIRECTION_FEATURE_COLUMNS,
@@ -218,14 +219,30 @@ class TestFeatureCausality:
 # ---------------------------------------------------------------------------
 
 class TestDatasetConstruction:
-    def test_feature_set_is_stationary_plus_directional(self, dataset):
+    def test_feature_set_is_stationary_plus_directional_plus_chart(self, dataset):
+        """
+        The feature set is exactly its three declared groups, and nothing else.
+
+        The count is derived from those groups rather than written out, so
+        adding a column to one of them updates this test instead of breaking it
+        — which is what a hardcoded total did when the chart-pattern group was
+        introduced.
+        """
         assert dataset.feature_columns == DIRECTION_FEATURE_COLUMNS
-        assert len(dataset.feature_columns) == 19
-        # The 13 stationary columns are reused unchanged.
-        for column in STATIONARY_REGRESSION_FEATURE_COLUMNS:
-            assert column in dataset.feature_columns
-        for column in DIRECTION_EXTRA_FEATURE_COLUMNS:
-            assert column in dataset.feature_columns
+
+        groups = (
+            STATIONARY_REGRESSION_FEATURE_COLUMNS,
+            DIRECTION_EXTRA_FEATURE_COLUMNS,
+            CHART_PATTERN_FEATURE_COLUMNS,
+        )
+        for group in groups:
+            for column in group:
+                assert column in dataset.feature_columns
+
+        # No duplicates across the groups, and no column from anywhere else.
+        expected = [column for group in groups for column in group]
+        assert len(expected) == len(set(expected))
+        assert sorted(dataset.feature_columns) == sorted(expected)
 
     def test_no_missing_values_and_nothing_filled(self, dataset, bars):
         assert not dataset.features.isna().any().any()

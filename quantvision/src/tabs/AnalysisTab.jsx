@@ -8,6 +8,7 @@ import { C } from "../utils/data";
 import { fetchExtendedQuote, fetchSentiment } from "../utils/api";
 import { ChartTooltip, StatCard, Section, Hint } from "../components/UIComponents";
 import TradingViewDetail from "../components/TradingViewDetail";
+import ModelAnalysisPanel from "../components/ModelAnalysisPanel";
 
 // ── Session Panel ──────────────────────────────────────────────────────────────
 const SESSION_META = {
@@ -522,7 +523,7 @@ function IndicatorSentimentPanel({ data, latestBar, loading, error }) {
 }
 
 // ── Analysis Tab ───────────────────────────────────────────────────────────────
-export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceData, indicatorData, dataSource, apiConnected }) {
+export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceData, indicatorData, dataSource, apiConnected, modelPrep }) {
     const [showDetails, setShowDetails] = useState(false);
     const [showSMA, setShowSMA] = useState(true);
     const [showEMA, setShowEMA] = useState(false);
@@ -659,6 +660,17 @@ export default function AnalysisTab({ selectedTicker, setSelectedTicker, priceDa
 
             {/* Market Session Panel */}
             <MarketSessionPanel symbol={selectedTicker} source={dataSource} />
+
+            {/* Model output, from the same preparation run the Predictions tab
+                waits on. Selecting the ticker is what produced it; there is no
+                separate step here and no second model. */}
+            <div style={{ margin: "20px 0" }}>
+                <ModelAnalysisPanel
+                    symbol={selectedTicker}
+                    modelPrep={modelPrep}
+                    apiConnected={apiConnected}
+                />
+            </div>
 
             {/* Stat cards */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 12, margin: "20px 0" }}>
