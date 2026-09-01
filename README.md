@@ -4,9 +4,10 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 
 ## What the project does today
 
-- Analysis dashboard with OHLCV charts, indicator overlays, market-session data, and rule-based sentiment
+- Analysis dashboard with indicator overlays, market-session data, and rule-based sentiment; its chart-detail view and the Predictions tab both render the **official TradingView Advanced Chart widget** rather than redrawing candles. The app ships no candlestick engine of its own: TradingView owns price visualisation, the backend owns the analysis
 - Forecasting endpoints and UI for `xgboost`, `random_forest`, and `lstm` models, with statistical fallback forecasts when trained artifacts are unavailable
 - A **unified next-bar comparison** (`scripts/unified_benchmark.py`) that scores LSTM, XGBoost, Random Forest, the dynamic ensemble and the Kronos foundation model on identical walk-forward folds, reporting price accuracy and directional accuracy separately against the majority-class base rate — the experiment behind the question of whether a foundation model beats the existing stack
+- A **combined-evidence direction call** (`/api/direction/{symbol}/analysis`) that reduces the bars to seven named categories — trend, momentum, volume, price action, support/resistance, volatility regime, and what followed the most similar setups in the symbol's own past — fits a logistic stack on them, and blends it with the classifier below by each one's *measured* out-of-sample Brier skill. Every category reports the percentage points it contributed, and a source with no measured skill gets weight zero, so the answer is `NEUTRAL` with a stated reason whenever nothing has demonstrated an edge
 - A next-day **direction classifier** (`P(up tomorrow)` plus a price *range*) reading candlestick shape through 46 engineered chart-pattern features or through two foundation models (TabPFN, Kronos), with walk-forward evaluation, naive-baseline comparison, a leakage test, and a costed long/flat backtest — the one forecasting path in the repo that is gated on a measured out-of-sample result
 - Multi-timeframe pattern detection, support/resistance analysis, and confluence ranking
 - Portfolio optimization with `max_sharpe`, `min_volatility`, `max_return`, and `risk_parity`, plus efficient frontier, drift, alerts, sector, correlation, and Monte Carlo endpoints
@@ -16,7 +17,7 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 
 ## Stack
 
-- Frontend: React 19, Vite 7, lightweight-charts 5, Recharts
+- Frontend: React 19, Vite 7, TradingView Advanced Chart widget (price), Recharts (analytics panels)
 - Backend: FastAPI, Pydantic, Uvicorn
 - Market data: yfinance primary, Wikipedia for S&P 500 constituents, Alpha Vantage optional fallback for selected endpoints
 - ML and quant: scikit-learn, XGBoost, PyTorch, hmmlearn, Optuna, SHAP, cvxpy
@@ -27,8 +28,8 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 - `quantvision/`: React frontend
 - `src/api/`: FastAPI app, routers, and schemas
 - `src/data/`: market-data acquisition, storage, caching, and live quote helpers
-- `src/features/`: indicators, feature engineering, support/resistance, and pattern detection
-- `src/models/`: model implementations, trainer, ensemble, regime detection, explainability
+- `src/features/`: indicators, feature engineering, support/resistance, pattern detection, price-action structure (`price_action.py`), and historical analog matching (`historical_analogs.py`)
+- `src/models/`: model implementations, trainer, ensemble, regime detection, explainability, and the combined-evidence direction engine (`direction_evidence.py`)
 - `src/portfolio/`: optimization, metrics, risk controls, sector allocation, and drift tracking
 - `src/backtesting/`: backtest engine
 - `src/agents/`: CrewAI agents and tool wrappers
@@ -196,6 +197,115 @@ A "do not ship" verdict is the expected outcome on most single names, and it is 
 result rather than a bug: next-day direction at this signal-to-noise ratio is
 mostly unlearnable from price history alone. The pipeline is built to say so
 clearly instead of dressing a coin flip in a dashboard.
+
+### Who draws what: TradingView vs the backend
+
+The split is deliberate and holds everywhere in the app.
+
+```
+                        NVDA
+                          │
+          ┌───────────────┴────────────────┐
+          ▼                                ▼
+    TradingView                       Our backend
+    Advanced Chart                    /api/direction/NVDA/analysis
+          │                                │
+    candles, volume,             historical data → indicators →
+    timeframes, studies,         price action → pattern detection →
+    drawing tools, replay        ML models → probability → direction
+                                            │
+                                            ▼
+                                   AI Direction Analysis panel
+```
+
+The frontend renders the official TradingView embed (`quantvision/src/components/TradingViewChart.jsx`)
+and points it at whichever ticker is selected — on the Predictions tab above the analysis
+panel, and in the Analysis tab's "Chart Details" view; `quantvision/src/utils/tradingview.js`
+translates our Yahoo-style symbols (`^GSPC`, `BRK-B`, `BTC-USD`) into TradingView's
+namespace (`SP:SPX`, `BRK.B`, `CRYPTO:BTCUSD`). Nothing in the frontend computes a
+number about the market, and nothing in the backend draws a chart.
+
+### The combined-evidence direction call
+
+`GET /api/direction/{symbol}/analysis` answers *up, down, or neither* — and says
+why. It reduces the bars to seven named categories, each scored in `[-1, 1]` and
+oriented so positive means conventionally bullish:
+
+| Category | Reads |
+| --- | --- |
+| `trend` | Price against its 20/50/200-day means, plus rolling trend slope |
+| `momentum` | RSI, MACD, 5- and 20-day rate of change |
+| `volume` | Up-volume share, OBV slope, volume/price confirmation |
+| `price_action` | Swing structure over 10/20/60 bars, and closing strength |
+| `support_resistance` | What happened *at* the levels: breaks, retests, rejections |
+| `volatility` | The regime the move is happening in |
+| `historical_analogs` | What followed the 40 most similar setups in this symbol's own past |
+
+The scores are descriptive and hand-oriented; **the weight each one carries is
+fitted**, by a logistic stack trained on this symbol's own realised next-day
+moves (`src/models/direction_evidence.py`). So a name whose breakouts have
+historically failed gets a negative coefficient rather than the positive one a
+hand-tuned weight would have assumed. Each category reports its contribution in
+percentage points, computed as the probability with that term minus the
+probability without it — the actual decomposition of the answer, not an
+attribution assembled afterwards.
+
+Price action is read as a chartist would read it (`src/features/price_action.py`):
+a swing high over `w` bars against the swing high `w` bars before it gives the
+four cases directly — higher high with higher low is `+1`, lower high with lower
+low is `-1`, and the two mixed cases are `0`, because an expanding or contracting
+range is not a direction. Breakouts, breakdowns, retests that held, failed breaks
+and consolidation are detected on top of that and reported by name.
+
+Historical analogs (`src/features/historical_analogs.py`) are a k-nearest-neighbour
+search over a ten-column setup descriptor, z-scored against a *trailing* window so
+a 2019 row is never scaled by a mean that includes 2024, and restricted to
+neighbours whose outcome had already printed. The up-rate ships with its Wilson
+interval and the unconditional rate over the same window, because 58% is skill
+against a 50% base rate and noise against a 57% one.
+
+#### Two probabilities, blended by measured skill
+
+The evidence stack runs its own five-fold expanding walk-forward and the
+classifier has its stored one. The two live probabilities are combined in
+log-odds, weighted by **each one's measured out-of-sample Brier skill** — not by
+a chosen ratio:
+
+```
+logit(P) = (w_evidence · logit(P_evidence) + w_classifier · logit(P_classifier))
+           / (w_evidence + w_classifier)          w = max(brier_skill_score, 0)
+```
+
+A source that scored no better than always predicting the base rate gets weight
+zero. When both do, the blend does not pick whichever number looks more
+interesting — it returns the base rate and reports `NEUTRAL`.
+
+#### The right to be uncertain
+
+`direction` is `NEUTRAL`, with `neutral_reason` filled in, whenever either:
+
+- no source has a proven edge — the stack's accuracy interval still covers its
+  base rate *and* the classifier failed its ship criteria; or
+- today's conviction sits in the bottom third of the stack's own out-of-sample
+  `|p − 0.5|` distribution.
+
+Confidence (`Low` / `Moderate` / `High`) is read off those same terciles, so a
+model whose probabilities never leave 0.48–0.52 can never report `High`, and it
+is downgraded a step when the short, medium and long-horizon reads conflict.
+
+On most single names the honest answer is `NEUTRAL`, for the same reason the
+walk-forward verdict is usually "do not ship". That is a result, not an empty
+panel.
+
+#### What is deliberately not drawn
+
+No forecast path. The multi-day regression models emit one number for the whole
+horizon, so the Predictions tab draws the endpoint and its calibrated 68%/95%
+intervals on a price axis rather than a line through days nobody predicted, and
+Monte Carlo scenarios appear as a strip of *endpoints* rather than 200 fictional
+price histories. The direction analysis likewise reports a range — the
+10th-to-90th percentile of what followed the matched historical setups — with the
+sample size beside it, and makes no claim about the route.
 
 ### Reading the chart: features and model slots
 
@@ -385,6 +495,7 @@ This starts:
 | `/api/data` | Price history, indicators, sources, quotes, uploads, S&P 500 list |
 | `/api/predict` | Forecasts and historical model signals |
 | `/api/direction` | Next-day direction: walk-forward evaluation, gated `P(up)` gauge, rolling hit rate, equity curve |
+| `/api/direction/{symbol}/analysis` | The reasoned direction call: `UP`/`DOWN`/`NEUTRAL`, probability split, confidence, per-category evidence contributions, three horizon reads, price-action structure, historical analogs, and the expected range |
 | `/api/models` | Model readiness per symbol, and the automatic preparation jobs that close the gaps |
 | `/api/training` | Background training jobs and saved model metadata |
 | `/api/patterns` | Multi-timeframe patterns, support/resistance, confluence |
@@ -398,8 +509,8 @@ This starts:
 
 | Tab | Current focus |
 | --- | --- |
-| Analysis | Price action, indicators, session quotes, rule-based sentiment, and the model output from the same pipeline Predictions serves |
-| Predictions | Next-day direction panel (gauge, rolling hit rate, equity vs buy & hold); multi-day forecast paths and confidence bands |
+| Analysis | Price action, indicators, session quotes, rule-based sentiment, and the model output from the same pipeline Predictions serves. "Chart Details" opens the real TradingView chart beside our pattern and indicator panels |
+| Predictions | The live TradingView chart, then the AI direction analysis (direction, probability, confidence, per-category evidence) and the classifier's own track record beneath it; the multi-day forecast drawn as a *range* at the horizon rather than a path to it |
 | Portfolio | Holdings view and allocation snapshot |
 | Backtest | Configurable historical strategy runs |
 | Optimization | Portfolio optimizer and efficient frontier |

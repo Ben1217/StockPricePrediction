@@ -1,157 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
-import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries, createSeriesMarkers } from "lightweight-charts";
-import { fetchPrices, fetchIndicators, fetchHistoricalSignals, fetchPatterns, fetchSupportResistance, fetchConfluence } from "../utils/api";
+import { useEffect, useState } from "react";
+import { fetchPrices, fetchIndicators, fetchPatterns, fetchSupportResistance } from "../utils/api";
 import { C } from "../utils/data";
+import { CHART_TIMEFRAMES, tradingViewUrl } from "../utils/tradingview";
+import TradingViewChart from "./TradingViewChart";
 
-function parseChartTime(dateStr) {
-    if (!dateStr) return null;
-    if (typeof dateStr === 'number') {
-        return dateStr > 10000000000 ? Math.floor(dateStr / 1000) : Math.floor(dateStr);
-    }
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return null;
-    return Math.floor(d.getTime() / 1000);
-}
-
-function processChartData(data) {
-    const seen = new Set();
-    return data.filter(d => {
-        if (!d.time || seen.has(d.time)) return false;
-        seen.add(d.time);
-        return true;
-    }).sort((a, b) => a.time - b.time);
-}
-
-// ── Shared chart options ───────────────────────────────────
-const baseChartOpts = (interval) => ({
-    layout: { background: { type: 'solid', color: C.bg1 }, textColor: C.textDim },
-    grid: { vertLines: { color: C.border }, horzLines: { color: C.border } },
-    rightPriceScale: { borderColor: C.border },
-    timeScale: {
-        borderColor: C.border,
-        timeVisible: interval.includes("m") || interval === "1h" || interval === "4h",
-        secondsVisible: false,
-    },
-});
-
-// ── Decision Panel (Right Sidebar) ─────────────────────────
-function DecisionPanel({ sentiment, srSummary, loading }) {
-    if (loading) return (
-        <div style={{
-            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
-            padding: "16px", minWidth: 190, fontFamily: "'DM Mono', monospace", fontSize: 10,
-            textAlign: "center", color: C.textDim,
-        }}>
-            <div style={{ fontSize: 16, marginBottom: 6, animation: "pulse 1.5s infinite" }}>⏳</div>
-            Computing signals…
-        </div>
-    );
-
-    if (!sentiment) return (
-        <div style={{
-            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
-            padding: "16px", minWidth: 190, fontFamily: "'DM Mono', monospace", fontSize: 10,
-            textAlign: "center", color: C.textDim,
-        }}>
-            No signal data
-        </div>
-    );
-
-    const { entry_signal, confidence, confidence_label, trend, rsi_signal, volume_strength } = sentiment;
-    const signalColor = entry_signal === "BULLISH" ? C.green : entry_signal === "BEARISH" ? C.red : C.amber;
-
-    const sigIcon = (sig) => {
-        if (sig === "bullish" || sig === "strong") return { icon: "▲", color: C.green };
-        if (sig === "bearish" || sig === "weak") return { icon: "▼", color: C.red };
-        return { icon: "●", color: C.textDim };
-    };
-
-    const trendS = sigIcon(trend);
-    const rsiLabel = sentiment.details?.rsi != null
-        ? (sentiment.details.rsi > 70 ? "Overbought" : sentiment.details.rsi < 30 ? "Oversold" : "Neutral")
-        : "N/A";
-    const rsiColor = sentiment.details?.rsi > 70 ? C.red : sentiment.details?.rsi < 30 ? C.green : C.textDim;
-    const volS = sigIcon(volume_strength === "strong" ? "bullish" : volume_strength === "weak" ? "bearish" : "neutral");
-
-    return (
-        <div style={{
-            background: C.bg0, border: `1px solid ${C.border}`, borderRadius: 8,
-            padding: "14px 16px", minWidth: 190, fontFamily: "'DM Mono', monospace", fontSize: 10,
-            alignSelf: "flex-start",
-        }}>
-            {/* Final Signal — most prominent */}
-            <div style={{
-                fontWeight: 900, color: signalColor, fontSize: 16, textAlign: "center",
-                letterSpacing: 1.5, marginBottom: 4,
-            }}>
-                {entry_signal === "WAIT" ? "NEUTRAL" : entry_signal}
-            </div>
-
-            {/* Confidence bar */}
-            <div style={{ marginBottom: 10 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.textDim, marginBottom: 3 }}>
-                    <span>Signal Strength</span>
-                    <span style={{ color: signalColor, fontWeight: 700 }}>{confidence}%</span>
-                </div>
-                <div style={{ background: C.border, borderRadius: 4, height: 5, overflow: "hidden" }}>
-                    <div style={{
-                        width: `${confidence}%`, height: "100%", borderRadius: 4,
-                        background: signalColor, transition: "width 0.4s ease",
-                    }} />
-                </div>
-                <div style={{ fontSize: 8, color: C.textDim, textAlign: "center", marginTop: 3 }}>
-                    {confidence_label}
-                </div>
-            </div>
-
-            {/* Divider */}
-            <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
-
-            {/* Indicator rows */}
-            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
-                <span style={{ color: C.textDim }}>Trend</span>
-                <span style={{ color: trendS.color, fontWeight: 600 }}>{trendS.icon} {trend === "bullish" ? "Bullish" : trend === "bearish" ? "Bearish" : "Neutral"}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
-                <span style={{ color: C.textDim }}>Momentum</span>
-                <span style={{ color: rsiColor, fontWeight: 600 }}>
-                    {rsiLabel === "Oversold" ? "▲" : rsiLabel === "Overbought" ? "▼" : "●"} {rsiLabel}
-                </span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0" }}>
-                <span style={{ color: C.textDim }}>Volume</span>
-                <span style={{ color: volS.color, fontWeight: 600 }}>{volS.icon} {volume_strength === "strong" ? "Strong" : "Weak"}</span>
-            </div>
-
-            {/* S&R */}
-            {srSummary && (
-                <>
-                    <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", alignItems: "center" }}>
-                        <span style={{ color: C.textDim }}>Resistance</span>
-                        <div style={{ textAlign: "right" }}>
-                            <div style={{ color: C.red, fontWeight: 700 }}>${srSummary.resistance}</div>
-                            {sentiment?.details?.dist_resistance !== undefined && srSummary.resistance !== "N/A" && (
-                                <div style={{ fontSize: 8, color: C.textDim, marginTop: 2 }}>{sentiment.details.dist_resistance}% away</div>
-                            )}
-                        </div>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", alignItems: "center" }}>
-                        <span style={{ color: C.textDim }}>Support</span>
-                        <div style={{ textAlign: "right" }}>
-                            <div style={{ color: C.cyan, fontWeight: 700 }}>${srSummary.support}</div>
-                            {sentiment?.details?.dist_support !== undefined && srSummary.support !== "N/A" && (
-                                <div style={{ fontSize: 8, color: C.textDim, marginTop: 2 }}>{sentiment.details.dist_support}% away</div>
-                            )}
-                        </div>
-                    </div>
-                </>
-            )}
-        </div>
-    );
-}
-
-// ── Sub-panel Chart Creator ────────────────────────────────
 function formatSetupPrice(value) {
     return value == null ? "—" : `$${Number(value).toFixed(2)}`;
 }
@@ -868,16 +720,6 @@ function TradeSetupPanel({ bestSetup, setupStatus, alternativeCount, loading, pa
     );
 }
 
-function createSubChart(container, interval, height = 100) {
-    if (!container) return null;
-    const w = container.clientWidth || 900;
-    return createChart(container, {
-        width: w, height,
-        ...baseChartOpts(interval),
-        crosshair: { mode: 1 },
-    });
-}
-
 // ── Mode Toggle Button ─────────────────────────────────────
 function PatternScopeButton({ label, active, onClick }) {
     return (
@@ -908,23 +750,33 @@ function ModeButton({ label, emoji, active, disabled, onClick }) {
     );
 }
 
-// ── Main Component ─────────────────────────────────────────
-export default function TradingViewDetail({ symbol, mode = "analysis", predictionData = null, onClose }) {
-    const chartContainerRef = useRef(null);
-    const rsiContainerRef = useRef(null);
-    const macdContainerRef = useRef(null);
-    const volContainerRef = useRef(null);
 
-    const chartRef = useRef(null);
-    const subChartsRef = useRef({});
-    const seriesRefs = useRef({});
+/**
+ * Chart detail view: TradingView's chart, our analysis panels beside it.
+ *
+ * This used to render its own candlesticks with lightweight-charts — candles,
+ * volume, RSI and MACD panes, markers, trendlines, a prediction cone. All of
+ * that was an imitation of the chart TradingView already ships, and it has been
+ * removed rather than improved. What is left is the half that was ours to begin
+ * with: pattern detection, trade-setup evaluation and the indicator summary,
+ * every number of which comes from our backend.
+ *
+ * The mode toggle now switches which *analysis* is shown, not which series are
+ * drawn — TradingView owns what is on the chart, and the studies it opens with
+ * follow the mode so the visual and the panel are reading the same thing.
+ */
 
+// TradingView's own study IDs. Indicator mode opens the chart with the
+// oscillators the summary panel talks about; pattern mode keeps it clean so
+// structure is readable.
+const INDICATOR_STUDIES = ["STD;Volume", "STD;RSI", "STD;MACD"];
+const PATTERN_STUDIES = ["STD;Volume"];
+
+export default function TradingViewDetail({ symbol, onClose }) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [srSummary, setSrSummary] = useState(null);
 
     const [timeframe, setTimeframe] = useState("1d");
-    const timeframes = ["1m", "1h", "1d", "1wk", "1mo"];
 
     // ── View Mode ──────────────────────────────────────────
     const [viewMode, setViewMode] = useState("pattern"); // "indicator" | "pattern" | "advanced"
@@ -941,103 +793,51 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
         localStorage.setItem("qv_patternScope", patternScope);
     }, [patternScope]);
 
-    // ── Derive toggle states from viewMode ─────────────────
     const isIndicatorMode = viewMode === "indicator";
     const isPatternMode = viewMode === "pattern" || viewMode === "advanced";
-    const showSR = isIndicatorMode;
-    const showSMA200 = isIndicatorMode;
-    const showSMA = false;
-    const showEMA = false;
-    const showBB = false;
-    const showVWAP = false;
-    const showRSI = isIndicatorMode;
-    const showMACD = false;
-    const showVol = isIndicatorMode;
-    const showATR = false;
-    const showPatterns = isPatternMode;
-    const showMLSignals = false;
 
-    const stateData = useRef({
-        ohlc: [],
-        indicators: [],
-        signals: [],
+    const [analysis, setAnalysis] = useState({
         patterns: [],
-        bestPattern: null,
         bestSetup: null,
         bestSetupStatus: null,
-        srData: null,
         indicatorSummary: null,
     });
 
-    // Fetch confluence independent of main timeframe API
-    const [confluence, setConfluence] = useState([]);
-    useEffect(() => {
-        if (!isPatternMode) {
-            setConfluence([]);
-            return;
-        }
-        let active = true;
-        fetchConfluence(symbol).then(d => {
-            if (active && d?.confluence_signals) setConfluence(d.confluence_signals);
-        }).catch(() => {});
-        return () => { active = false; };
-    }, [symbol, isPatternMode]);
-
-    // ── Fetch sentiment for DecisionPanel ──────────────────
+    // ── Analysis for the side panel ────────────────────────
+    // Prices and indicators are still fetched — not to draw them, but because
+    // the indicator summary and the setup evaluation are computed from them.
     useEffect(() => {
         let cancelled = false;
 
         async function loadData() {
-            setLoading(true); setError(null);
+            setLoading(true);
+            setError(null);
             try {
-                const priceDays = { "1m": 5, "1h": 180, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 120;
-                const indicatorDays = { "1m": 120, "1h": 240, "1d": 320, "1wk": 300, "1mo": 180 }[timeframe] || 120;
-                const lookback = { "1m": 90, "1h": 365, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 180;
+                const priceDays = { "1m": 5, "15m": 30, "1h": 180, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 120;
+                const indicatorDays = { "1m": 120, "15m": 120, "1h": 240, "1d": 320, "1wk": 300, "1mo": 180 }[timeframe] || 120;
+                const lookback = { "1m": 90, "15m": 120, "1h": 365, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 180;
+
                 const [priceRes, indRes, patRes, srRes] = await Promise.all([
                     fetchPrices(symbol, "yfinance", priceDays, timeframe),
                     fetchIndicators(symbol, indicatorDays, timeframe),
                     isPatternMode ? fetchPatterns(symbol, timeframe) : Promise.resolve(null),
-                    showSR ? fetchSupportResistance(symbol, timeframe, lookback) : Promise.resolve(null),
-                ].map(p => p.catch(e => null)));
+                    isIndicatorMode ? fetchSupportResistance(symbol, timeframe, lookback) : Promise.resolve(null),
+                ].map(p => p.catch(() => null)));
 
                 if (cancelled) return;
                 if (!priceRes || !priceRes.bars) throw new Error("Failed to fetch price data");
 
-                let sigRes = [];
-                if (timeframe === "1d" && showMLSignals) {
-                    try { sigRes = await fetchHistoricalSignals(symbol, 90, "xgboost"); } catch { /* ML signals are optional */ }
-                }
-                if (cancelled) return;
-
-                stateData.current = {
-                    ohlc: priceRes.bars,
-                    indicators: indRes?.data || [],
-                    signals: sigRes || [],
+                setAnalysis({
                     patterns: patRes?.patterns || [],
-                    bestPattern: patRes?.best_pattern || null,
                     bestSetup: patRes?.best_setup || null,
                     bestSetupStatus: patRes?.best_setup_status || null,
-                    srData: srRes || null,
                     indicatorSummary: isIndicatorMode ? buildIndicatorSummary({
                         indicators: indRes?.data || [],
                         prices: priceRes?.bars || [],
                         srData: srRes,
                         timeframe,
                     }) : null,
-                };
-
-                if (srRes?.levels) {
-                    const sup = srRes.levels.filter(l => l.type === "support").sort((a,b)=>b.price - a.price);
-                    const res = srRes.levels.filter(l => l.type === "resistance").sort((a,b)=>a.price - b.price);
-                    setSrSummary({
-                         support: sup[0] ? sup[0].price.toFixed(2) : "N/A",
-                         resistance: res[0] ? res[0].price.toFixed(2) : "N/A"
-                    });
-                } else {
-                    setSrSummary(null);
-                }
-
-                renderAll();
+                });
             } catch (err) {
                 if (!cancelled) setError(err.message);
             } finally {
@@ -1045,434 +845,45 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
             }
         }
 
-        function cleanup() {
-            Object.values(subChartsRef.current).forEach(c => { try { c.remove(); } catch { /* already disposed */ } });
-            subChartsRef.current = {};
-            if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
-            seriesRefs.current = {};
-        }
-
-        function renderAll() {
-            if (cancelled) return;
-            cleanup();
-            renderMainChart();
-            renderSubPanels();
-        }
-
-        function renderMainChart() {
-            if (!chartContainerRef.current) return;
-
-            const w = chartContainerRef.current.clientWidth || 900;
-            const h = chartContainerRef.current.clientHeight || 380;
-
-            const chart = createChart(chartContainerRef.current, {
-                width: w, height: h,
-                ...baseChartOpts(timeframe),
-                crosshair: { mode: 1 },
-            });
-            chartRef.current = chart;
-
-            // ── Candlestick ────────────────────────────────
-            const candleSeries = chart.addSeries(CandlestickSeries, {
-                upColor: C.green, downColor: C.red,
-                borderVisible: false,
-                wickUpColor: C.green, wickDownColor: C.red,
-            });
-            seriesRefs.current.candle = candleSeries;
-
-            const { ohlc, indicators, signals, bestPattern, bestSetup, srData } = stateData.current;
-            const visiblePatterns = showPatterns && bestSetup && bestPattern ? [bestPattern] : [];
-            const ohlcData = processChartData(ohlc.map(b => ({
-                time: parseChartTime(b.date),
-                open: b.open, high: b.high, low: b.low, close: b.close
-            })));
-            candleSeries.setData(ohlcData);
-
-            // ── Indicator Map ──────────────────────────────
-            const indMap = {};
-            indicators.forEach(i => indMap[parseChartTime(i.date)] = i);
-
-            // ── On-Chart Overlays (mode-dependent) ─────────
-            // 200 SMA (Indicator + Advanced)
-            if (showSMA200) {
-                const sma200 = chart.addSeries(LineSeries, { color: "#f59e0b", lineWidth: 2, lineStyle: 0 });
-                sma200.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.SMA_200 })).filter(d => d.value != null));
-            }
-
-            // SMA 20 (Advanced only)
-            if (showSMA) {
-                const s = chart.addSeries(LineSeries, { color: C.cyan, lineWidth: 1, lineStyle: 2 });
-                s.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.SMA_20 })).filter(d => d.value != null));
-            }
-
-            // EMA 12/26 (Advanced only)
-            if (showEMA) {
-                const e12 = chart.addSeries(LineSeries, { color: "#4ade80", lineWidth: 1 });
-                e12.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.EMA_12 })).filter(d => d.value != null));
-                const e26 = chart.addSeries(LineSeries, { color: "#f472b6", lineWidth: 1 });
-                e26.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.EMA_26 })).filter(d => d.value != null));
-            }
-
-            // Bollinger Bands (Advanced only)
-            if (showBB) {
-                const bbUp = chart.addSeries(LineSeries, { color: C.purple, lineWidth: 1, lineStyle: 3 });
-                const bbMid = chart.addSeries(LineSeries, { color: C.purple + '88', lineWidth: 1, lineStyle: 2 });
-                const bbLow = chart.addSeries(LineSeries, { color: C.purple, lineWidth: 1, lineStyle: 3 });
-                bbUp.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.BB_High })).filter(d => d.value != null));
-                bbMid.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.BB_Mid })).filter(d => d.value != null));
-                bbLow.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.BB_Low })).filter(d => d.value != null));
-            }
-
-            // VWAP — intraday only (Advanced)
-            const isIntraday = timeframe.includes("m") || timeframe === "1h" || timeframe === "4h";
-            if (showVWAP && isIntraday) {
-                const vwap = chart.addSeries(LineSeries, { color: "#f59e0b", lineWidth: 2, lineStyle: 0 });
-                vwap.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.VWAP })).filter(d => d.value != null));
-            }
-
-            // ── Markers ────────────────────────────────────
-            const allMarkers = [];
-
-            // ML signals (Advanced only)
-            if (showMLSignals && signals && signals.length > 0) {
-                signals.forEach(s => {
-                    const isBuy = s.type === "BUY";
-                    allMarkers.push({
-                        time: parseChartTime(s.date),
-                        position: isBuy ? 'belowBar' : 'aboveBar',
-                        color: isBuy ? C.green : C.red,
-                        shape: isBuy ? 'arrowUp' : 'arrowDown',
-                        text: `${s.type} ${(s.confidence || 0).toFixed(0)}%`
-                    });
-                });
-            }
-
-            // Chart patterns (Markers)
-            if (visiblePatterns.length > 0) {
-                visiblePatterns.forEach(p => {
-                    const isBullish = p.direction === "bullish";
-                    const isNeutral = p.direction === "neutral";
-                    
-                    const isConfluent = false;
-
-                    allMarkers.push({
-                        time: parseChartTime(p.end_date),
-                        position: isNeutral ? 'aboveBar' : isBullish ? 'belowBar' : 'aboveBar',
-                        color: isNeutral ? C.textDim : isBullish ? "#22d3ee" : "#fb923c",
-                        shape: isNeutral ? 'circle' : isBullish ? 'arrowUp' : 'arrowDown',
-                        text: `${isConfluent ? "🔥 " : ""}[${p.timeframe}-${p.weight}] ${p.pattern_name}`
-                    });
-                });
-            }
-
-            // S&R dynamic MA layers removed
-
-            // Filter, deduplicate, sort markers
-            const validTimes = new Set(ohlcData.map(d => d.time));
-            const uniqueMarkers = [];
-            const seen = new Set();
-            allMarkers.filter(m => m.time && validTimes.has(m.time)).forEach(m => {
-                const key = `${m.time}-${m.position}`;
-                if (!seen.has(key)) { seen.add(key); uniqueMarkers.push(m); }
-            });
-            uniqueMarkers.sort((a, b) => {
-                const tA = typeof a.time === 'string' ? new Date(a.time).getTime() : a.time;
-                const tB = typeof b.time === 'string' ? new Date(b.time).getTime() : b.time;
-                return tA - tB;
-            });
-            if (uniqueMarkers.length > 0) {
-                createSeriesMarkers(candleSeries, uniqueMarkers);
-            }
-
-            // ── Chart Pattern Trendlines & Draw ────────────────────
-            if (visiblePatterns.length > 0) {
-                visiblePatterns.forEach(cp => {
-                    const isBullish = cp.direction === "bullish";
-                    
-                    // Draw continuous key_levels if it's head & shoulders or double bottom
-                    if (["Head & Shoulders", "Double Bottom"].includes(cp.pattern_name) && cp.key_levels?.length >= 2) {
-                        const lineColor = isBullish ? C.green + 'AA' : C.red + 'AA';
-                        const trendSeries = chart.addSeries(LineSeries, {
-                            color: lineColor, lineWidth: 2, lineStyle: 0,
-                            lastValueVisible: false, priceLineVisible: false,
-                        });
-                        const points = processChartData(cp.key_levels.map(kl => ({
-                            time: parseChartTime(kl.date), value: kl.price
-                        })));
-                        trendSeries.setData(points);
-                    }
-                    
-                    // Draw trendlines channels if they exist
-                    if (cp.trendlines && cp.trendlines.length > 0) {
-                        cp.trendlines.forEach(tl => {
-                            if (tl.length >= 2) {
-                                const tlSeries = chart.addSeries(LineSeries, {
-                                    color: C.textMid + '88', lineWidth: 1, lineStyle: 2,
-                                    lastValueVisible: false, priceLineVisible: false,
-                                });
-                                const points = processChartData(tl.map(kl => ({
-                                    time: parseChartTime(kl.date), value: kl.price
-                                })));
-                                tlSeries.setData(points);
-                            }
-                        });
-                    }
-
-                    if (patternScope === "best" || patternScope === "all") {
-                        if (cp.entry_price != null) {
-                            candleSeries.createPriceLine({
-                                price: cp.entry_price,
-                                color: "#fbbf24", lineWidth: 2, lineStyle: 0,
-                                axisLabelVisible: true, title: "Entry",
-                            });
-                        }
-
-                        if (cp.target_price != null) {
-                            candleSeries.createPriceLine({
-                                price: cp.target_price,
-                                color: C.green + 'CC',
-                                lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
-                                title: "Target 1",
-                            });
-                        }
-
-                        if (cp.stop_loss != null) {
-                            candleSeries.createPriceLine({
-                                price: cp.stop_loss,
-                                color: C.red + 'CC',
-                                lineWidth: 2, lineStyle: 0, axisLabelVisible: true,
-                                title: "Stop Loss",
-                            });
-                        }
-                    } else if (cp.status === "confirmed" || cp.pattern_name !== "Symmetrical Triangle") {
-                        if (cp.entry_price != null) {
-                            candleSeries.createPriceLine({
-                                price: cp.entry_price,
-                                color: "#fbbf24", lineWidth: 1, lineStyle: 3,
-                                axisLabelVisible: true, title: `${cp.pattern_name} Entry`,
-                            });
-                        }
-
-                        if (cp.target_price != null) {
-                            candleSeries.createPriceLine({
-                                price: cp.target_price,
-                                color: C.green + 'CC',
-                                lineWidth: 1, lineStyle: 4, axisLabelVisible: true,
-                                title: `${cp.pattern_name} Target`,
-                            });
-                        }
-
-                        if (cp.stop_loss != null) {
-                            candleSeries.createPriceLine({
-                                price: cp.stop_loss,
-                                color: C.red + 'CC',
-                                lineWidth: 1, lineStyle: 4, axisLabelVisible: true,
-                                title: `${cp.pattern_name} Stop`,
-                            });
-                        }
-                    } else if (cp.pattern_name === "Symmetrical Triangle" && cp.status !== "confirmed") {
-                        // Unconfirmed Symmetrical triangle label (the trendlines are drawn above already)
-                        // Awaiting breakout - no target/stop/entry
-                        const labelSeries = chart.addSeries(LineSeries, { lastValueVisible: false, priceLineVisible: false });
-                        labelSeries.setMarkers([{
-                            time: parseChartTime(cp.end_date), position: 'inBar', color: C.textDim,
-                            shape: 'circle', text: "Symmetrical Triangle — Awaiting Breakout"
-                        }]);
-                    }
-                });
-            }
-
-            // ── S&R Horizontal Lines ────────────────────────
-            if (showSR && srData?.levels && srData.levels.length > 0) {
-                const supports = srData.levels.filter(l => l.type === "support").sort((a, b) => b.price - a.price);
-                const resistances = srData.levels.filter(l => l.type === "resistance").sort((a, b) => a.price - b.price);
-                const keyLevels = [...supports.slice(0, 1), ...resistances.slice(0, 1)];
-
-                keyLevels.forEach(sr => {
-                    const isSupp = sr.type === "support";
-                    candleSeries.createPriceLine({
-                        price: sr.price,
-                        color: isSupp ? C.cyan : C.red,
-                        lineWidth: 2, lineStyle: 0, axisLabelVisible: false,
-                        title: `${isSupp ? "Key Support" : "Key Resistance"} — $${sr.price.toFixed(2)}`,
-                    });
-                });
-            }
-
-            // ── Prediction Overlays ────────────────────────
-            if (mode === "prediction" && predictionData?.forecasts) {
-                const { forecasts } = predictionData;
-                const lastBar = ohlcData[ohlcData.length - 1];
-
-                // Simulated sample paths, drawn first so the median sits on top of them.
-                // The median line is a conditional expectation and so is smooth by
-                // construction; these paths are what carries the volatility a viewer
-                // needs to judge the spread.
-                const scenarioPaths = predictionData.scenario_paths;
-                if (Array.isArray(scenarioPaths)) {
-                    scenarioPaths.forEach(path => {
-                        if (!Array.isArray(path) || path.length < 2) return;
-                        const series = chart.addSeries(LineSeries, {
-                            color: C.amber + '26',
-                            lineWidth: 1,
-                            priceLineVisible: false,
-                            lastValueVisible: false,
-                            crosshairMarkerVisible: false,
-                        });
-                        // path[0] anchors on the last close; path[i + 1] pairs with forecasts[i].
-                        const dS = lastBar ? [{ time: lastBar.time, value: lastBar.close }] : [];
-                        forecasts.forEach((f, i) => {
-                            const t = parseChartTime(f.date);
-                            if (t && path[i + 1] != null) dS.push({ time: t, value: path[i + 1] });
-                        });
-                        series.setData(processChartData(dS));
-                    });
-                }
-
-                const predSeries = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2 });
-                const u95 = chart.addSeries(LineSeries, { color: C.amber + '55', lineWidth: 1, lineStyle: 3 });
-                const l95 = chart.addSeries(LineSeries, { color: C.amber + '55', lineWidth: 1, lineStyle: 3 });
-                const u68 = chart.addSeries(LineSeries, { color: C.amber + '88', lineWidth: 1, lineStyle: 3 });
-                const l68 = chart.addSeries(LineSeries, { color: C.amber + '88', lineWidth: 1, lineStyle: 3 });
-
-                const dP = [], dU95 = [], dL95 = [], dU68 = [], dL68 = [];
-                forecasts.forEach(f => {
-                    const t = parseChartTime(f.date);
-                    if (!t) return;
-                    dP.push({ time: t, value: f.predicted });
-                    dU95.push({ time: t, value: f.upper95 });
-                    dL95.push({ time: t, value: f.lower95 });
-                    dU68.push({ time: t, value: f.upper68 });
-                    dL68.push({ time: t, value: f.lower68 });
-                });
-                if (lastBar) {
-                    [dP, dU95, dL95, dU68, dL68].forEach(arr => arr.unshift({ time: lastBar.time, value: lastBar.close }));
-                }
-                predSeries.setData(processChartData(dP)); u95.setData(processChartData(dU95)); l95.setData(processChartData(dL95)); u68.setData(processChartData(dU68)); l68.setData(processChartData(dL68));
-            }
-
-            chart.timeScale().fitContent();
-        }
-
-        function renderSubPanels() {
-            const { ohlc, indicators } = stateData.current;
-            const indMap = {};
-            indicators.forEach(i => indMap[parseChartTime(i.date)] = i);
-            const ohlcData = processChartData(ohlc.map(b => ({ time: parseChartTime(b.date), close: b.close, open: b.open, volume: b.volume })));
-
-            // ── RSI Sub-panel (Indicator + Advanced) ────────
-            if (showRSI && rsiContainerRef.current) {
-                const rsiChart = createSubChart(rsiContainerRef.current, timeframe, 100);
-                if (rsiChart) {
-                    subChartsRef.current.rsi = rsiChart;
-                    const rsiSeries = rsiChart.addSeries(LineSeries, { color: "#a78bfa", lineWidth: 1.5 });
-                    const rsiData = ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.RSI })).filter(d => d.value != null);
-                    rsiSeries.setData(rsiData);
-                    rsiSeries.createPriceLine({ price: 70, color: C.red + '88', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: "" });
-                    rsiSeries.createPriceLine({ price: 30, color: C.green + '88', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: "" });
-                    rsiSeries.createPriceLine({ price: 50, color: C.textDim + '44', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: "" });
-                    rsiChart.timeScale().fitContent();
-                }
-            }
-
-            // ── MACD Sub-panel (Advanced only) ──────────────
-            if (showMACD && macdContainerRef.current) {
-                const macdChart = createSubChart(macdContainerRef.current, timeframe, 100);
-                if (macdChart) {
-                    subChartsRef.current.macd = macdChart;
-                    const macdLine = macdChart.addSeries(LineSeries, { color: "#60a5fa", lineWidth: 1.5 });
-                    const sigLine = macdChart.addSeries(LineSeries, { color: "#f97316", lineWidth: 1 });
-                    const histSeries = macdChart.addSeries(HistogramSeries, { priceFormat: { type: 'price' }, priceScaleId: '' });
-
-                    macdLine.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.MACD })).filter(d => d.value != null));
-                    sigLine.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.MACD_Signal })).filter(d => d.value != null));
-                    histSeries.setData(ohlcData.map(b => {
-                        const v = indMap[b.time]?.MACD_Histogram;
-                        return v != null ? { time: b.time, value: v, color: v >= 0 ? C.green + '88' : C.red + '88' } : null;
-                    }).filter(Boolean));
-                    macdChart.priceScale('').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
-                    macdChart.timeScale().fitContent();
-                }
-            }
-
-            // ── Volume Sub-panel (Indicator + Advanced) ─────
-            if (showVol && volContainerRef.current) {
-                const volChart = createSubChart(volContainerRef.current, timeframe, 80);
-                if (volChart) {
-                    subChartsRef.current.vol = volChart;
-                    const volSeries = volChart.addSeries(HistogramSeries, {
-                        priceFormat: { type: 'volume' }, priceScaleId: '',
-                    });
-                    volSeries.setData(ohlcData.map(b => ({
-                        time: b.time, value: b.volume,
-                        color: b.close >= b.open ? C.green + '66' : C.red + '66'
-                    })));
-                    const volMA = volChart.addSeries(LineSeries, { color: C.amber, lineWidth: 1, priceScaleId: '' });
-                    volMA.setData(ohlcData.map(b => ({ time: b.time, value: indMap[b.time]?.Volume_SMA_20 })).filter(d => d.value != null));
-                    volChart.priceScale('').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.0 } });
-                    volChart.timeScale().fitContent();
-                }
-            }
-        }
-
         loadData();
+        return () => { cancelled = true; };
+    }, [symbol, timeframe, isPatternMode, isIndicatorMode]);
 
-        const handleResize = () => {
-            if (chartRef.current && chartContainerRef.current) {
-                chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
-            }
-            Object.entries(subChartsRef.current).forEach(([key, c]) => {
-                const ref = key === 'rsi' ? rsiContainerRef : key === 'macd' ? macdContainerRef : volContainerRef;
-                if (ref.current) c.applyOptions({ width: ref.current.clientWidth });
-            });
-        };
-        window.addEventListener("resize", handleResize);
-
-        return () => {
-            cancelled = true;
-            window.removeEventListener("resize", handleResize);
-            cleanup();
-        };
-    }, [symbol, timeframe, viewMode, mode, predictionData, patternScope, confluence]);
-
-    const bestPattern = stateData.current.bestPattern;
-    const bestSetup = stateData.current.bestSetup;
-    const bestSetupStatus = stateData.current.bestSetupStatus;
-    const indicatorSummary = stateData.current.indicatorSummary;
-    const selectedPatterns = new Set(bestSetup ? [bestSetup.pattern_name] : []);
-    const alternativeCount = Math.max((stateData.current.patterns?.length || 0) - (bestSetup ? 1 : 0), 0);
+    const { patterns, bestSetup, bestSetupStatus, indicatorSummary } = analysis;
+    const alternativeCount = Math.max((patterns?.length || 0) - (bestSetup ? 1 : 0), 0);
 
     return (
         <div className="fade-up" style={{ display: "flex", flexDirection: "column", width: "100%" }}>
-            {/* Chart + Sidebar Layout */}
-            <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
-                {/* Left side: Toolbar + Charts */}
-                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                    {/* Toolbar */}
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, background: C.bg2, padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.border}`, flexWrap: "wrap", gap: 8 }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "stretch", flexWrap: "wrap" }}>
+                {/* Left: toolbar + the real TradingView chart */}
+                <div style={{ flex: "1 1 560px", minWidth: 0, display: "flex", flexDirection: "column" }}>
+                    <div style={{
+                        display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8,
+                        background: C.bg2, padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.border}`,
+                        flexWrap: "wrap", gap: 8,
+                    }}>
                         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                             <div style={{ fontWeight: 800, color: C.text, fontSize: 16, marginRight: 6 }}>{symbol}</div>
-                            {/* Interval selector */}
                             <div style={{ display: "flex", background: C.bg0, padding: 2, borderRadius: 5 }}>
-                                {timeframes.map(inv => (
+                                {CHART_TIMEFRAMES.map(inv => (
                                     <button key={inv} onClick={() => setTimeframe(inv)} style={{
                                         background: timeframe === inv ? C.amber : "transparent",
                                         color: timeframe === inv ? "#000" : C.textMid,
-                                        border: "none", borderRadius: 3, padding: "3px 8px", fontSize: 10, fontWeight: 700, cursor: "pointer",
+                                        border: "none", borderRadius: 3, padding: "3px 8px",
+                                        fontSize: 10, fontWeight: 700, cursor: "pointer",
                                     }}>{inv}</button>
                                 ))}
                             </div>
                         </div>
 
                         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                            {/* Mode Toggle */}
                             <div style={{ display: "flex", gap: 4, background: C.bg0, padding: 3, borderRadius: 6 }}>
                                 <ModeButton label="Indicator" emoji="🟢" active={viewMode === "indicator"} onClick={() => setViewMode("indicator")} />
                                 <ModeButton label="Pattern" emoji="🟣" active={viewMode === "pattern"} onClick={() => setViewMode("pattern")} />
                                 <ModeButton label="Advanced" emoji="🔴" active={viewMode === "advanced"} onClick={() => setViewMode("advanced")} />
                             </div>
 
-                            {showPatterns && (
+                            {isPatternMode && (
                                 <>
                                     <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
                                     <div style={{ display: "flex", gap: 4, background: C.bg0, padding: 3, borderRadius: 6 }}>
@@ -1482,8 +893,6 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                                 </>
                             )}
 
-
-                            {/* User Level Toggle */}
                             <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
                             <button onClick={() => setUserLevel(prev => prev === "beginner" ? "advanced" : "beginner")} style={{
                                 background: userLevel === "advanced" ? C.amber + "15" : "transparent",
@@ -1495,52 +904,25 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                                 {userLevel === "beginner" ? "👤 Beginner" : "⚡ Advanced"}
                             </button>
 
-                            {/* Close */}
                             <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
                             <button onClick={onClose} style={{
                                 background: "transparent", border: "none", color: C.textDim, cursor: "pointer",
-                                fontSize: 20, lineHeight: "20px", padding: "0 4px"
+                                fontSize: 20, lineHeight: "20px", padding: "0 4px",
                             }}>×</button>
                         </div>
                     </div>
 
-                    {/* Main Chart Area */}
-                    <div style={{ position: "relative", height: 380, borderRadius: 8, overflow: "hidden", border: `1px solid ${C.border}` }}>
-                        {loading && (
-                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: `${C.bg1}99`, zIndex: 10 }}>
-                                <div style={{ color: C.textDim, fontSize: 12 }}>Loading chart data...</div>
-                            </div>
-                        )}
-                        {error && (
-                            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: `${C.bg1}EE`, zIndex: 10 }}>
-                                <div style={{ color: C.red, fontSize: 13, background: C.red + '22', padding: "8px 16px", borderRadius: 8 }}>⚠ Error: {error}</div>
-                            </div>
-                        )}
-                        <div ref={chartContainerRef} style={{ width: "100%", height: "100%", background: C.bg1 }} />
+                    <div style={{ borderRadius: 8, overflow: "hidden", border: `1px solid ${C.border}` }}>
+                        <TradingViewChart
+                            symbol={symbol}
+                            interval={timeframe}
+                            height={520}
+                            studies={isIndicatorMode ? INDICATOR_STUDIES : PATTERN_STUDIES}
+                        />
                     </div>
-
-                    {/* Sub-panels */}
-                    {showRSI && (
-                        <div style={{ marginTop: 4 }}>
-                            <div style={{ fontSize: 9, color: C.textDim, padding: "2px 8px", fontFamily: "'DM Mono', monospace" }}>RSI (14)</div>
-                            <div ref={rsiContainerRef} style={{ height: 100, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.border}` }} />
-                        </div>
-                    )}
-                    {showMACD && (
-                        <div style={{ marginTop: 4 }}>
-                            <div style={{ fontSize: 9, color: C.textDim, padding: "2px 8px", fontFamily: "'DM Mono', monospace" }}>MACD (12, 26, 9)</div>
-                            <div ref={macdContainerRef} style={{ height: 100, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.border}` }} />
-                        </div>
-                    )}
-                    {showVol && (
-                        <div style={{ marginTop: 4 }}>
-                            <div style={{ fontSize: 9, color: C.textDim, padding: "2px 8px", fontFamily: "'DM Mono', monospace" }}>Volume</div>
-                            <div ref={volContainerRef} style={{ height: 80, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.border}` }} />
-                        </div>
-                    )}
                 </div>
 
-                {/* Right side: Mode-specific decision panel */}
+                {/* Right: the mode-specific panel, every number of it from our backend */}
                 <div style={{ width: 300, flexShrink: 0 }}>
                     {isIndicatorMode ? (
                         <IndicatorSummaryPanel summary={indicatorSummary} loading={loading} error={error} />
@@ -1550,7 +932,7 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                             setupStatus={bestSetupStatus}
                             alternativeCount={alternativeCount}
                             loading={loading}
-                            patterns={stateData.current.patterns || []}
+                            patterns={patterns || []}
                             showDetails={patternScope === "all" || viewMode === "advanced"}
                             advancedMode={viewMode === "advanced"}
                         />
@@ -1558,22 +940,15 @@ export default function TradingViewDetail({ symbol, mode = "analysis", predictio
                 </div>
             </div>
 
-            {/* Legend */}
-            <div style={{ marginTop: 8, display: "flex", gap: 12, fontSize: 9, color: C.textDim, justifyContent: "center", flexWrap: "wrap" }}>
-                {showSR && <span style={{ color: C.cyan }}>— Support</span>}
-                {showSR && <span style={{ color: C.red }}>— Resistance</span>}
-                {showSMA200 && <span style={{ color: "#f59e0b" }}>— 200 MA</span>}
-                {showMLSignals && <span><b style={{ color: C.green }}>↑</b> BUY Signal</span>}
-                {showMLSignals && <span><b style={{ color: C.red }}>↓</b> SELL Signal</span>}
-                {showPatterns && selectedPatterns.size > 0 && <span style={{ color: "#22d3ee" }}>◆ Pattern ({[...selectedPatterns].join(", ")})</span>}
-                {mode === "prediction" && (
-                    <>
-                        <span style={{ color: C.amber }}>— Predicted Path</span>
-                        <span style={{ color: C.amber + '88' }}>- - 68% CI</span>
-                        <span style={{ color: C.amber + '55' }}>··· 95% CI</span>
-                    </>
-                )}
-                <span>Scroll to zoom · Drag to pan</span>
+            <div style={{
+                marginTop: 8, display: "flex", gap: 14, fontSize: 9, color: C.textDim,
+                justifyContent: "center", flexWrap: "wrap",
+            }}>
+                <span>Chart by TradingView — drawing tools, indicators and replay are theirs</span>
+                <a href={tradingViewUrl(symbol)} target="_blank" rel="noreferrer noopener" style={{ color: C.amber }}>
+                    Open full chart ↗
+                </a>
+                <span>Patterns, levels and setups on the right are computed by our backend</span>
             </div>
         </div>
     );

@@ -246,6 +246,26 @@ export async function listDirectionReports() {
     return apiFetch("/direction/");
 }
 
+/**
+ * The reasoned direction call: UP / DOWN / NEUTRAL with the evidence behind it.
+ *
+ * Distinct from `fetchDirection` above, which serves one model's gated gauge and
+ * its walk-forward record. This serves the combined read — trend, momentum,
+ * volume, price action, support/resistance, volatility and historical analogs,
+ * each with the percentage points it contributed — blended with that classifier
+ * by measured skill.
+ *
+ * It answers whether or not a walk-forward report exists, so the panel is never
+ * blocked on training; `blend.classifier.weight` is 0 and `classifier_note`
+ * explains why when the classifier is not yet part of the answer.
+ */
+export async function fetchDirectionAnalysis(symbol, { model = "logistic", refresh = false } = {}) {
+    return apiFetch(
+        `/direction/${encodeSymbol(symbol)}/analysis?model=${encodeURIComponent(model)}` +
+        (refresh ? "&refresh=true" : "")
+    );
+}
+
 // ── Ensemble Predictions ─────────────────────────────────────
 export async function fetchEnsemblePrediction(symbol, horizon = 30) {
     return apiFetch("/predict/ensemble", {

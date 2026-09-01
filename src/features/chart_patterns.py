@@ -41,6 +41,8 @@ that is easy to get wrong, and how they are handled here:
 Public API:
     add_chart_pattern_features(df) -> DataFrame
     CHART_PATTERN_FEATURE_COLUMNS
+    safe_divide(numerator, denominator) -> Series
+    true_range(high, low, close) -> Series
 """
 
 from __future__ import annotations
@@ -103,13 +105,13 @@ CHART_PATTERN_FEATURE_COLUMNS: List[str] = [
 ]
 
 
-def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     """Divide, mapping a zero or non-finite denominator to NaN rather than inf."""
     denominator = denominator.where(np.isfinite(denominator) & (denominator != 0))
     return numerator / denominator
 
 
-def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     """Wilder's true range: the largest of today's span and the two gap spans."""
     previous_close = close.shift(1)
     return pd.concat([
@@ -242,19 +244,19 @@ def add_chart_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
     # -- candle geometry -----------------------------------------------------
     # Signed body as a share of the day's range: +1 is a close on the high after
     # opening on the low (a marubozu), -1 the mirror image, 0 a doji.
-    data["Body_Ratio"] = _safe_divide(body, span).where(span > 0, 0.0).where(span.notna())
-    data["Upper_Shadow_Ratio"] = _safe_divide(upper_shadow, span).where(span > 0, 0.0).where(span.notna())
-    data["Lower_Shadow_Ratio"] = _safe_divide(lower_shadow, span).where(span > 0, 0.0).where(span.notna())
+    data["Body_Ratio"] = safe_divide(body, span).where(span > 0, 0.0).where(span.notna())
+    data["Upper_Shadow_Ratio"] = safe_divide(upper_shadow, span).where(span > 0, 0.0).where(span.notna())
+    data["Lower_Shadow_Ratio"] = safe_divide(lower_shadow, span).where(span > 0, 0.0).where(span.notna())
 
-    true_range = _true_range(high, low, close)
-    atr = true_range.rolling(ATR_WINDOW).mean()
-    data["Body_To_ATR"] = _safe_divide(body, atr)
-    data["Range_To_ATR"] = _safe_divide(span, atr)
-    data["Gap_To_ATR"] = _safe_divide(open_ - close.shift(1), atr)
-    data["ATR_Ratio"] = _safe_divide(atr, safe_close)
+    tr = true_range(high, low, close)
+    atr = tr.rolling(ATR_WINDOW).mean()
+    data["Body_To_ATR"] = safe_divide(body, atr)
+    data["Range_To_ATR"] = safe_divide(span, atr)
+    data["Gap_To_ATR"] = safe_divide(open_ - close.shift(1), atr)
+    data["ATR_Ratio"] = safe_divide(atr, safe_close)
 
     # -- multi-bar shape -----------------------------------------------------
-    close_position = _safe_divide(close - low, span).where(span > 0, 0.5).where(span.notna())
+    close_position = safe_divide(close - low, span).where(span > 0, 0.5).where(span.notna())
     data["Body_Ratio_Lag1"] = data["Body_Ratio"].shift(1)
     data["Close_Position_Lag1"] = close_position.shift(1)
     # Persistent closing strength: five days of closing near the high is a
@@ -267,22 +269,22 @@ def add_chart_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Expanding ranges mark breakouts and capitulation; contracting ranges mark
     # coiling. The ratio is scale-free in both price and volatility regime.
-    data["Range_Expansion_5_20"] = _safe_divide(span.rolling(5).mean(), span.rolling(VOLUME_WINDOW).mean())
+    data["Range_Expansion_5_20"] = safe_divide(span.rolling(5).mean(), span.rolling(VOLUME_WINDOW).mean())
 
     # -- breakout and channel position ---------------------------------------
     # shift(1) excludes today's own bar, so this asks "did the close take out the
     # level that existed before today", which is the question a chartist asks.
     prior_high = high.rolling(BREAKOUT_WINDOW).max().shift(1)
     prior_low = low.rolling(BREAKOUT_WINDOW).min().shift(1)
-    data["High_20d_Break"] = _safe_divide(close, prior_high) - 1.0
-    data["Low_20d_Break"] = _safe_divide(close, prior_low) - 1.0
+    data["High_20d_Break"] = safe_divide(close, prior_high) - 1.0
+    data["Low_20d_Break"] = safe_divide(close, prior_low) - 1.0
 
     for window in DONCHIAN_WINDOWS:
         channel_high = high.rolling(window).max()
         channel_low = low.rolling(window).min()
         channel_span = channel_high - channel_low
         data[f"Donchian_Position_{window}"] = (
-            _safe_divide(close - channel_low, channel_span)
+            safe_divide(close - channel_low, channel_span)
             .where(channel_span > 0, 0.5)
             .where(channel_span.notna())
         )
@@ -303,7 +305,7 @@ def add_chart_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
     for window in EFFICIENCY_WINDOWS:
         net_move = (close - close.shift(window)).abs()
         total_move = absolute_step.rolling(window).sum()
-        data[f"Efficiency_Ratio_{window}"] = _safe_divide(net_move, total_move)
+        data[f"Efficiency_Ratio_{window}"] = safe_divide(net_move, total_move)
 
     # -- volume confirmation -------------------------------------------------
     if "Volume" in data.columns:
@@ -313,14 +315,14 @@ def add_chart_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
         total_volume = volume.rolling(VOLUME_WINDOW).sum()
         # Above 0.5 means the last month's volume arrived mostly on up days:
         # accumulation rather than distribution.
-        data["Up_Volume_Ratio_20"] = _safe_divide(up_volume, total_volume)
+        data["Up_Volume_Ratio_20"] = safe_divide(up_volume, total_volume)
 
         if "Volume_Zscore" in data.columns:
             volume_zscore = pd.to_numeric(data["Volume_Zscore"], errors="coerce")
         else:
             volume_mean = volume.rolling(VOLUME_WINDOW).mean()
             volume_std = volume.rolling(VOLUME_WINDOW).std()
-            volume_zscore = _safe_divide(volume - volume_mean, volume_std)
+            volume_zscore = safe_divide(volume - volume_mean, volume_std)
         # Positive when an unusually heavy day moved up, negative when it moved
         # down: the sign of the move weighted by how much participation it drew.
         data["Volume_Price_Confirm"] = np.sign(daily_return) * volume_zscore
@@ -330,7 +332,7 @@ def add_chart_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
         # OBV is a cumulative share count, so its raw slope scales with the
         # ticker's turnover. Dividing by average volume makes it comparable
         # across names and across a decade of volume growth in one name.
-        data["OBV_Slope_20"] = _safe_divide(obv_slope, volume.rolling(VOLUME_WINDOW).mean())
+        data["OBV_Slope_20"] = safe_divide(obv_slope, volume.rolling(VOLUME_WINDOW).mean())
     else:
         logger.warning("No Volume column: the three volume-confirmation columns will be NaN")
         for column in ("Up_Volume_Ratio_20", "Volume_Price_Confirm", "OBV_Slope_20"):
@@ -340,11 +342,11 @@ def add_chart_pattern_features(df: pd.DataFrame) -> pd.DataFrame:
     # Parkinson uses the high-low range; close-to-close uses only the close. The
     # ratio separates a market that moves intraday and closes flat from one that
     # gaps. Both are "volatile"; they are not the same chart.
-    log_high_low = np.log(_safe_divide(high, low))
+    log_high_low = np.log(safe_divide(high, low))
     parkinson = np.sqrt(
         (log_high_low ** 2).rolling(VOLUME_WINDOW).mean() / (4.0 * np.log(2.0))
     )
     close_to_close = daily_return.rolling(VOLUME_WINDOW).std()
-    data["Parkinson_Vol_Ratio"] = _safe_divide(parkinson, close_to_close)
+    data["Parkinson_Vol_Ratio"] = safe_divide(parkinson, close_to_close)
 
     return data

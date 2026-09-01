@@ -1,17 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-    Area,
-    CartesianGrid,
-    ComposedChart,
-    Line,
-    ReferenceLine,
-    ResponsiveContainer,
-    Tooltip,
-    XAxis,
-    YAxis,
-} from "recharts";
 import { C } from "../utils/data";
 import { fetchEnsemblePrediction, fetchPredictions } from "../utils/api";
+import { tradingViewUrl } from "../utils/tradingview";
+import TradingViewChart from "../components/TradingViewChart";
+import DirectionAnalysisPanel from "../components/DirectionAnalysisPanel";
 import DirectionPanel from "../components/DirectionPanel";
 import ModelPreparation from "../components/ModelPreparation";
 
@@ -88,11 +80,6 @@ function formatPrice(value) {
 function formatPct(value) {
     if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
     return `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
-}
-
-function formatDateLabel(date) {
-    if (typeof date !== "string" || date.length < 10) return date;
-    return date.slice(5).replace("-", "/");
 }
 
 function toFiniteNumber(value) {
@@ -307,10 +294,12 @@ function resolveDisplayData(data, selectedModel) {
 /**
  * Say where the daily points came from.
  *
- * In the default mode each model emits a single cumulative horizon-day return
- * and the days in between are compounded toward it. Those points are not daily
- * predictions, and a chart that draws them like one invites the reader to trust
- * detail the model never produced.
+ * In the default mode each model emits a single cumulative horizon-day return.
+ * There are no daily predictions behind it, which is why the panel above draws
+ * a range at the horizon rather than a path to it - but the reader still needs
+ * to know which of the two kinds of forecast they are looking at, because a
+ * per-step model is making a genuinely different (and more compounding-prone)
+ * claim from one that emitted a single endpoint.
  */
 function ForecastProvenanceNote({ pathType, perStepPredictions, modelOutputCount, horizon, scenarioCount }) {
     if (!pathType) return null;
@@ -339,20 +328,19 @@ function ForecastProvenanceNote({ pathType, perStepPredictions, modelOutputCount
                 {interpolated
                     ? `Each model produced exactly one number — the ${horizon}-day return${
                           modelOutputCount ? ` (${modelOutputCount} model outputs total)` : ""
-                      }. The dashed line is not a forecast of the days it passes through: it is
-                       P(t) = P(0) x (1 + r) ^ (t/${horizon}), the compounding that reaches that
-                       endpoint. Being monotone by construction, it cannot show a direction change,
-                       and a turn in it would be arithmetic, not a prediction. Read the endpoint and
-                       the band; ignore the shape between them.`
+                      }. There is no day-by-day forecast underneath it, so none is drawn: what the
+                       model claims is an endpoint and an interval around it, and that is what the
+                       range shows.`
                     : `Every point is a separate model prediction${
                           modelOutputCount ? ` (${modelOutputCount} model outputs)` : ""
-                      }. Later steps are conditioned on earlier predicted bars, so error compounds.`}
+                      }. Later steps are conditioned on earlier predicted bars, so error compounds —
+                       which is why the range at the horizon, not the sequence, is what is drawn.`}
                 {scenarioCount > 0 && (
                     <>
                         {" "}
-                        The centre line is an average outcome and is smooth by
-                        construction — the {scenarioCount} simulated paths behind it show the
-                        day-to-day volatility any real price path would carry.
+                        The ticks under the axis are where {scenarioCount} simulated outcomes landed.
+                        Their spread is the useful part; the paths that produced them are not shown
+                        because none of them is a prediction.
                     </>
                 )}
             </span>
@@ -383,277 +371,122 @@ function MetricCard({ label, value, sub, color }) {
     );
 }
 
-function TooltipContent({ active, payload, label }) {
-    if (!active || !payload?.length) return null;
-    const rows = payload
-        .filter((item) => MODEL_LABELS[item.dataKey] && item.value !== null && item.value !== undefined)
-        .map((item) => ({
-            key: item.dataKey,
-            label: MODEL_LABELS[item.dataKey],
-            value: item.value,
-            color: item.color,
-        }));
-    if (!rows.length) return null;
+/**
+ * The forecast, drawn as what it is: a range, not a path.
+ *
+ * This replaces a line chart that ran from today's close to the horizon-day
+ * prediction. That line was not a forecast of the days it passed through —
+ * outside per-step mode each model emits exactly one number, and the shape
+ * between was P(0) x (1 + r)^(t/H), monotone by construction. Drawing it
+ * invited the reader to trust a candle-by-candle claim the model never made,
+ * and no amount of dashing or footnoting fixed that; the picture said one thing
+ * while the caption said another.
+ *
+ * So the picture now says the same thing as the model. One axis of price, the
+ * last close marked on it, the prediction marked on it, and the calibrated 68%
+ * and 95% intervals drawn around it. Where the price goes in between is not
+ * claimed, because it is not known.
+ *
+ * When the payload carries Monte Carlo scenarios, their *endpoints* are plotted
+ * as a strip of ticks under the axis. Endpoints, not paths: the useful content
+ * of those simulations is the spread of where price lands, and drawing the
+ * paths themselves puts 200 fictional price histories on screen.
+ */
+function ForecastRange({ currentPrice, finalPoint, horizon, scenarioPaths, interpolated, label }) {
+    const target = firstFiniteNumber(finalPoint?.prediction, finalPoint?.predicted, finalPoint?.ensemble);
+    const lower95 = toFiniteNumber(finalPoint?.lower_95);
+    const upper95 = toFiniteNumber(finalPoint?.upper_95);
+    const lower68 = toFiniteNumber(finalPoint?.lower_68);
+    const upper68 = toFiniteNumber(finalPoint?.upper_68);
+    const anchor = toFiniteNumber(currentPrice);
 
-    return (
-        <div style={{
-            background: "#0B101A",
-            border: `1px solid ${C.border}`,
-            borderRadius: 8,
-            padding: "10px 12px",
-            boxShadow: "0 12px 28px rgba(0,0,0,.28)",
-            minWidth: 170,
-        }}>
-            <div style={{ color: C.text, fontWeight: 700, fontSize: 12, marginBottom: 8 }}>{label}</div>
-            <div style={{ display: "grid", gap: 5 }}>
-                {rows.map((row) => (
-                    <div key={row.key} style={{ display: "flex", justifyContent: "space-between", gap: 18, fontSize: 12 }}>
-                        <span style={{ color: row.color }}>{row.label}</span>
-                        <span style={{ color: C.text }}>{formatPrice(row.value)}</span>
-                    </div>
-                ))}
+    // Scenario endpoints only. The last element of each simulated path is where
+    // that scenario finished; the elements before it are the fiction.
+    const endpoints = (Array.isArray(scenarioPaths) ? scenarioPaths : [])
+        .map((path) => toFiniteNumber(Array.isArray(path) ? path[path.length - 1] : null))
+        .filter((value) => value !== null);
+
+    const candidates = [target, lower95, upper95, lower68, upper68, anchor, ...endpoints]
+        .filter((value) => value !== null);
+    if (!candidates.length || target === null) {
+        return (
+            <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, color: C.textDim, fontSize: 12 }}>
+                This model produced no forecast to draw a range from.
             </div>
-        </div>
+        );
+    }
+
+    const min = Math.min(...candidates);
+    const max = Math.max(...candidates);
+    const span = max - min || Math.max(Math.abs(max) * 0.02, 1);
+    const pad = span * 0.08;
+    const low = min - pad;
+    const high = max + pad;
+    const position = (value) => ((value - low) / (high - low)) * 100;
+
+    const band = (lo, hi, opacity) => (
+        lo === null || hi === null ? null : (
+            <div style={{
+                position: "absolute", top: 26, height: 26,
+                left: `${position(lo)}%`, width: `${position(hi) - position(lo)}%`,
+                background: COLORS.band, opacity, borderRadius: 4,
+            }} />
+        )
     );
-}
 
-function ForecastChart({ priceData, forecastPoints, selectedModel, scenarioPaths, showScenarios, onToggleScenarios, interpolated }) {
-    const { chartData, todayDate, yDomain, scenarioKeys } = useMemo(() => {
-        const history = (priceData?.bars || []).slice(-60);
-        const future = (forecastPoints || [])
-            .filter((point) => point?.date)
-            .slice()
-            .sort((a, b) => String(a.date).localeCompare(String(b.date)));
-        const rows = [];
-        let boundary = null;
-
-        // Monte Carlo paths, one series per scenario. Each path is [today, ...steps],
-        // so element 0 pins to the last historical bar and element i+1 to forecast
-        // point i — that alignment is what makes the fan start at today's price
-        // instead of floating free of the history.
-        const paths = showScenarios && Array.isArray(scenarioPaths) ? scenarioPaths : [];
-        const keys = paths.map((_, index) => `scenario_${index}`);
-
-        history.forEach((bar, index) => {
-            const isLast = index === history.length - 1;
-            if (isLast) boundary = bar.date;
-            const row = {
-                date: bar.date,
-                historical: bar.close,
-                ensemble: isLast && forecastPoints.length ? bar.close : null,
-                lstm: isLast && forecastPoints.length ? bar.close : null,
-                xgboost: isLast && forecastPoints.length ? bar.close : null,
-                random_forest: isLast && forecastPoints.length ? bar.close : null,
-                upper_90: isLast && forecastPoints.length ? bar.close : null,
-                lower_90: isLast && forecastPoints.length ? bar.close : null,
-                upper_95: isLast && forecastPoints.length ? bar.close : null,
-                lower_95: isLast && forecastPoints.length ? bar.close : null,
-                upper_68: isLast && forecastPoints.length ? bar.close : null,
-                lower_68: isLast && forecastPoints.length ? bar.close : null,
-            };
-            keys.forEach((key, pathIndex) => {
-                row[key] = isLast ? toFiniteNumber(paths[pathIndex]?.[0]) ?? bar.close : null;
-            });
-            rows.push(row);
-        });
-
-        future.forEach((point, stepIndex) => {
-            const prediction = firstFiniteNumber(point.prediction, point.predicted, point.ensemble);
-            const row = {
-                date: point.date,
-                historical: null,
-                ensemble: prediction,
-                lstm: firstFiniteNumber(point.lstm, selectedModel === "lstm" ? prediction : null),
-                xgboost: firstFiniteNumber(point.xgboost, selectedModel === "xgboost" ? prediction : null),
-                random_forest: firstFiniteNumber(point.random_forest, selectedModel === "random_forest" ? prediction : null),
-                upper_90: point.upper_90 ?? point.upper_95,
-                lower_90: point.lower_90 ?? point.lower_95,
-                upper_95: point.upper_95 ?? point.upper_90,
-                lower_95: point.lower_95 ?? point.lower_90,
-                upper_68: point.upper_68,
-                lower_68: point.lower_68,
-            };
-            keys.forEach((key, pathIndex) => {
-                row[key] = toFiniteNumber(paths[pathIndex]?.[stepIndex + 1]);
-            });
-            rows.push(row);
-        });
-
-        const visibleKeys = selectedModel === "all"
-            ? ["historical", "ensemble", "lstm", "xgboost", "random_forest"]
-            : ["historical", selectedModel];
-        // Scenario paths are deliberately included in the domain: clipping the fan
-        // would understate exactly the spread it exists to show.
-        const domainKeys = [...visibleKeys, ...keys];
-        const lineValues = rows.flatMap((row) => domainKeys.map((key) => toFiniteNumber(row[key]))).filter((value) => value !== null);
-        const min = Math.min(...lineValues);
-        const max = Math.max(...lineValues);
-        const span = Number.isFinite(max - min) ? max - min : 0;
-        const pad = Math.max(span * 0.08, Math.abs(max || min || 0) * 0.01, 1);
-        const domain = lineValues.length
-            ? [Math.max(0, Number((min - pad).toFixed(2))), Number((max + pad).toFixed(2))]
-            : ["auto", "auto"];
-
-        return { chartData: rows, todayDate: boundary, yDomain: domain, scenarioKeys: keys };
-    }, [priceData, forecastPoints, selectedModel, scenarioPaths, showScenarios]);
-
-    const show = (model) => selectedModel === "all" || selectedModel === model;
-    const scenarioCount = Array.isArray(scenarioPaths) ? scenarioPaths.length : 0;
+    const marker = (value, colour, caption, above) => (
+        value === null ? null : (
+            <div style={{ position: "absolute", left: `${position(value)}%`, top: above ? 0 : 52, transform: "translateX(-50%)", textAlign: "center" }}>
+                {above && <div style={{ color: colour, fontSize: 11, fontWeight: 800, whiteSpace: "nowrap" }}>{formatPrice(value)}</div>}
+                <div style={{ width: 2, height: 26, background: colour, margin: "0 auto" }} />
+                {!above && <div style={{ color: colour, fontSize: 11, fontWeight: 800, whiteSpace: "nowrap", marginTop: 2 }}>{formatPrice(value)}</div>}
+                <div style={{ color: C.textDim, fontSize: 10, whiteSpace: "nowrap", marginTop: above ? 0 : 2 }}>{caption}</div>
+            </div>
+        )
+    );
 
     return (
-        <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
-            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14, fontSize: 12, color: C.textMid, alignItems: "center" }}>
-                {[
-                    ["historical", "Historical", null],
-                    ["ensemble", "Ensemble", null],
-                    ["lstm", "LSTM", "5 5"],
-                    ["xgboost", "XGBoost", "5 5"],
-                    ["random_forest", "Random Forest", "5 5"],
-                ].map(([key, label, dash]) => (
-                    <div key={key} style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                        <span style={{ width: 18, height: 0, borderTop: `3px ${dash ? "dashed" : "solid"} ${COLORS[key]}` }} />
-                        <span>{label}</span>
-                    </div>
-                ))}
-                {scenarioCount > 0 && (
-                    <button
-                        type="button"
-                        onClick={onToggleScenarios}
-                        title="Monte Carlo paths simulated by resampling this stock's own recent daily moves. They show the volatility a forecast has to live inside; the centre line is the average outcome, not a path the market is expected to trace."
-                        style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 7,
-                            marginLeft: "auto",
-                            background: "transparent",
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 6,
-                            padding: "4px 9px",
-                            color: showScenarios ? C.text : C.textDim,
-                            fontSize: 12,
-                            cursor: "pointer",
-                        }}
-                    >
-                        <span style={{
-                            width: 18,
-                            height: 0,
-                            borderTop: `2px solid ${COLORS.scenario}`,
-                            opacity: showScenarios ? 0.9 : 0.3,
-                        }} />
-                        <span>{scenarioCount} simulated paths</span>
-                    </button>
-                )}
+        <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: "18px 22px 16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+                <div style={{ color: C.text, fontSize: 13, fontWeight: 800 }}>
+                    {label || "Forecast"} — where price could be in {horizon} days
+                </div>
+                <div style={{ color: C.textDim, fontSize: 11 }}>
+                    {interpolated
+                        ? "one model output for the whole horizon"
+                        : "per-step model outputs, endpoint shown"}
+                </div>
             </div>
-            <ResponsiveContainer width="100%" height={366}>
-                <ComposedChart data={chartData} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
-                    <CartesianGrid stroke={C.border} strokeDasharray="3 3" opacity={0.28} vertical={false} />
-                    <XAxis
-                        dataKey="date"
-                        tick={{ fill: C.textDim, fontSize: 11 }}
-                        axisLine={false}
-                        tickLine={false}
-                        tickFormatter={formatDateLabel}
-                        minTickGap={22}
+
+            <div style={{ position: "relative", height: 108, marginTop: 6 }}>
+                {/* 95% then 68%, drawn widest first so the inner band reads darker */}
+                {band(lower95, upper95, 0.10)}
+                {band(lower68, upper68, 0.22)}
+
+                {/* The price axis itself */}
+                <div style={{ position: "absolute", top: 38, left: 0, right: 0, height: 2, background: C.border }} />
+
+                {marker(anchor, C.amber, "last close", true)}
+                {marker(target, COLORS.ensemble, `${horizon}-day forecast`, false)}
+
+                {/* Scenario endpoints: one tick each, no paths */}
+                {endpoints.map((value, index) => (
+                    <div
+                        key={index}
+                        title={`Simulated outcome ${formatPrice(value)}`}
+                        style={{
+                            position: "absolute", top: 96, left: `${position(value)}%`,
+                            width: 1, height: 10, background: COLORS.scenario, opacity: 0.4,
+                        }}
                     />
-                    <YAxis
-                        orientation="right"
-                        tick={{ fill: C.textDim, fontSize: 11 }}
-                        domain={yDomain}
-                        allowDataOverflow
-                        axisLine={false}
-                        tickLine={false}
-                        tickFormatter={(value) => `$${Number(value).toFixed(0)}`}
-                    />
-                    <Tooltip content={<TooltipContent />} />
-                    <Area
-                        type="monotone"
-                        dataKey="upper_95"
-                        stroke="none"
-                        fill={COLORS.band}
-                        fillOpacity={0.06}
-                        connectNulls
-                        isAnimationActive={false}
-                        tooltipType="none"
-                    />
-                    <Area
-                        type="monotone"
-                        dataKey="lower_95"
-                        stroke="none"
-                        fill={COLORS.panel}
-                        fillOpacity={1}
-                        connectNulls
-                        isAnimationActive={false}
-                        tooltipType="none"
-                    />
-                    <Area
-                        type="monotone"
-                        dataKey="upper_68"
-                        stroke="none"
-                        fill={COLORS.band}
-                        fillOpacity={0.14}
-                        connectNulls
-                        isAnimationActive={false}
-                        tooltipType="none"
-                    />
-                    <Area
-                        type="monotone"
-                        dataKey="lower_68"
-                        stroke="none"
-                        fill={COLORS.panel}
-                        fillOpacity={1}
-                        connectNulls
-                        isAnimationActive={false}
-                        tooltipType="none"
-                    />
-                    {todayDate && (
-                        <ReferenceLine
-                            x={todayDate}
-                            stroke={C.textDim}
-                            strokeDasharray="4 4"
-                            label={{ value: "Today", position: "top", fill: C.textMid, fontSize: 11 }}
-                        />
-                    )}
-                    {/* Simulated paths first, so the forecast lines draw over them.
-                        `type="linear"` keeps each daily step as its own segment —
-                        monotone smoothing would round off the very step-to-step
-                        movement these paths exist to show. */}
-                    {scenarioKeys.map((key) => (
-                        <Line
-                            key={key}
-                            type="linear"
-                            dataKey={key}
-                            stroke={COLORS.scenario}
-                            strokeWidth={1}
-                            strokeOpacity={0.32}
-                            dot={false}
-                            connectNulls
-                            isAnimationActive={false}
-                            legendType="none"
-                            tooltipType="none"
-                        />
-                    ))}
-                    <Line type="monotone" dataKey="historical" stroke={COLORS.historical} strokeWidth={2} dot={false} isAnimationActive={false} />
-                    <Line hide={!show("lstm")} type="monotone" dataKey="lstm" stroke={COLORS.lstm} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
-                    <Line hide={!show("xgboost")} type="monotone" dataKey="xgboost" stroke={COLORS.xgboost} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
-                    <Line hide={!show("random_forest")} type="monotone" dataKey="random_forest" stroke={COLORS.random_forest} strokeWidth={2} strokeDasharray="6 5" dot={false} connectNulls isAnimationActive={false} />
-                    {/* Dashed whenever the path is interpolated. A solid, heavy
-                        line reads as a series of forecasts; when each model
-                        emitted one endpoint and the days between it are
-                        P_0*(1+r)^(t/H), that reading is wrong — the curve is
-                        monotone by construction and cannot show a turn. */}
-                    <Line
-                        hide={!show("ensemble")}
-                        type="monotone"
-                        dataKey="ensemble"
-                        stroke={COLORS.ensemble}
-                        strokeWidth={interpolated ? 3 : 4}
-                        strokeDasharray={interpolated ? "7 5" : undefined}
-                        dot={false}
-                        connectNulls
-                        isAnimationActive={false}
-                    />
-                </ComposedChart>
-            </ResponsiveContainer>
+                ))}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.textDim, marginTop: 4 }}>
+                <span>{formatPrice(lower95)} · 95% lower</span>
+                {endpoints.length > 0 && <span>{endpoints.length} simulated outcomes</span>}
+                <span>95% upper · {formatPrice(upper95)}</span>
+            </div>
         </div>
     );
 }
@@ -741,7 +574,6 @@ function ForecastTable({ rows, modelKey, label }) {
 export default function PredictionsTab({ selectedTicker, apiConnected, priceData, modelPrep }) {
     const [horizon, setHorizon] = useState(30);
     const [selectedModel, setSelectedModel] = useState("all");
-    const [showScenarios, setShowScenarios] = useState(true);
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -820,6 +652,9 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
     const reliabilityColor = display.reliability === "Low" ? C.red : display.reliability === "Medium" ? C.amber : C.green;
     // A unified model answers for the next bar whatever the horizon selector says.
     const horizonLocked = isUnifiedModel(selectedModel);
+    // per_step_predictions is authoritative; path_type is the readable fallback.
+    const perStepForecast = display.perStepPredictions
+        ?? display.pathType === "recursive_per_step";
 
     return (
         <div style={{ display: "grid", gap: 18, paddingBottom: 36 }}>
@@ -875,11 +710,45 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                 </div>
             </div>
 
-            {/* Next-day direction sits above the multi-day forecast on purpose.
-                It is the part with a measured out-of-sample track record and a
-                costed backtest; the price cone below it is a single scalar per
-                model with the intermediate days interpolated. Reading order
-                should follow evidence, not horizon length. */}
+            {/* ── The chart. TradingView's, not ours. ──────────────
+                The official Advanced Chart widget, pointed at whichever ticker
+                is selected. Candles, volume, timeframes, drawing tools and
+                studies are all theirs; nothing on this tab redraws price, and
+                nothing on this chart produces a number the panels below read.
+                The widget is the visualisation half of the split — our backend
+                is the analysis half, and the two never cross. */}
+            <div style={{
+                background: COLORS.panel, border: `1px solid ${C.border}`,
+                borderRadius: 8, padding: 14,
+            }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                    <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>
+                        {selectedTicker} — live chart
+                    </div>
+                    <a
+                        href={tradingViewUrl(selectedTicker)}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        style={{ color: COLORS.ensemble, fontSize: 11, fontWeight: 700 }}
+                    >Open on TradingView ↗</a>
+                </div>
+                <TradingViewChart symbol={selectedTicker} interval="1d" height={520} />
+            </div>
+
+            {/* ── The analysis. Ours, not TradingView's. ───────────
+                Direction, probability, confidence and the evidence behind them,
+                from GET /api/direction/{symbol}/analysis: trend, momentum,
+                volume, price action, support/resistance, volatility regime and
+                historical analogs, blended with the classifier by measured
+                out-of-sample skill. */}
+            <DirectionAnalysisPanel symbol={selectedTicker} apiConnected={apiConnected} />
+
+            {/* The classifier's own track record, under the combined call it
+                feeds. This is the panel that says whether the model reading
+                tomorrow has ever been right: the gauge, the rolling hit rate
+                against the base rate, and equity against buy & hold. The
+                analysis above weights it by exactly these numbers, so the two
+                belong next to each other. */}
             <DirectionPanel symbol={selectedTicker} modelPrep={modelPrep} />
 
             {/* One panel covers every reason there is nothing to draw, and the
@@ -938,18 +807,13 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         />
                     </div>
 
-                    <ForecastChart
-                        priceData={priceData}
-                        forecastPoints={(display.points || []).slice(0, horizon)}
-                        selectedModel={display.chartModel}
+                    <ForecastRange
+                        currentPrice={currentPrice}
+                        finalPoint={getFinalForecastPoint((display.points || []).slice(0, horizon))}
+                        horizon={horizon}
                         scenarioPaths={display.scenarioPaths}
-                        showScenarios={showScenarios}
-                        onToggleScenarios={() => setShowScenarios((on) => !on)}
-                        interpolated={
-                            display.perStepPredictions === false ||
-                            (display.perStepPredictions == null &&
-                                display.pathType !== "recursive_per_step")
-                        }
+                        label={modelLabel(display.chartModel)}
+                        interpolated={!perStepForecast}
                     />
 
                     <ForecastProvenanceNote
@@ -957,7 +821,7 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         perStepPredictions={display.perStepPredictions}
                         modelOutputCount={display.modelOutputCount}
                         horizon={horizon}
-                        scenarioCount={showScenarios ? (display.scenarioPaths?.length ?? 0) : 0}
+                        scenarioCount={display.scenarioPaths?.length ?? 0}
                     />
 
                     {display.headsNote && (
@@ -1002,16 +866,31 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                         />
                         <div style={{ display: "grid", gap: 10 }}>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                                <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>Forecast Table</div>
+                                <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>
+                                    {perStepForecast ? "Forecast Table" : "Model Output"}
+                                </div>
                                 <div style={{ color: reliabilityColor, fontSize: 12, fontWeight: 800 }}>
                                     {display.reliability || "Model"}
                                 </div>
                             </div>
+                            {/* Only a per-step model has a row per day. Listing the
+                                interpolated points would put the removed path back
+                                on screen as a table, which is the same fiction with
+                                gridlines: the model emitted one number, so one row
+                                is what there is to show. */}
                             <ForecastTable
-                                rows={display.points || []}
+                                rows={perStepForecast
+                                    ? (display.points || [])
+                                    : [getFinalForecastPoint(display.points || [])].filter(Boolean)}
                                 modelKey={display.chartModel === "all" ? "ensemble" : display.chartModel}
                                 label={`${display.tableLabel || "Predicted"} Price`}
                             />
+                            {!perStepForecast && (
+                                <div style={{ color: C.textDim, fontSize: 11, lineHeight: 1.5 }}>
+                                    One row, because the model produced one number: the {horizon}-day
+                                    endpoint and its interval. The days in between were never predicted.
+                                </div>
+                            )}
                         </div>
                     </div>
                 </>

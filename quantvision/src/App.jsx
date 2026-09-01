@@ -7,7 +7,7 @@ import { C, DEFAULT_INDEX_SYMBOL, LEGACY_TICKERS, SP500_LIST, TICKERS } from "./
 import { Tab } from "./components/UIComponents";
 
 // Tabs are code-split: only the active tab's chunk (and its charting library) is
-// downloaded, instead of shipping all six plus recharts and lightweight-charts up front.
+// downloaded, instead of shipping all six plus recharts up front.
 const AnalysisTab = lazy(() => import("./tabs/AnalysisTab"));
 const PredictionsTab = lazy(() => import("./tabs/PredictionsTab"));
 const PortfolioTab = lazy(() => import("./tabs/PortfolioTab"));
