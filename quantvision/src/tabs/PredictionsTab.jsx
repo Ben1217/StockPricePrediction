@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { C } from "../utils/data";
 import { fetchEnsemblePrediction, fetchPredictions } from "../utils/api";
-import { tradingViewUrl } from "../utils/tradingview";
-import TradingViewChart from "../components/TradingViewChart";
+import BestModelChartPanel from "../components/BestModelChartPanel";
 import DirectionAnalysisPanel from "../components/DirectionAnalysisPanel";
 import DirectionPanel from "../components/DirectionPanel";
 import ModelPreparation from "../components/ModelPreparation";
@@ -710,30 +709,26 @@ export default function PredictionsTab({ selectedTicker, apiConnected, priceData
                 </div>
             </div>
 
-            {/* ── The chart. TradingView's, not ours. ──────────────
-                The official Advanced Chart widget, pointed at whichever ticker
-                is selected. Candles, volume, timeframes, drawing tools and
-                studies are all theirs; nothing on this tab redraws price, and
-                nothing on this chart produces a number the panels below read.
-                The widget is the visualisation half of the split — our backend
-                is the analysis half, and the two never cross. */}
-            <div style={{
-                background: COLORS.panel, border: `1px solid ${C.border}`,
-                borderRadius: 8, padding: 14,
-            }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10 }}>
-                    <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>
-                        {selectedTicker} — live chart
-                    </div>
-                    <a
-                        href={tradingViewUrl(selectedTicker)}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        style={{ color: COLORS.ensemble, fontSize: 11, fontWeight: 700 }}
-                    >Open on TradingView ↗</a>
-                </div>
-                <TradingViewChart symbol={selectedTicker} interval="1d" height={520} />
-            </div>
+            {/* ── The chart, with the forecast on it. ─────────────
+                Candles plus the best performing model's trajectory, its
+                interval and its direction call, drawn on one price scale. The
+                split this tab has always kept — TradingView visualises price,
+                our backend produces the analysis — is unchanged; what changed is
+                that the two are now drawn in the same coordinate space, which
+                the Advanced Chart embed cannot do because it is an iframe with
+                no series API. TradingView's own chart is one toggle away inside
+                the panel, and still owns drawing tools, replay and studies.
+
+                The horizon is passed straight through, so the line, the band
+                and the arrow are always for the window the selector above is
+                on. */}
+            <BestModelChartPanel
+                symbol={selectedTicker}
+                horizon={horizon}
+                bars={priceData?.bars}
+                apiConnected={apiConnected}
+                readyVersion={readyVersion}
+            />
 
             {/* ── The analysis. Ours, not TradingView's. ───────────
                 Direction, probability, confidence and the evidence behind them,

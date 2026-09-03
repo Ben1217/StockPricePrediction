@@ -252,6 +252,113 @@ class HistoricalSignal(BaseModel):
     direction: Optional[str] = None
 
 
+# -- Best-performing-model chart overlay -----------------------
+#
+# What the chart draws on top of the candles. Two winners rather than one,
+# because the evaluation suite scores price and direction separately and a
+# model that tracks the level is often not the model that calls the sign
+# (see src.models.model_selection).
+
+
+class ChartForecastPoint(BaseModel):
+    """
+    One future bar, with the band around it and the step that produced it.
+
+    ``direction`` is the sign of this point's move away from the previous one,
+    which is what lets the chart colour the line segment by segment. It is the
+    *price* model's implied step, and is not the direction model's call - that
+    one is served once, for the next bar, in ``DirectionCall``.
+    """
+
+    date: str
+    predicted: float
+    upper95: float
+    lower95: float
+    upper68: float
+    lower68: float
+    direction: str  # "up" | "down" | "flat"
+    change_pct: float
+
+
+class SelectedModel(BaseModel):
+    """The winner of one metric family, with the evidence it won on."""
+
+    model_type: str
+    label: str
+    #: "walk_forward_benchmark" | "bundle_holdout" | "direction_walk_forward"
+    evidence: str
+    #: The horizon the metrics were measured at, which is not always the
+    #: horizon requested: the unified and foundation models answer for the next
+    #: bar whatever window the dashboard is showing.
+    scored_horizon: int
+    metrics: Dict[str, Optional[float]] = Field(default_factory=dict)
+    #: The metrics the ranking actually used. Shorter than the full scorecard
+    #: whenever some candidate was never measured on one of them.
+    metrics_used: List[str] = Field(default_factory=list)
+    #: Which model won each individual metric, so a split decision is visible.
+    metric_winners: Dict[str, str] = Field(default_factory=dict)
+    mean_rank: Optional[float] = None
+    n_candidates: int = 0
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DirectionCall(BaseModel):
+    """
+    The direction winner's call for the next bar.
+
+    ``tradeable`` carries the same gate the direction API applies: a model that
+    failed its walk-forward ship criteria still reports a probability, and the
+    client is told not to present it as actionable.
+    """
+
+    #: Always "UP" or "DOWN", whichever model produced it. The panels below
+    #: the chart word the same fact as Bullish/Bearish; the chart contract is
+    #: fixed here so a client never has to match on two vocabularies.
+    direction: Optional[str] = None
+    probability_up: Optional[float] = None
+    probability_down: Optional[float] = None
+    confidence: Optional[float] = None
+    #: BUY / SELL / HOLD, on the thresholds in src.models.direction_utils.
+    signal: Optional[str] = None
+    prediction_date: Optional[str] = None
+    tradeable: bool = True
+    gate_reason: Optional[str] = None
+    #: How the number was produced: "unified_bundle", "direction_classifier",
+    #: "regression_sign" or "unavailable".
+    source: str = "unavailable"
+    message: Optional[str] = None
+
+
+class BestModelForecastResponse(BaseModel):
+    """Everything the chart overlay needs, in one request."""
+
+    symbol: str
+    horizon: int
+    as_of: Optional[str] = None
+    current_price: Optional[float] = None
+    current_price_source: Optional[str] = None
+
+    price_model: Optional[SelectedModel] = None
+    direction_model: Optional[SelectedModel] = None
+
+    forecast: List[ChartForecastPoint] = Field(default_factory=list)
+    direction: Optional[DirectionCall] = None
+
+    #: Provenance for the trajectory: "recursive_per_step" means every point is
+    #: a model output, "compounded_interpolation" means one number was produced
+    #: for the whole horizon and the days between are a path drawn to it. The
+    #: chart labels the line accordingly rather than implying a daily forecast.
+    path_type: Optional[str] = None
+    per_step_predictions: bool = False
+
+    #: The full ranking tables behind both winners.
+    selection: Dict[str, Any] = Field(default_factory=dict)
+
+    status: str = Field(default="ok")  # "ok" | "partial" | "unavailable" | "preparing"
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    preparation: Optional[Dict] = None
+
 # ── Ensemble Prediction Schemas ────────────────────────────────
 
 class EnsemblePredictRequest(BaseModel):

@@ -225,6 +225,28 @@ export async function fetchHistoricalSignals(symbol, days = 90, modelType = "xgb
     return apiFetch(`/predict/historical-signals/${encodeSymbol(symbol)}?days=${days}&model_type=${modelType}`);
 }
 
+/**
+ * The best performing model's forecast, ready to superimpose on the chart.
+ *
+ * Two winners come back, not one. The trajectory and its bands belong to
+ * whichever model won MAE/RMSE/MAPE/R-squared at this horizon; the up/down
+ * arrow belongs to whichever won accuracy/F1/AUC. They are frequently different
+ * models, and `selection` carries the full ranking table behind both so the
+ * chart can say who was beaten and on what.
+ *
+ * `horizon` is the dashboard's 7/15/30/60-day window. It scopes the comparison
+ * as well as the forecast: a model scored at another horizon is never ranked
+ * against these, because a 30-day error and a 1-day error are not the same
+ * measurement.
+ *
+ * A 200 with `status: "unavailable"` is a normal answer, not a failure — it is
+ * what the server says when every candidate failed its out-of-sample skill gate,
+ * and `message` explains which and why.
+ */
+export async function fetchBestModelForecast(symbol, horizon = 30) {
+    return apiFetch(`/predict/best/${encodeSymbol(symbol)}?horizon=${horizon}`);
+}
+
 // ── Next-day direction ───────────────────────────────────────
 /**
  * Walk-forward evaluation, the gated P(up tomorrow) gauge, the rolling hit-rate

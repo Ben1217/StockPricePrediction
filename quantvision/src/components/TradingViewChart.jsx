@@ -22,9 +22,15 @@
  * The official embed is a `<script>` whose *text content* is the JSON config —
  * not a module with an API, and not something React can render declaratively.
  * So the widget is (re)built imperatively whenever its inputs change: clear the
- * container, append a fresh configured script, let TradingView populate it.
- * Clearing first matters — appending a second script leaves two charts stacked
- * in the same box.
+ * container, append a fresh configured script inside its own wrapper, let
+ * TradingView populate it. Clearing first matters — appending a second script
+ * leaves two charts stacked in the same box.
+ *
+ * Teardown removes the *wrapper*, never the container's contents, because a
+ * script that has begun loading still runs after it is detached and this embed
+ * finds its target through `currentScript.parentNode`. The long comment in the
+ * effect has the details; the short version is that emptying the container is
+ * what makes the embed throw on a fast unmount.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -73,11 +79,30 @@ export default function TradingViewChart({
         setFailed(false);
         container.innerHTML = "";
 
+        // Everything the embed needs lives inside one wrapper, and teardown
+        // removes that wrapper as a single node instead of emptying the
+        // container. The difference is not cosmetic. A <script> that has begun
+        // loading still executes after it is detached, and this embed resolves
+        // its target through `document.currentScript.parentNode` — so emptying
+        // the container sets that parent to null and the script dies with
+        // "Cannot read properties of null (reading 'querySelector')". Removing
+        // the wrapper leaves the script's parent intact, so a late arrival
+        // writes into a detached div and is discarded harmlessly.
+        //
+        // Two ordinary things produce exactly that race: React's StrictMode
+        // double-invoking this effect in development, and the chart toggle in
+        // BestModelChartPanel being switched while the script is still in
+        // flight.
+        const wrapper = document.createElement("div");
+        wrapper.className = "tradingview-widget-container";
+        wrapper.style.height = "100%";
+        wrapper.style.width = "100%";
+
         const widgetHost = document.createElement("div");
         widgetHost.className = "tradingview-widget-container__widget";
         widgetHost.style.height = "100%";
         widgetHost.style.width = "100%";
-        container.appendChild(widgetHost);
+        wrapper.appendChild(widgetHost);
 
         const script = document.createElement("script");
         script.src = EMBED_SRC;
@@ -105,7 +130,8 @@ export default function TradingViewChart({
             support_host: "https://www.tradingview.com",
         });
         script.onerror = () => setFailed(true);
-        container.appendChild(script);
+        wrapper.appendChild(script);
+        container.appendChild(wrapper);
 
         // The embed reports nothing on success, so "did it render" is answered
         // by looking for the iframe it injects.
@@ -115,17 +141,16 @@ export default function TradingViewChart({
 
         return () => {
             window.clearTimeout(timer);
-            container.innerHTML = "";
+            wrapper.remove();
         };
     }, [tvSymbol, tvInterval, studyKey, hideSideToolbar, withDateRanges]);
 
     return (
         <div style={{ position: "relative", height, width: "100%" }}>
-            <div
-                ref={containerRef}
-                className="tradingview-widget-container"
-                style={{ height: "100%", width: "100%" }}
-            />
+            {/* A bare host. The `tradingview-widget-container` class the embed
+                looks for is on the wrapper built inside the effect, because
+                that wrapper is what teardown removes. */}
+            <div ref={containerRef} style={{ height: "100%", width: "100%" }} />
             {failed && (
                 <div
                     role="alert"

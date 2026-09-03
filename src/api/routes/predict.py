@@ -26,6 +26,10 @@ from src.api.schemas.schemas import (
     EnsembleTrainRequest,
     EnsembleSummary,
     EnsembleForecastPoint,
+    BestModelForecastResponse,
+    ChartForecastPoint,
+    DirectionCall,
+    SelectedModel,
     SUPPORTED_FORECAST_HORIZONS,
 )
 from src.data.ohlcv_cache import cached_download
@@ -60,6 +64,12 @@ from src.models.direction_utils import (
     signal_from_probability,
 )
 from src.models.model_bundle import load_model_bundle
+from src.models.model_selection import (
+    DIRECTION_REPORT_MODELS,
+    direction_report_candidates,
+    model_label,
+    select_best_models,
+)
 from src.models.preparation import preparation_state
 from src.utils.logger import get_logger
 
@@ -1276,6 +1286,385 @@ def predict_query(
         )
     )
 
+
+# ---------------------------------------------------------------------------
+# GET /api/predict/best/{symbol}
+# ---------------------------------------------------------------------------
+#
+# One request, everything the chart overlay draws.
+#
+# The dashboard superimposes a forecast on the price chart, so exactly one
+# model's numbers end up on screen and something has to choose it. That choice
+# is src.models.model_selection, deliberately not this route: the route serves
+# the winner, it does not decide who won.
+#
+# Two winners, because the evaluation suite scores price and direction apart
+# and refuses to merge them. The trajectory and its band come from whoever won
+# MAE/RMSE/MAPE/R-squared; the up/down call comes from whoever won
+# accuracy/F1/AUC. They are usually different models, and the payload names
+# both rather than letting the chart imply one model produced everything on it.
+
+
+#: Prefix of the model names the unified serving path answers for. Anything
+#: else is a per-horizon regression bundle or a direction classifier.
+_UNIFIED_PREFIX = "unified_"
+
+
+def _selected_model_payload(selection, metric_family: str) -> Optional[SelectedModel]:
+    """Turn a ranking outcome into the response's winner block."""
+    winner = selection.winner
+    if winner is None:
+        return None
+
+    row = next(
+        (item for item in selection.ranked if item["model_type"] == winner.model_type),
+        None,
+    )
+    scores = winner.price if metric_family == "price" else winner.direction
+    return SelectedModel(
+        model_type=winner.model_type,
+        label=winner.label,
+        evidence=winner.evidence,
+        scored_horizon=winner.horizon,
+        metrics={key: value for key, value in scores.items() if value is not None},
+        metrics_used=list(selection.metrics_used),
+        metric_winners=dict(selection.metric_winners),
+        mean_rank=(row or {}).get("mean_rank"),
+        n_candidates=len(selection.ranked),
+        context=dict(winner.context),
+    )
+
+
+def _chart_points(response: PredictResponse, current_price: float) -> List[ChartForecastPoint]:
+    """
+    The forecast as the chart consumes it: a band per bar, plus the step's sign.
+
+    The first point's direction is measured against today's close and every
+    later one against the point before it, so the colour of each segment is the
+    move that segment actually represents.
+    """
+    points: List[ChartForecastPoint] = []
+    previous = float(current_price)
+    for point in response.forecasts:
+        predicted = float(point.predicted)
+        change_pct = ((predicted / previous) - 1.0) * 100.0 if previous else 0.0
+        # A step of under a basis point is not a direction worth colouring a
+        # chart with; calling it flat keeps rounding noise out of the UI.
+        if abs(change_pct) < 0.01:
+            direction = "flat"
+        else:
+            direction = "up" if change_pct > 0 else "down"
+        points.append(
+            ChartForecastPoint(
+                date=point.date,
+                predicted=round(predicted, 2),
+                upper95=round(float(point.upper95), 2),
+                lower95=round(float(point.lower95), 2),
+                upper68=round(float(point.upper68), 2),
+                lower68=round(float(point.lower68), 2),
+                direction=direction,
+                change_pct=round(change_pct, 4),
+            )
+        )
+        previous = predicted
+    return points
+
+
+def _serve_price_winner(
+    *,
+    symbol: str,
+    model_type: str,
+    horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+) -> PredictResponse:
+    """Run whichever serving path the price winner belongs to."""
+    arguments = {
+        "symbol": symbol,
+        "raw_df": raw_df,
+        "current_price": current_price,
+        "current_price_source": current_price_source,
+    }
+    if model_type.startswith(_UNIFIED_PREFIX):
+        return _predict_unified_model(
+            model_type=model_type, requested_horizon=horizon, **arguments
+        )
+    return _predict_regression_or_unavailable(
+        model_type=model_type, horizon=horizon, **arguments
+    )
+
+
+def _direction_from_classifier(
+    symbol: str,
+    model_type: str,
+    raw_df: pd.DataFrame,
+) -> DirectionCall:
+    """
+    The next-bar call from one of the walk-forward direction classifiers.
+
+    These are the estimators GET /api/direction/{symbol} serves, and this is the
+    same live call it makes: fit on every labelled row, applied to the one bar
+    whose next-day move has not happened yet.
+    """
+    from src.models.direction_pipeline import predict_next_session
+
+    try:
+        prediction = predict_next_session(raw_df, model_name=model_type)
+    except Exception as exc:  # noqa: BLE001 - a failed gauge must not 500 the chart
+        logger.warning("Direction winner %s failed for %s: %s", model_type, symbol, exc)
+        return DirectionCall(
+            source="unavailable",
+            message=f"The {model_type} direction model could not produce a call ({exc}).",
+        )
+
+    if prediction is None:
+        return DirectionCall(
+            source="unavailable",
+            message="No bar has a complete feature vector for the direction model.",
+        )
+
+    p_up = float(prediction["probability_up"])
+    return DirectionCall(
+        direction="UP" if p_up >= 0.5 else "DOWN",
+        probability_up=round(p_up, 4),
+        probability_down=round(1.0 - p_up, 4),
+        confidence=round(confidence_from_probability(p_up), 1),
+        signal=signal_from_probability(p_up),
+        prediction_date=prediction.get("target_date") or _next_business_date(raw_df.index[-1]),
+        source="direction_classifier",
+    )
+
+
+def _direction_call(
+    *,
+    symbol: str,
+    model_type: str,
+    horizon: int,
+    raw_df: pd.DataFrame,
+    current_price: float,
+    current_price_source: str,
+    price_response: Optional[PredictResponse],
+    price_model_type: Optional[str],
+) -> DirectionCall:
+    """
+    The direction winner's call, from whichever path can produce it.
+
+    When the direction winner is also the price winner, the forecast already in
+    hand is reused rather than recomputed. Kronos in particular is a transformer
+    forward pass, and running it twice for a number already returned would
+    double the latency of every chart load.
+    """
+    if (
+        price_response is not None
+        and price_model_type == model_type
+        and price_response.probability_up is not None
+    ):
+        p_up = float(price_response.probability_up)
+        return DirectionCall(
+            direction="UP" if p_up >= 0.5 else "DOWN",
+            probability_up=round(p_up, 4),
+            probability_down=round(1.0 - p_up, 4),
+            confidence=price_response.confidence,
+            signal=price_response.signal,
+            prediction_date=price_response.prediction_date,
+            source="unified_bundle",
+        )
+
+    if model_type in DIRECTION_REPORT_MODELS:
+        return _direction_from_classifier(symbol, model_type, raw_df)
+
+    if model_type.startswith(_UNIFIED_PREFIX):
+        response = _predict_unified_model(
+            symbol=symbol,
+            model_type=model_type,
+            requested_horizon=NEXT_DAY_HORIZON,
+            raw_df=raw_df,
+            current_price=current_price,
+            current_price_source=current_price_source,
+        )
+        if response.status != "ok" or response.probability_up is None:
+            return DirectionCall(
+                source="unavailable",
+                message=response.message or f"{model_type} produced no direction probability.",
+            )
+        p_up = float(response.probability_up)
+        return DirectionCall(
+            direction="UP" if p_up >= 0.5 else "DOWN",
+            probability_up=round(p_up, 4),
+            probability_down=round(1.0 - p_up, 4),
+            confidence=response.confidence,
+            signal=response.signal,
+            prediction_date=response.prediction_date,
+            source="unified_bundle",
+        )
+
+    # A per-horizon regression bundle. It has a directional accuracy but no
+    # probability: the sign of its predicted return is the whole of its
+    # direction output, so the call is reported without a confidence rather
+    # than with a fabricated one.
+    response = price_response
+    if response is None or price_model_type != model_type:
+        response = _predict_regression_or_unavailable(
+            symbol=symbol,
+            model_type=model_type,
+            horizon=horizon,
+            raw_df=raw_df,
+            current_price=current_price,
+            current_price_source=current_price_source,
+        )
+    if response.status != "ok" or response.target_price is None:
+        return DirectionCall(
+            source="unavailable",
+            message=response.message or f"{model_type} produced no forecast to take a sign from.",
+        )
+
+    rises = float(response.target_price) >= float(current_price)
+    return DirectionCall(
+        direction="UP" if rises else "DOWN",
+        signal=response.signal,
+        prediction_date=response.prediction_date,
+        source="regression_sign",
+        message=(
+            f"{model_label(model_type)} is a return-regression bundle: the call is the sign "
+            f"of its {horizon}-day forecast, and it carries no calibrated probability."
+        ),
+    )
+
+
+def _direction_gate(symbol: str, model_type: str) -> Tuple[bool, Optional[str]]:
+    """
+    Whether the direction winner's call may be presented as actionable.
+
+    Reuses the verdict the walk-forward run already recorded, so the chart and
+    GET /api/direction/{symbol} can never disagree about the same model. A model
+    with no stored report is not gated here: the ranking only ever selects from
+    servable candidates, and a bundle's own skill gate was applied there.
+    """
+    for candidate in direction_report_candidates(symbol, (model_type,)):
+        if candidate.blocked_reason:
+            return False, f"Not tradeable: {candidate.blocked_reason}."
+        return True, None
+    return True, None
+
+
+@router.get("/best/{symbol}", response_model=BestModelForecastResponse)
+def predict_best_model(
+    symbol: str,
+    horizon: int = Query(30, ge=1, le=120, description="Prediction window in trading days"),
+):
+    """
+    The best performing model's forecast and direction, ready to draw.
+
+    ``horizon`` is the window the dashboard's 7D/15D/30D/60D selector is on. It
+    scopes the comparison as well as the forecast: models are only ranked
+    against models scored at the same horizon, because a 30-day error and a
+    1-day error are not the same measurement.
+
+    The unified and foundation models answer for the next bar whatever is
+    requested. When one of them wins, ``price_model.scored_horizon`` is 1 and
+    the forecast is one point long - the response says so rather than stretching
+    a one-step number across thirty days.
+    """
+    symbol = symbol.upper().strip()
+    raw_df = _download_prediction_data(symbol)
+    current_price, current_price_source = _latest_available_price(symbol, raw_df)
+    as_of = str(pd.Timestamp(raw_df.index[-1]).date())
+
+    best = select_best_models(symbol, horizon, reference_price=current_price)
+    price_winner = best.price.winner
+    direction_winner = best.direction.winner
+
+    if price_winner is None and direction_winner is None:
+        preparation = preparation_state(symbol)
+        preparing = bool(preparation and preparation.get("status") in ("queued", "running"))
+        return BestModelForecastResponse(
+            symbol=symbol,
+            horizon=horizon,
+            as_of=as_of,
+            current_price=round(float(current_price), 2),
+            current_price_source=current_price_source,
+            selection=best.as_dict(),
+            status="preparing" if preparing else "unavailable",
+            reason="no_servable_model",
+            preparation=preparation,
+            message=(
+                f"Training models for {symbol}; the forecast overlay appears once one of "
+                f"them has an out-of-sample record to stand on."
+                if preparing
+                else best.price.reason
+                or f"No model has a scorecard for {symbol} at a {horizon}-day horizon yet."
+            ),
+        )
+
+    price_response: Optional[PredictResponse] = None
+    forecast: List[ChartForecastPoint] = []
+    price_message: Optional[str] = None
+    if price_winner is not None:
+        price_response = _serve_price_winner(
+            symbol=symbol,
+            model_type=price_winner.model_type,
+            horizon=horizon,
+            raw_df=raw_df,
+            current_price=current_price,
+            current_price_source=current_price_source,
+        )
+        if price_response.status == "ok":
+            forecast = _chart_points(price_response, current_price)
+        else:
+            price_message = price_response.message
+
+    direction: Optional[DirectionCall] = None
+    if direction_winner is not None:
+        direction = _direction_call(
+            symbol=symbol,
+            model_type=direction_winner.model_type,
+            horizon=horizon,
+            raw_df=raw_df,
+            current_price=current_price,
+            current_price_source=current_price_source,
+            price_response=price_response,
+            price_model_type=price_winner.model_type if price_winner else None,
+        )
+        tradeable, gate_reason = _direction_gate(symbol, direction_winner.model_type)
+        direction.tradeable = tradeable and direction.source != "unavailable"
+        direction.gate_reason = gate_reason
+
+    # "No model qualified" and "the winner could not be run" are different
+    # states, and the second one carries a different remedy, so the message
+    # falls back to the ranking's own reason rather than to nothing.
+    direction_message = (direction.message if direction else None) or best.direction.reason
+    has_direction = direction is not None and direction.source != "unavailable"
+    if forecast and has_direction:
+        status, reason, message = "ok", None, None
+    elif forecast or has_direction:
+        status = "partial"
+        reason = "direction_model_unavailable" if forecast else "price_model_unavailable"
+        message = direction_message if forecast else (price_message or best.price.reason)
+    else:
+        status = "unavailable"
+        reason = "winners_could_not_be_served"
+        message = price_message or best.price.reason or direction_message
+
+    model_info = (price_response.model_info or {}) if price_response else {}
+    return BestModelForecastResponse(
+        symbol=symbol,
+        horizon=horizon,
+        as_of=as_of,
+        current_price=round(float(current_price), 2),
+        current_price_source=current_price_source,
+        price_model=_selected_model_payload(best.price, "price"),
+        direction_model=_selected_model_payload(best.direction, "direction"),
+        forecast=forecast,
+        direction=direction,
+        path_type=model_info.get("path_type"),
+        per_step_predictions=bool(model_info.get("per_step_predictions")),
+        selection=best.as_dict(),
+        status=status,
+        reason=reason,
+        message=message,
+        preparation=(price_response.preparation if price_response else None),
+    )
 
 # ---------------------------------------------------------------------------
 # GET /api/predict/historical-signals/{symbol}

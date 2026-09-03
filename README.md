@@ -4,7 +4,8 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 
 ## What the project does today
 
-- Analysis dashboard with indicator overlays, market-session data, and rule-based sentiment; its chart-detail view and the Predictions tab both render the **official TradingView Advanced Chart widget** rather than redrawing candles. The app ships no candlestick engine of its own: TradingView owns price visualisation, the backend owns the analysis
+- Analysis dashboard with indicator overlays, market-session data, and rule-based sentiment; its chart-detail view renders the **official TradingView Advanced Chart widget** rather than redrawing candles
+- A **forecast overlay on the price chart** (Predictions tab): the best performing model's trajectory, its 68%/95% bands and its direction arrows drawn on the same price scale as the candles, synced to the 7D/15D/30D/60D window. Served by `GET /api/predict/best/{symbol}`, which ranks every scored model on MAE/RMSE/MAPE/R² and on accuracy/F1/AUC *separately* and returns both winners. Drawn with `lightweight-charts` — TradingView's own open-source library — because the Advanced Chart embed is a cross-origin iframe with no series API; that embed is still one toggle away in the same panel
 - Forecasting endpoints and UI for `xgboost`, `random_forest`, and `lstm` models, with statistical fallback forecasts when trained artifacts are unavailable
 - A **unified next-bar comparison** (`scripts/unified_benchmark.py`) that scores LSTM, XGBoost, Random Forest, the dynamic ensemble and the Kronos foundation model on identical walk-forward folds, reporting price accuracy and directional accuracy separately against the majority-class base rate — the experiment behind the question of whether a foundation model beats the existing stack
 - A **combined-evidence direction call** (`/api/direction/{symbol}/analysis`) that reduces the bars to seven named categories — trend, momentum, volume, price action, support/resistance, volatility regime, and what followed the most similar setups in the symbol's own past — fits a logistic stack on them, and blends it with the classifier below by each one's *measured* out-of-sample Brier skill. Every category reports the percentage points it contributed, and a source with no measured skill gets weight zero, so the answer is `NEUTRAL` with a stated reason whenever nothing has demonstrated an edge
@@ -17,7 +18,7 @@ QuantVision is a full-stack stock analysis workspace built around a FastAPI back
 
 ## Stack
 
-- Frontend: React 19, Vite 7, TradingView Advanced Chart widget (price), Recharts (analytics panels)
+- Frontend: React 19, Vite 7, TradingView Advanced Chart widget (price), lightweight-charts (the forecast overlay), Recharts (analytics panels)
 - Backend: FastAPI, Pydantic, Uvicorn
 - Market data: yfinance primary, Wikipedia for S&P 500 constituents, Alpha Vantage optional fallback for selected endpoints
 - ML and quant: scikit-learn, XGBoost, PyTorch, hmmlearn, Optuna, SHAP, cvxpy
@@ -219,11 +220,29 @@ The split is deliberate and holds everywhere in the app.
 ```
 
 The frontend renders the official TradingView embed (`quantvision/src/components/TradingViewChart.jsx`)
-and points it at whichever ticker is selected — on the Predictions tab above the analysis
-panel, and in the Analysis tab's "Chart Details" view; `quantvision/src/utils/tradingview.js`
+and points it at whichever ticker is selected — in the Analysis tab's "Chart Details" view,
+and behind the TradingView toggle on the Predictions tab; `quantvision/src/utils/tradingview.js`
 translates our Yahoo-style symbols (`^GSPC`, `BRK-B`, `BTC-USD`) into TradingView's
 namespace (`SP:SPX`, `BRK.B`, `CRYPTO:BTCUSD`). Nothing in the frontend computes a
 number about the market, and nothing in the backend draws a chart.
+
+**The one place the two are drawn together.** Superimposing our forecast on the
+Advanced Chart is not possible: the embed is a cross-origin iframe whose JSON
+config takes a symbol, an interval and a list of *TradingView's* studies, and
+exposes no API to add a series, a shape or a marker. Anything painted over it
+from outside would be positioned in page pixels with no access to the widget's
+price and time scales, so it would slide out of alignment on the first pan. That
+is a licensing boundary, not an effort one — the self-hosted Charting Library is
+what has those APIs.
+
+So the Predictions tab's default view (`ForecastOverlayChart.jsx`) is built on
+`lightweight-charts`, TradingView's own Apache-2.0 library: same candles, same
+crosshair, same time scale, but our canvas — which is what lets the forecast be
+a real series on the same price scale as the price, rather than a picture laid
+on top of one. The division of labour is unchanged. TradingView still visualises
+price and the backend still produces every number; the toggle in the panel
+header switches back to the Advanced Chart, which keeps drawing tools, replay,
+indicator search and comparison symbols.
 
 ### The combined-evidence direction call
 
@@ -436,6 +455,46 @@ model returns 400 rather than a job that quietly does nothing. In the dashboard
 they appear in the Predictions tab model selector, where the horizon buttons
 lock to one bar because that is what these models forecast.
 
+### Picking the winner: what the chart draws
+
+`src/models/model_selection.py` turns those scorecards into the one decision the
+chart needs — whose forecast is on it — and `GET /api/predict/best/{symbol}?horizon=30`
+serves the result.
+
+**Two winners, never one.** The evaluation refuses to merge price and direction
+into a single score, so the selection does not either. The trajectory and its
+bands come from the model that leads MAE / RMSE / MAPE / R²; the up/down arrow
+comes from the model that leads accuracy / F1 / AUC. On AAPL at the next bar
+today those are Unified Random Forest and Unified LSTM respectively — different
+models, drawn on the same chart, and the panel header names both. When they
+point opposite ways the panel says so rather than hiding it.
+
+**Three things have to match before two numbers are comparable**, and each one
+is a way a plausible implementation names the wrong winner:
+
+| | Why it matters |
+| --- | --- |
+| Horizon | A 30-day MAPE is several times the same model's 1-day MAPE. Candidates are grouped by the horizon they were scored at; the `horizon` query parameter scopes the comparison as well as the forecast |
+| Units | The per-horizon regression bundles store MAE and RMSE on the forward *return* (`0.06` = six percent); the unified bundles store theirs in dollars. Return-space errors are scaled by the current close before anything is compared. MAPE needs no conversion — a relative error is the same number in both spaces |
+| Metric coverage | The legacy bundles record no R². Ranking on a metric only some candidates carry would decide the winner by who happened to be measured, so the ranking runs on the metrics *all* candidates share and reports which those were in `metrics_used` |
+
+**Ranking** is a Borda count over those shared metrics — mean rank across them,
+ties sharing a rank and broken by the larger test sample. The per-metric winners
+travel in `metric_winners`, so a split decision is visible rather than averaged
+away, and the panel reads "won 3 of 4" rather than implying a sweep.
+
+**Only servable models are ranked.** The same gates the serving routes apply are
+applied here: `bundle_skill_failure` for the regression bundles, the walk-forward
+`verdict` for the direction reports. A model that scored well and failed its gate
+appears under `excluded` with the reason, and a symbol where *everything* failed
+returns a 200 with `status: "unavailable"` and an explanation — which, given how
+often next-day direction is unlearnable from price history, is a normal answer
+rather than an error.
+
+Evidence is read in order of strength: the walk-forward benchmark
+(`artifacts/benchmark_results.json`) first, then the bundles' own chronological
+holdouts, then the direction walk-forward reports in `data/direction_backtests/`.
+
 ### Foundation models: Kronos and TabPFN
 
 ```bash
@@ -494,6 +553,7 @@ This starts:
 | `/health` | Basic health check |
 | `/api/data` | Price history, indicators, sources, quotes, uploads, S&P 500 list |
 | `/api/predict` | Forecasts and historical model signals |
+| `/api/predict/best/{symbol}` | The best performing model's forecast, ready to draw: trajectory, 68%/95% bands, per-step direction, the next-bar direction call, and the full ranking table behind both winners |
 | `/api/direction` | Next-day direction: walk-forward evaluation, gated `P(up)` gauge, rolling hit rate, equity curve |
 | `/api/direction/{symbol}/analysis` | The reasoned direction call: `UP`/`DOWN`/`NEUTRAL`, probability split, confidence, per-category evidence contributions, three horizon reads, price-action structure, historical analogs, and the expected range |
 | `/api/models` | Model readiness per symbol, and the automatic preparation jobs that close the gaps |
@@ -510,7 +570,7 @@ This starts:
 | Tab | Current focus |
 | --- | --- |
 | Analysis | Price action, indicators, session quotes, rule-based sentiment, and the model output from the same pipeline Predictions serves. "Chart Details" opens the real TradingView chart beside our pattern and indicator panels |
-| Predictions | The live TradingView chart, then the AI direction analysis (direction, probability, confidence, per-category evidence) and the classifier's own track record beneath it; the multi-day forecast drawn as a *range* at the horizon rather than a path to it |
+| Predictions | The price chart with the best performing model's forecast on it — dashed trajectory, shaded 68%/95% bands, green/red direction arrows, all synced to the 7D/15D/30D/60D selector, with a toggle back to the TradingView widget. Then the AI direction analysis (direction, probability, confidence, per-category evidence) and the classifier's own track record beneath it; the multi-day forecast also drawn as a *range* at the horizon rather than a path to it |
 | Portfolio | Holdings view and allocation snapshot |
 | Backtest | Configurable historical strategy runs |
 | Optimization | Portfolio optimizer and efficient frontier |

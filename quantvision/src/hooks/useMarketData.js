@@ -7,6 +7,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import {
+    fetchBestModelForecast,
     fetchHealth,
     fetchIndicators,
     fetchPrices,
@@ -21,6 +22,7 @@ export const qk = {
     quotes: (symbols) => ["data", "quotes", [...symbols].sort().join(",")],
     prices: (symbol, source, days, interval) => ["data", "prices", symbol, source, days, interval],
     indicators: (symbol, days, interval) => ["data", "indicators", symbol, days, interval],
+    bestForecast: (symbol, horizon, readyVersion) => ["predict", "best", symbol, horizon, readyVersion],
 };
 
 export function useApiHealth() {
@@ -67,5 +69,28 @@ export function useIndicators(symbol, { days = 120, interval = "1d", enabled = t
         queryKey: qk.indicators(symbol, days, interval),
         queryFn: () => fetchIndicators(symbol, days, interval),
         enabled: enabled && Boolean(symbol),
+    });
+}
+
+/**
+ * The best performing model's forecast for the chart overlay.
+ *
+ * The horizon is part of the key, so switching the 7D/15D/30D/60D selector is a
+ * different query rather than a refetch that briefly leaves the previous
+ * horizon's line on screen. `readyVersion` is in there too: it ticks when a
+ * preparation run finishes, and a symbol that had nothing servable a minute ago
+ * may now have a winner.
+ *
+ * The response is a ranking plus a model run, so it is worth a longer stale
+ * time than a quote: the bundles it reads only change when training does, and
+ * daily bars change once a day.
+ */
+export function useBestModelForecast(symbol, { horizon = 30, readyVersion = 0, enabled = true } = {}) {
+    return useQuery({
+        queryKey: qk.bestForecast(symbol, horizon, readyVersion),
+        queryFn: () => fetchBestModelForecast(symbol, horizon),
+        enabled: enabled && Boolean(symbol),
+        staleTime: 5 * 60_000,
+        retry: 0,
     });
 }
