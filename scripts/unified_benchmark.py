@@ -162,9 +162,12 @@ def run_symbol(
             prev_close,
             test_size=test_size,
             n_splits=n_splits,
-            # Labels resolve `horizon` bars out, so consecutive labels overlap
-            # unless at least that many rows are purged between train and test.
-            embargo=horizon,
+            # Labels resolve `horizon` bars out. The splitter purges that many
+            # rows off the training tail and embargoes as many again, and the
+            # Diebold-Mariano lag is derived from it too -- so the horizon has
+            # to travel with the call rather than only being stamped on the
+            # result afterwards.
+            horizon=horizon,
         )
         if not metrics:
             logger.warning("%s produced no results on %s", name, symbol)
@@ -228,13 +231,62 @@ def _print_section(title: str, frame: pd.DataFrame, columns: List[str]) -> None:
     print(_table(frame[available]))
 
 
+def _null_table(results: List[Dict[str, Any]]) -> Optional[pd.DataFrame]:
+    """
+    Each model against the two nulls it has to clear, pooled across folds.
+
+    Every column here is a verdict rather than a score. ``r2_vs_rw`` below zero
+    means the random walk predicted the price better; ``beats_rw`` is only true
+    when Diebold-Mariano agrees the gap is real, so a model cannot claim the win
+    on a favourable mean alone.
+    """
+    rows = []
+    for result in results:
+        evaluation = result.get("evaluation") or {}
+        if not evaluation.get("available"):
+            continue
+        random_walk = evaluation.get("vs_random_walk") or {}
+        dm = random_walk.get("diebold_mariano") or {}
+        direction = evaluation.get("direction") or {}
+        edge = evaluation.get("edge_vs_majority") or {}
+
+        eobr = direction.get("eobr")
+        r2 = random_walk.get("r2_vs_random_walk")
+        differential = dm.get("mean_differential")
+        p_value = dm.get("p_value")
+
+        rows.append(
+            {
+                "symbol": result.get("symbol", ""),
+                "model": result.get("model_name", ""),
+                "n": evaluation.get("n"),
+                "eobr_pp": None if eobr is None else round(eobr * 100, 2),
+                "edge_p": edge.get("p_value_one_sided"),
+                "r2_vs_rw": None if r2 is None else round(r2, 4),
+                "dm_p": p_value,
+                "beats_rw": bool(
+                    differential is not None
+                    and differential < 0
+                    and p_value is not None
+                    and p_value < 0.05
+                ),
+            }
+        )
+    return pd.DataFrame(rows) if rows else None
+
+
 def print_report(results: List[Dict[str, Any]], output_dir: Path) -> None:
     if not results:
         logger.error("No results to report")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    aggregate = pd.DataFrame([{k: v for k, v in r.items() if k != "per_fold"} for r in results])
+    # "per_fold" and "evaluation" hold nested structures. A DataFrame column of
+    # dicts survives to_csv only as stringified Python, which reads back as
+    # nothing useful, so they are kept out of the flat tables and live in the
+    # JSON alone.
+    NESTED = {"per_fold", "evaluation", "split_protocol"}
+    aggregate = pd.DataFrame([{k: v for k, v in r.items() if k not in NESTED} for r in results])
 
     print("\n" + "=" * 78)
     print("UNIFIED BENCHMARK - walk-forward, mean across folds")
@@ -254,8 +306,24 @@ def print_report(results: List[Dict[str, Any]], output_dir: Path) -> None:
         )
         comparison.to_csv(output_dir / "benchmark_comparison.csv", index=False)
 
+    nulls = _null_table(results)
+    if nulls is not None:
+        print("\n--- Against the nulls (pooled across folds) ---")
+        print(_table(nulls))
+        print(
+            "\nr2_vs_rw is measured in log-return space against the random walk, which\n"
+            "forecasts no change. Below zero the random walk predicted the price better.\n"
+            "dm_p is Diebold-Mariano on the paired squared-loss differential; beats_rw is\n"
+            "true only when the model is ahead AND that gap clears 5%."
+        )
+        nulls.to_csv(output_dir / "benchmark_nulls.csv", index=False)
+
     fold_rows = [
-        {"symbol": r.get("symbol", ""), "model_name": r.get("model_name", ""), **fold}
+        {
+            "symbol": r.get("symbol", ""),
+            "model_name": r.get("model_name", ""),
+            **{k: v for k, v in fold.items() if k != "predictions"},
+        }
         for r in results
         for fold in r.get("per_fold", [])
     ]

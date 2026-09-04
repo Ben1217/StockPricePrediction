@@ -1,894 +1,611 @@
-import { useEffect, useMemo, useState } from "react";
+/**
+ * Predictions — a candlestick chart, the forecast that continues it, and a box.
+ *
+ * This tab answers two questions and no others: what is the predicted next
+ * price, and is the expected direction up or down. Everything that produces
+ * those two answers — the OHLCV download, the price-action / momentum /
+ * volatility / support-resistance / volume features, Kronos, Chronos-2,
+ * TimesFM 2.5 and the aggregation across them — runs on the server and arrives
+ * as one payload from GET /api/predict/forecast/{symbol}.
+ *
+ * That single request is the reason this file is short. The tab used to fan out
+ * to an ensemble endpoint plus one call per model, then reconcile the replies
+ * on screen: partial-ensemble notices, per-step provenance, weight bars,
+ * classifier track records, evidence stacks, historical analogs. None of that
+ * was decoration — it was the UI doing work the API had left undone. With the
+ * pipeline behind one endpoint there is nothing to reconcile, so there is
+ * nothing to explain.
+ *
+ * The evidence panels are not deleted from the codebase, only from here.
+ * `DirectionAnalysisPanel` and `DirectionPanel` still exist and still work; they
+ * belong on an analysis or admin surface, where a reader has asked for the
+ * reasoning rather than for a price.
+ */
+
+import { useMemo, useState } from "react";
+
 import { C } from "../utils/data";
-import { fetchEnsemblePrediction, fetchPredictions } from "../utils/api";
-import BestModelChartPanel from "../components/BestModelChartPanel";
-import DirectionAnalysisPanel from "../components/DirectionAnalysisPanel";
-import DirectionPanel from "../components/DirectionPanel";
-import ModelPreparation from "../components/ModelPreparation";
+import { useForecastHistory, useSimpleForecast } from "../hooks/useMarketData";
+import ForecastOverlayChart from "../components/ForecastOverlayChart";
 
-const HORIZONS = [7, 15, 30, 60];
-
-/** Multi-horizon regression bundles. These draw the forecast fan. */
-const LEGACY_MODEL_KEYS = ["xgboost", "random_forest", "lstm"];
+const PANEL = "#0F1623";
+const SURFACE = "#161B22";
 
 /**
- * Unified next-timeframe models: one price and one P(up) for the next bar.
+ * Where "Current Price" came from, in words.
  *
- * Fetched only when one is actually selected, never as part of the "All
- * Models" sweep. Kronos runs a transformer forward pass per request, so
- * firing it on every ticker change would stall the tab for everyone who
- * never opened it.
+ * Worth the line: an extended-hours quote is the usual reason the box's current
+ * price is nowhere near the close the models read, and a reader who cannot see
+ * which of the two they are looking at has no way to tell a moving number from
+ * a settled one. `latest_close` means no quote was available at all and the two
+ * prices are the same, so it says that rather than naming a session.
  */
-const UNIFIED_MODEL_KEYS = ["unified_xgboost", "unified_random_forest", "unified_lstm", "unified_kronos"];
+const QUOTE_SOURCE = {
+    regular_market: "market hours",
+    pre_market: "pre-market",
+    post_market: "after hours",
+    latest_close: "same as prev close",
+};
 
-const MODEL_KEYS = [...LEGACY_MODEL_KEYS, ...UNIFIED_MODEL_KEYS];
-
-const isUnifiedModel = (modelType) => UNIFIED_MODEL_KEYS.includes(modelType);
-const MODEL_OPTIONS = [
-    { value: "all", label: "All Models" },
-    { value: "ensemble", label: "Ensemble" },
-    { value: "lstm", label: "LSTM" },
-    { value: "xgboost", label: "XGBoost" },
-    { value: "random_forest", label: "Random Forest" },
-    { value: "unified_xgboost", label: "Unified XGBoost" },
-    { value: "unified_random_forest", label: "Unified Random Forest" },
-    { value: "unified_lstm", label: "Unified LSTM" },
-    { value: "unified_kronos", label: "Unified Kronos" },
+/**
+ * How much history the chart draws. Not a forecast horizon: all three models
+ * are built for one step (TimesFM compiles at max_horizon=1, Kronos samples a
+ * single chunk), so the forecast is always the next bar and the box says so.
+ * Offering a 30D button here would promise a number the models never produce.
+ */
+const RANGES = [
+    { label: "3M", bars: 63 },
+    { label: "6M", bars: 126 },
+    { label: "1Y", bars: 252 },
 ];
 
-const COLORS = {
-    historical: "#9CA3AF",
-    ensemble: "#F5C842",
-    lstm: "#60A5FA",
-    xgboost: "#F59E0B",
-    random_forest: "#34D399",
-    unified_xgboost: "#FB923C",
-    unified_random_forest: "#4ADE80",
-    unified_lstm: "#818CF8",
-    unified_kronos: "#E879F9",
-    band: "#6366F1",
-    scenario: "#7C8AA5",
-    surface: "#161B22",
-    panel: "#0F1623",
-};
+/**
+ * One request covers every range, and the buttons slice its result.
+ *
+ * Asking the server for a narrower window would be a different request, and the
+ * server answers a forecast request by running Kronos — so switching 1Y to 3M
+ * would pay for a transformer forward pass to draw fewer of the candles it
+ * already had. The models read the whole download either way; only the drawing
+ * changes, so only the drawing is redone.
+ */
+const HISTORY_BARS = RANGES[RANGES.length - 1].bars;
 
-const WEIGHT_LABELS = {
-    lstm: "PyTorch LSTM",
-    xgboost: "XGBoost",
-    random_forest: "Random Forest",
-};
-
-const MODEL_LABELS = {
-    historical: "Historical",
-    prediction: "Prediction",
-    ensemble: "Ensemble",
-    lstm: "LSTM",
-    xgboost: "XGBoost",
-    random_forest: "Random Forest",
-    unified_xgboost: "Unified XGBoost",
-    unified_random_forest: "Unified Random Forest",
-    unified_lstm: "Unified LSTM",
-    unified_kronos: "Unified Kronos",
-};
+const CHART_HEIGHT = 460;
 
 function formatPrice(value) {
-    if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
-    return `$${Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+    return `$${Number(value).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}`;
 }
 
 function formatPct(value) {
-    if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
-    return `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
-}
-
-function toFiniteNumber(value) {
-    if (value === null || value === undefined || value === "") return null;
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
     const number = Number(value);
-    return Number.isFinite(number) ? number : null;
+    return `${number >= 0 ? "+" : ""}${number.toFixed(2)}%`;
 }
 
-function firstFiniteNumber(...values) {
-    for (const value of values) {
-        const number = toFiniteNumber(value);
-        if (number !== null) return number;
-    }
-    return null;
-}
+const controlStyle = {
+    background: SURFACE,
+    color: C.text,
+    border: `1px solid ${C.border}`,
+    borderRadius: 8,
+    padding: "8px 12px",
+    fontSize: 13,
+    fontWeight: 700,
+    outline: "none",
+    cursor: "pointer",
+};
 
-function modelLabel(model) {
-    return MODEL_LABELS[model] || MODEL_LABELS.ensemble;
-}
-
-function getFinalForecastPoint(points) {
-    return Array.isArray(points) && points.length ? points[points.length - 1] : null;
-}
-
-function normalizeSingleForecast(payload, modelType) {
-    const points = (payload?.forecasts || []).map((point) => ({
-        date: point.date,
-        predicted: firstFiniteNumber(point.predicted, point.prediction),
-        lower_95: point.lower95,
-        upper_95: point.upper95,
-        lower_68: point.lower68,
-        upper_68: point.upper68,
-        [modelType]: firstFiniteNumber(point.predicted, point.prediction),
-    }));
-    return {
-        ...payload,
-        forecast_points: points,
-    };
-}
-
-function normalizeEnsemblePoint(point) {
-    const prediction = firstFiniteNumber(point.prediction, point.predicted, point.ensemble);
-    return {
-        ...point,
-        ensemble: prediction,
-        prediction,
-        predicted: prediction,
-        lower_95: point.lower_95 ?? point.lower_90,
-        upper_95: point.upper_95 ?? point.upper_90,
-        lower_68: point.lower_68 ?? point.lower_90,
-        upper_68: point.upper_68 ?? point.upper_90,
-    };
-}
-
-function buildFallbackEnsemble(models) {
-    const available = MODEL_KEYS
-        .map((key) => [key, models?.[key]])
-        .filter(([, payload]) => payload?.status === "ok" && Array.isArray(payload.forecast_points) && payload.forecast_points.length);
-    if (!available.length) return null;
-
-    const first = available[0][1];
-    const points = first.forecast_points.map((point, index) => {
-        const values = available
-            .map(([key, payload]) => [key, firstFiniteNumber(
-                payload.forecast_points[index]?.prediction,
-                payload.forecast_points[index]?.predicted,
-                payload.forecast_points[index]?.[key],
-            )])
-            .filter(([, value]) => value !== null);
-        const predicted = values.reduce((sum, [, value]) => sum + Number(value), 0) / Math.max(values.length, 1);
-        // Averaging point forecasts gives a centre but no interval. Reusing the
-        // centre as both bounds drew a zero-width band and printed the forecast
-        // price into the Upper 95% and Lower 95% cards as though it were an
-        // interval, which is why all three read the same number. Null is the
-        // honest answer: this path has no calibrated uncertainty.
-        const bounds = available.reduce(
-            (acc, [, payload]) => {
-                const p = payload.forecast_points[index];
-                acc.lower_95.push(toFiniteNumber(p?.lower_95));
-                acc.upper_95.push(toFiniteNumber(p?.upper_95));
-                acc.lower_68.push(toFiniteNumber(p?.lower_68));
-                acc.upper_68.push(toFiniteNumber(p?.upper_68));
-                return acc;
-            },
-            { lower_95: [], upper_95: [], lower_68: [], upper_68: [] },
-        );
-        const widest = (list, pick) => {
-            const finite = list.filter((v) => v !== null);
-            return finite.length ? pick(...finite) : null;
-        };
-        const row = {
-            date: point.date,
-            ensemble: predicted,
-            prediction: predicted,
-            predicted,
-            lower_95: widest(bounds.lower_95, Math.min),
-            upper_95: widest(bounds.upper_95, Math.max),
-            lower_68: widest(bounds.lower_68, Math.min),
-            upper_68: widest(bounds.upper_68, Math.max),
-        };
-        values.forEach(([key, value]) => {
-            row[key] = Number(value);
-        });
-        return row;
-    });
-    const currentPrice = first.current_price;
-    const finalPoint = getFinalForecastPoint(points);
-    const changePct = finalPoint && currentPrice
-        ? ((finalPoint.predicted - currentPrice) / currentPrice) * 100
-        : 0;
-
-    return {
-        status: "ok",
-        model_available: true,
-        current_price: currentPrice,
-        current_price_source: first.current_price_source,
-        forecast_points: points,
-        ensemble: {
-            target: finalPoint?.predicted,
-            change_pct: changePct,
-            upper_95: finalPoint?.upper_95,
-            lower_95: finalPoint?.lower_95,
-            upper_68: finalPoint?.upper_68,
-            lower_68: finalPoint?.lower_68,
-            upper_90: finalPoint?.upper_95,
-            lower_90: finalPoint?.lower_95,
-            signal: changePct >= 0 ? "Bullish" : "Bearish",
-            reliability: available.length === MODEL_KEYS.length ? "Medium" : "Low",
-            consensus: `${available.length} model${available.length === 1 ? "" : "s"} available`,
-        },
-        weights: available.reduce((acc, [key]) => {
-            acc[key] = 1 / available.length;
-            return acc;
-        }, {}),
-    };
-}
-
-function resolveDisplayData(data, selectedModel) {
-    if (!data) return {};
-    const ensemblePayload = data.ensemblePayload?.status === "ok"
-        ? {
-            ...data.ensemblePayload,
-            forecast_points: (data.ensemblePayload.forecast_points || []).map(normalizeEnsemblePoint),
-        }
-        : buildFallbackEnsemble(data.models);
-
-    if (MODEL_KEYS.includes(selectedModel)) {
-        const payload = data.models?.[selectedModel];
-        const points = payload?.forecast_points || [];
-        const finalPoint = getFinalForecastPoint(points);
-        const changePct = finalPoint && payload?.current_price
-            ? ((finalPoint.predicted - payload.current_price) / payload.current_price) * 100
-            : payload?.expected_change_pct;
-        return {
-            payload,
-            points,
-            currentPrice: payload?.current_price,
-            currentPriceSource: payload?.current_price_source,
-            target: finalPoint?.predicted ?? payload?.target_price ?? payload?.predicted_price,
-            changePct,
-            lower95: finalPoint?.lower_95 ?? payload?.lower95,
-            upper95: finalPoint?.upper_95 ?? payload?.upper95,
-            lower68: finalPoint?.lower_68 ?? payload?.lower68,
-            upper68: finalPoint?.upper_68 ?? payload?.upper68,
-            signal: payload?.signal || (Number(changePct) >= 0 ? "Bullish" : "Bearish"),
-            reliability: payload?.status === "ok" ? "Model" : "Unavailable",
-            tableLabel: modelLabel(selectedModel),
-            chartModel: selectedModel,
-            unavailable: payload?.status !== "ok",
-            message: payload?.message || payload?.model_info?.message,
-            // The single-model route carries provenance on model_info.
-            pathType: payload?.model_info?.path_type,
-            perStepPredictions: payload?.model_info?.per_step_predictions,
-            modelOutputCount: payload?.model_info?.model_output_count,
-            scenarioPaths: payload?.scenario_paths,
-            probabilityUp: payload?.probability_up,
-            probabilityDown: payload?.probability_down,
-            headsNote: payload?.model_info?.heads_note,
-        };
-    }
-
-    const finalPoint = getFinalForecastPoint(ensemblePayload?.forecast_points);
-    const summary = ensemblePayload?.ensemble;
-    return {
-        payload: ensemblePayload,
-        points: ensemblePayload?.forecast_points || [],
-        currentPrice: ensemblePayload?.current_price,
-        currentPriceSource: ensemblePayload?.current_price_source,
-        target: summary?.target ?? finalPoint?.predicted,
-        changePct: summary?.change_pct,
-        lower95: summary?.lower_95 ?? summary?.lower_90 ?? finalPoint?.lower_95,
-        upper95: summary?.upper_95 ?? summary?.upper_90 ?? finalPoint?.upper_95,
-        lower68: summary?.lower_68 ?? finalPoint?.lower_68,
-        upper68: summary?.upper_68 ?? finalPoint?.upper_68,
-        signal: summary?.signal,
-        reliability: summary?.reliability,
-        consensus: summary?.consensus,
-        tableLabel: selectedModel === "ensemble" ? "Ensemble" : "Forecast",
-        chartModel: selectedModel === "all" ? "all" : "ensemble",
-        unavailable: !ensemblePayload || ensemblePayload.status !== "ok",
-        message: ensemblePayload?.message,
-        pathType: ensemblePayload?.path_type,
-        perStepPredictions: ensemblePayload?.per_step_predictions,
-        modelOutputCount: ensemblePayload?.model_output_count,
-        scenarioPaths: ensemblePayload?.scenario_paths,
-        degraded: ensemblePayload?.degraded,
-        modelsAvailable: ensemblePayload?.models_available,
-        modelsUnavailable: ensemblePayload?.models_unavailable,
-    };
-}
-
-/**
- * Say where the daily points came from.
- *
- * In the default mode each model emits a single cumulative horizon-day return.
- * There are no daily predictions behind it, which is why the panel above draws
- * a range at the horizon rather than a path to it - but the reader still needs
- * to know which of the two kinds of forecast they are looking at, because a
- * per-step model is making a genuinely different (and more compounding-prone)
- * claim from one that emitted a single endpoint.
- */
-function ForecastProvenanceNote({ pathType, perStepPredictions, modelOutputCount, horizon, scenarioCount }) {
-    if (!pathType) return null;
-    // per_step_predictions is authoritative; path_type is the readable fallback.
-    const perStep = perStepPredictions ?? pathType === "recursive_per_step";
-    const interpolated = !perStep;
+/** One label/value line in the forecast box. */
+function Row({ label, children, emphasis }) {
     return (
         <div
             style={{
                 display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "8px 12px",
-                borderRadius: 8,
-                border: `1px solid ${interpolated ? C.amber || "#8a6d3b" : C.border}`,
-                background: "rgba(255,255,255,0.03)",
-                color: C.sub,
-                fontSize: 12,
-                lineHeight: 1.5,
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                gap: 20,
+                padding: "13px 0",
+                borderTop: `1px solid ${C.border}`,
             }}
         >
-            <span style={{ fontWeight: 900, color: interpolated ? C.amber || "#d6a13a" : C.green }}>
-                {interpolated ? "Projected path" : "Per-step forecast"}
+            <span style={{ color: C.textMid, fontSize: 13, fontWeight: 600 }}>{label}</span>
+            <span
+                style={{
+                    color: C.text,
+                    fontSize: emphasis ? 26 : 17,
+                    fontWeight: emphasis ? 900 : 700,
+                    fontVariantNumeric: "tabular-nums",
+                    lineHeight: 1.15,
+                }}
+            >
+                {children}
             </span>
-            <span>
-                {interpolated
-                    ? `Each model produced exactly one number — the ${horizon}-day return${
-                          modelOutputCount ? ` (${modelOutputCount} model outputs total)` : ""
-                      }. There is no day-by-day forecast underneath it, so none is drawn: what the
-                       model claims is an endpoint and an interval around it, and that is what the
-                       range shows.`
-                    : `Every point is a separate model prediction${
-                          modelOutputCount ? ` (${modelOutputCount} model outputs)` : ""
-                      }. Later steps are conditioned on earlier predicted bars, so error compounds —
-                       which is why the range at the horizon, not the sequence, is what is drawn.`}
-                {scenarioCount > 0 && (
-                    <>
-                        {" "}
-                        The ticks under the axis are where {scenarioCount} simulated outcomes landed.
-                        Their spread is the useful part; the paths that produced them are not shown
-                        because none of them is a prediction.
-                    </>
-                )}
-            </span>
-        </div>
-    );
-}
-
-function MetricCard({ label, value, sub, color }) {
-    return (
-        <div style={{
-            background: COLORS.surface,
-            border: `1px solid ${C.border}`,
-            borderRadius: 8,
-            padding: "16px 18px",
-            minHeight: 96,
-            display: "grid",
-            alignContent: "center",
-            gap: 7,
-        }}>
-            <div style={{ fontSize: 11, color: C.textDim, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-                {label}
-            </div>
-            <div style={{ fontSize: 24, lineHeight: 1.1, color: color || C.text, fontWeight: 800 }}>
-                {value}
-            </div>
-            {sub && <div style={{ fontSize: 12, color: C.textMid }}>{sub}</div>}
         </div>
     );
 }
 
 /**
- * The forecast, drawn as what it is: a range, not a path.
+ * The forecast box: the point of the page.
  *
- * This replaces a line chart that ran from today's close to the horizon-day
- * prediction. That line was not a forecast of the days it passed through —
- * outside per-step mode each model emits exactly one number, and the shape
- * between was P(0) x (1 + r)^(t/H), monotone by construction. Drawing it
- * invited the reader to trust a candle-by-candle claim the model never made,
- * and no amount of dashing or footnoting fixed that; the picture said one thing
- * while the caption said another.
+ * Every number here is measured against `anchor_price` — the close the models
+ * actually read — and the box names it, because that close is routinely not
+ * the price the reader is looking at. The server's download window ends at
+ * today's date and yfinance treats that end as exclusive, so the frame always
+ * stops at the previous session while "Current Price" is a live quote from this
+ * one.
  *
- * So the picture now says the same thing as the model. One axis of price, the
- * last close marked on it, the prediction marked on it, and the calibrated 68%
- * and 95% intervals drawn around it. Where the price goes in between is not
- * claimed, because it is not known.
+ * On PLTR the gap was 4%: the models forecast 0.26% BELOW the bar they had
+ * read, the box divided that forecast by the quote instead, and printed +3.8%
+ * beside a DOWN arrow. So the anchor gets its own row, Expected Change is the
+ * move away from it, and the quote sits under it as context rather than as a
+ * reference for anything.
  *
- * When the payload carries Monte Carlo scenarios, their *endpoints* are plotted
- * as a strip of ticks under the axis. Endpoints, not paths: the useful content
- * of those simulations is the spread of where price lands, and drawing the
- * paths themselves puts 200 fictional price histories on screen.
+ * `split` still marks the rows reading as contradictory, and `split_reason`
+ * says why. The two causes need different sentences: writing the rarer one
+ * (the models disagreeing with themselves) over the commoner one (the quote
+ * having moved) is how this note came to describe something that was not
+ * happening.
  */
-function ForecastRange({ currentPrice, finalPoint, horizon, scenarioPaths, interpolated, label }) {
-    const target = firstFiniteNumber(finalPoint?.prediction, finalPoint?.predicted, finalPoint?.ensemble);
-    const lower95 = toFiniteNumber(finalPoint?.lower_95);
-    const upper95 = toFiniteNumber(finalPoint?.upper_95);
-    const lower68 = toFiniteNumber(finalPoint?.lower_68);
-    const upper68 = toFiniteNumber(finalPoint?.upper_68);
-    const anchor = toFiniteNumber(currentPrice);
+function ForecastBox({ forecast }) {
+    const up = forecast.direction === "UP";
+    const directionColor = up ? C.green : C.red;
 
-    // Scenario endpoints only. The last element of each simulated path is where
-    // that scenario finished; the elements before it are the fiction.
-    const endpoints = (Array.isArray(scenarioPaths) ? scenarioPaths : [])
-        .map((path) => toFiniteNumber(Array.isArray(path) ? path[path.length - 1] : null))
-        .filter((value) => value !== null);
-
-    const candidates = [target, lower95, upper95, lower68, upper68, anchor, ...endpoints]
-        .filter((value) => value !== null);
-    if (!candidates.length || target === null) {
-        return (
-            <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, color: C.textDim, fontSize: 12 }}>
-                This model produced no forecast to draw a range from.
-            </div>
-        );
-    }
-
-    const min = Math.min(...candidates);
-    const max = Math.max(...candidates);
-    const span = max - min || Math.max(Math.abs(max) * 0.02, 1);
-    const pad = span * 0.08;
-    const low = min - pad;
-    const high = max + pad;
-    const position = (value) => ((value - low) / (high - low)) * 100;
-
-    const band = (lo, hi, opacity) => (
-        lo === null || hi === null ? null : (
-            <div style={{
-                position: "absolute", top: 26, height: 26,
-                left: `${position(lo)}%`, width: `${position(hi) - position(lo)}%`,
-                background: COLORS.band, opacity, borderRadius: 4,
-            }} />
-        )
-    );
-
-    const marker = (value, colour, caption, above) => (
-        value === null ? null : (
-            <div style={{ position: "absolute", left: `${position(value)}%`, top: above ? 0 : 52, transform: "translateX(-50%)", textAlign: "center" }}>
-                {above && <div style={{ color: colour, fontSize: 11, fontWeight: 800, whiteSpace: "nowrap" }}>{formatPrice(value)}</div>}
-                <div style={{ width: 2, height: 26, background: colour, margin: "0 auto" }} />
-                {!above && <div style={{ color: colour, fontSize: 11, fontWeight: 800, whiteSpace: "nowrap", marginTop: 2 }}>{formatPrice(value)}</div>}
-                <div style={{ color: C.textDim, fontSize: 10, whiteSpace: "nowrap", marginTop: above ? 0 : 2 }}>{caption}</div>
-            </div>
-        )
-    );
+    // How far the quote has travelled from the bar the models read. The note at
+    // the foot needs it, and it is the entire explanation of a box whose
+    // Current Price and Forecast Price look like a rise beside a DOWN call.
+    const anchor = Number(forecast.anchor_price);
+    const quote = Number(forecast.current_price);
+    const quoteGapPct =
+        Number.isFinite(anchor) && Number.isFinite(quote) && anchor
+            ? (quote / anchor - 1) * 100
+            : null;
 
     return (
-        <div style={{ background: COLORS.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: "18px 22px 16px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
-                <div style={{ color: C.text, fontSize: 13, fontWeight: 800 }}>
-                    {label || "Forecast"} — where price could be in {horizon} days
+        <div
+            style={{
+                background: PANEL,
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                padding: "20px 24px 6px",
+            }}
+        >
+            <div
+                style={{
+                    color: C.textDim,
+                    fontSize: 11,
+                    fontWeight: 800,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    paddingBottom: 16,
+                }}
+            >
+                Next-timeframe forecast
+            </div>
+
+            <Row label={forecast.as_of ? `Prev Close · ${forecast.as_of}` : "Prev Close"}>
+                {formatPrice(forecast.anchor_price)}
+            </Row>
+            <Row label="Current Price">
+                {formatPrice(forecast.current_price)}
+                {QUOTE_SOURCE[forecast.current_price_source] && (
+                    <span style={{ color: C.textDim, fontSize: 12, fontWeight: 600, marginLeft: 8 }}>
+                        {QUOTE_SOURCE[forecast.current_price_source]}
+                    </span>
+                )}
+            </Row>
+            <Row label="Forecast Price" emphasis>
+                {formatPrice(forecast.forecast_price)}
+            </Row>
+            <Row label="Direction">
+                <span style={{ color: directionColor, fontSize: 22, fontWeight: 900 }}>
+                    {up ? "▲" : "▼"} {forecast.direction}
+                </span>
+            </Row>
+            <Row label="Expected Change">
+                <span style={{ color: Number(forecast.expected_change_pct) >= 0 ? C.green : C.red }}>
+                    {formatPct(forecast.expected_change_pct)}
+                </span>
+                <span style={{ color: C.textDim, fontSize: 12, fontWeight: 600, marginLeft: 8 }}>
+                    from prev close
+                </span>
+            </Row>
+            <Row label="Forecast Horizon">
+                <span style={{ color: C.textMid, fontWeight: 700, fontSize: 15 }}>
+                    {forecast.horizon_label || "Next 1 Day"}
+                    {forecast.forecast_date ? ` · ${forecast.forecast_date}` : ""}
+                </span>
+            </Row>
+
+            {forecast.split && (
+                <div
+                    style={{
+                        borderTop: `1px solid ${C.border}`,
+                        padding: "12px 0",
+                        color: C.textDim,
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                    }}
+                >
+                    {forecast.split_reason === "quote" ? (
+                        <>
+                            The models read the {forecast.as_of} close of{" "}
+                            {formatPrice(forecast.anchor_price)} and forecast{" "}
+                            {formatPrice(forecast.forecast_price)} from it — a move of{" "}
+                            {formatPct(forecast.expected_change_pct)}. The live quote sits{" "}
+                            {formatPct(quoteGapPct)} from that close, in a session no model saw,
+                            so against the quote the same forecast reads{" "}
+                            {formatPct(forecast.quote_change_pct)}. The call is the one on the
+                            close.
+                        </>
+                    ) : (
+                        <>
+                            The models lean {forecast.direction} on probability while the forecast
+                            price lands the other way against that same close. Both readings are
+                            shown as they are.
+                        </>
+                    )}
                 </div>
-                <div style={{ color: C.textDim, fontSize: 11 }}>
-                    {interpolated
-                        ? "one model output for the whole horizon"
-                        : "per-step model outputs, endpoint shown"}
-                </div>
-            </div>
-
-            <div style={{ position: "relative", height: 108, marginTop: 6 }}>
-                {/* 95% then 68%, drawn widest first so the inner band reads darker */}
-                {band(lower95, upper95, 0.10)}
-                {band(lower68, upper68, 0.22)}
-
-                {/* The price axis itself */}
-                <div style={{ position: "absolute", top: 38, left: 0, right: 0, height: 2, background: C.border }} />
-
-                {marker(anchor, C.amber, "last close", true)}
-                {marker(target, COLORS.ensemble, `${horizon}-day forecast`, false)}
-
-                {/* Scenario endpoints: one tick each, no paths */}
-                {endpoints.map((value, index) => (
-                    <div
-                        key={index}
-                        title={`Simulated outcome ${formatPrice(value)}`}
-                        style={{
-                            position: "absolute", top: 96, left: `${position(value)}%`,
-                            width: 1, height: 10, background: COLORS.scenario, opacity: 0.4,
-                        }}
-                    />
-                ))}
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.textDim, marginTop: 4 }}>
-                <span>{formatPrice(lower95)} · 95% lower</span>
-                {endpoints.length > 0 && <span>{endpoints.length} simulated outcomes</span>}
-                <span>95% upper · {formatPrice(upper95)}</span>
-            </div>
+            )}
         </div>
     );
 }
 
-function WeightsPanel({ weights, consensus, signal, reliability }) {
-    // A model missing from `weights` did not contribute — it was excluded from a
-    // partial ensemble. Falling back to its nominal share showed an excluded LSTM
-    // at 40% alongside two renormalised members, so the bars summed to 140% and
-    // credited a model that never ran. Absent means zero.
-    const hasWeights = weights && Object.keys(weights).length > 0;
-    const resolved = {
-        lstm: Number(hasWeights ? weights.lstm ?? 0 : 0.4),
-        xgboost: Number(hasWeights ? weights.xgboost ?? 0 : 0.35),
-        random_forest: Number(hasWeights ? weights.random_forest ?? 0 : 0.25),
-    };
-    const signalColor = signal === "Bearish" ? C.red : signal === "Neutral" ? C.amber : C.green;
-
+/**
+ * The forecast box before the numbers exist.
+ *
+ * Same shell, same five rows, same heights as `ForecastBox` — so when the
+ * models land, the values appear in place instead of the page growing a panel
+ * and pushing the chart up. The chart above is already interactive at this
+ * point; this is the only part still waiting.
+ */
+function ForecastBoxSkeleton({ symbol }) {
     return (
-        <div style={{ background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: C.text, marginBottom: 16 }}>Ensemble Weights</div>
-            <div style={{ display: "grid", gap: 13 }}>
-                {["lstm", "xgboost", "random_forest"].map((key) => {
-                    const pct = Math.round(resolved[key] * 100);
-                    const excluded = pct === 0;
-                    return (
-                        <div key={key} style={{ display: "grid", gridTemplateColumns: "128px 1fr 66px", alignItems: "center", gap: 12 }}>
-                            <div style={{ color: excluded ? C.textDim : C.textMid, fontSize: 12, fontWeight: 700 }}>
-                                {WEIGHT_LABELS[key]}
-                            </div>
-                            <div style={{ height: 10, background: "#0A0F18", borderRadius: 999, overflow: "hidden", border: "1px solid rgba(255,255,255,.05)" }}>
-                                <div style={{ width: `${pct}%`, height: "100%", background: COLORS[key] }} />
-                            </div>
-                            <div style={{ color: excluded ? C.textDim : C.text, fontSize: 12, fontWeight: 800, textAlign: "right" }}>
-                                {excluded ? "excl." : `${pct}%`}
-                            </div>
-                        </div>
-                    );
-                })}
+        <div
+            style={{
+                background: PANEL,
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                padding: "20px 24px 6px",
+            }}
+        >
+            <div
+                style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 12,
+                    paddingBottom: 16,
+                }}
+            >
+                <span
+                    style={{
+                        color: C.textDim,
+                        fontSize: 11,
+                        fontWeight: 800,
+                        letterSpacing: "0.14em",
+                        textTransform: "uppercase",
+                    }}
+                >
+                    Next-timeframe forecast
+                </span>
+                <span style={{ color: C.textDim, fontSize: 11 }}>
+                    running the models for {symbol}…
+                </span>
             </div>
-            <div style={{ marginTop: 18, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
-                <div style={{ color: signalColor, fontSize: 13, fontWeight: 800 }}>
-                    {consensus || `${reliability || "Medium"} reliability`}
-                </div>
-            </div>
+
+            {[
+                "Prev Close",
+                "Current Price",
+                "Forecast Price",
+                "Direction",
+                "Expected Change",
+                "Forecast Horizon",
+            ].map(
+                (label, index) => (
+                    <Row key={label} label={label} emphasis={index === 2}>
+                        <span
+                            className="skeleton-shimmer"
+                            style={{
+                                display: "inline-block",
+                                width: index === 2 ? 132 : 96,
+                                height: index === 2 ? 26 : 17,
+                                borderRadius: 5,
+                                background: "rgba(148,163,184,.14)",
+                                verticalAlign: "middle",
+                            }}
+                        />
+                    </Row>
+                ),
+            )}
+            <div style={{ height: 6 }} />
         </div>
     );
 }
 
-function ForecastTable({ rows, modelKey, label }) {
-    const tableRows = (rows || []).slice(0, 7);
+function Notice({ tone = "dim", children }) {
+    const palette =
+        tone === "error"
+            ? { color: C.red, border: "rgba(244,63,94,.35)", background: "rgba(244,63,94,.08)" }
+            : { color: C.textMid, border: C.border, background: SURFACE };
     return (
-        <div style={{ background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620, fontSize: 12 }}>
-                <thead>
-                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                        <th style={{ color: C.textDim, textAlign: "left", padding: "0 10px 10px 0", fontWeight: 800 }}>DATE</th>
-                        <th style={{ color: COLORS[modelKey] || COLORS.ensemble, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>{label || "PREDICTED PRICE"}</th>
-                        <th style={{ color: C.red, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>LOWER 95%</th>
-                        <th style={{ color: C.green, textAlign: "right", padding: "0 10px 10px", fontWeight: 800 }}>UPPER 95%</th>
-                        <th style={{ color: C.textDim, textAlign: "right", padding: "0 0 10px 10px", fontWeight: 800 }}>RANGE</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {tableRows.map((row) => {
-                        const predicted = row.predicted ?? row.ensemble ?? row[modelKey];
-                        const lower = row.lower_95 ?? row.lower_90;
-                        const upper = row.upper_95 ?? row.upper_90;
-                        const range = Number.isFinite(Number(upper)) && Number.isFinite(Number(lower)) ? Number(upper) - Number(lower) : null;
-                        return (
-                            <tr key={row.date} style={{ borderBottom: "1px solid rgba(255,255,255,.055)" }}>
-                                <td style={{ color: C.textMid, padding: "10px 10px 10px 0", fontVariantNumeric: "tabular-nums" }}>{row.date}</td>
-                                <td style={{ color: COLORS[modelKey] || COLORS.ensemble, textAlign: "right", padding: "10px", fontWeight: 800 }}>{formatPrice(predicted)}</td>
-                                <td style={{ color: C.red, textAlign: "right", padding: "10px" }}>{formatPrice(lower)}</td>
-                                <td style={{ color: C.green, textAlign: "right", padding: "10px" }}>{formatPrice(upper)}</td>
-                                <td style={{ color: C.textMid, textAlign: "right", padding: "10px 0 10px 10px" }}>{formatPrice(range)}</td>
-                            </tr>
-                        );
-                    })}
-                </tbody>
-            </table>
+        <div
+            style={{
+                padding: "14px 18px",
+                border: `1px solid ${palette.border}`,
+                background: palette.background,
+                borderRadius: 10,
+                color: palette.color,
+                fontSize: 13,
+                lineHeight: 1.55,
+            }}
+        >
+            {children}
         </div>
     );
 }
 
-export default function PredictionsTab({ selectedTicker, apiConnected, priceData, modelPrep }) {
-    const [horizon, setHorizon] = useState(30);
-    const [selectedModel, setSelectedModel] = useState("all");
-    const [data, setData] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
+export default function PredictionsTab({
+    selectedTicker,
+    setSelectedTicker,
+    watchlist = [],
+    apiConnected,
+    onBacktest,
+}) {
+    const [bars, setBars] = useState(RANGES[1].bars);
 
-    // Preparation is App's, shared with the Analysis tab. `readyVersion` ticks
-    // when a training run finishes, which is what re-runs the fetch below —
-    // there is no button, and nothing here decides what gets trained.
-    const readyVersion = modelPrep?.readyVersion ?? 0;
-    // Only a live training run suppresses the normal loading state. The brief
-    // readiness check on every ticker change must not flash a panel over a
-    // forecast that is about to render perfectly well.
-    const preparing = modelPrep?.status === "preparing";
+    // Two queries, because the two halves of this page cost three orders of
+    // magnitude apart. The candles are a cached OHLCV download; the forecast is
+    // Kronos sampling 128 transformer paths, and it is seconds. They used to be
+    // one request, which meant the chart — ready almost immediately — sat blank
+    // until the models finished, on every symbol switch.
+    const historyQuery = useForecastHistory(selectedTicker, {
+        days: HISTORY_BARS,
+        enabled: apiConnected,
+    });
+    const query = useSimpleForecast(selectedTicker, { enabled: apiConnected });
 
-    // Only the models the current view actually shows. A unified model is a
-    // single next-day number that the fan chart has no room for, so selecting
-    // one asks for that model alone; everything else asks for the fan.
-    const activeModelKeys = useMemo(
-        () => (isUnifiedModel(selectedModel) ? [selectedModel] : LEGACY_MODEL_KEYS),
-        [selectedModel],
-    );
+    const data = query.data ?? null;
+    // Only the forecast half is "loading" here; the chart has its own state and
+    // must never be gated on this one.
+    const loading = query.isPending;
+    const error = query.error ? query.error.message || "The forecast could not be loaded." : null;
 
-    useEffect(() => {
-        if (!apiConnected) return;
-        setLoading(true);
-        setError(null);
-        Promise.allSettled([
-            fetchEnsemblePrediction(selectedTicker, horizon),
-            ...activeModelKeys.map((modelType) =>
-                fetchPredictions(selectedTicker, modelType, isUnifiedModel(modelType) ? 1 : horizon),
-            ),
-        ])
-            .then((results) => {
-                const [ensembleResult, ...modelResults] = results;
-                const models = {};
-                const errors = {};
-                activeModelKeys.forEach((modelType, index) => {
-                    const result = modelResults[index];
-                    if (result.status === "fulfilled") {
-                        models[modelType] = normalizeSingleForecast(result.value, modelType);
-                    } else {
-                        models[modelType] = {
-                            status: "unavailable",
-                            model_available: false,
-                            message: result.reason?.message || "This model produced no forecast for the current request.",
-                            forecasts: [],
-                            forecast_points: [],
-                        };
-                        errors[modelType] = models[modelType].message;
-                    }
-                });
-                setData({
-                    ensemblePayload: ensembleResult.status === "fulfilled" ? ensembleResult.value : null,
-                    models,
-                    errors,
-                });
-                setLoading(false);
-            })
-            .catch((err) => {
-                setError(err?.message || "Forecast request failed.");
-                setLoading(false);
-            });
-    }, [selectedTicker, horizon, apiConnected, readyVersion, activeModelKeys]);
+    const history = historyQuery.data?.bars ?? [];
+    const historyLoading = historyQuery.isPending;
+    const historyError = historyQuery.error
+        ? historyQuery.error.message || "The price history could not be loaded."
+        : null;
+    const windowed = useMemo(() => history.slice(-bars), [history, bars]);
+    const points = data?.forecast ?? [];
+    const servable = data?.status === "ok" && points.length > 0;
+
+    // The arrow on the chart carries the same UP/DOWN the box does, without the
+    // probability behind it: the number is the model's, the tab's job is the
+    // call. Memoised on the string so a re-render does not hand the chart a new
+    // object and make it redraw its markers for an unchanged direction.
+    const call = servable ? data.direction : null;
+    const direction = useMemo(() => (call ? { direction: call } : null), [call]);
+
+    const symbols = watchlist.includes(selectedTicker)
+        ? watchlist
+        : [selectedTicker, ...watchlist].filter(Boolean);
 
     if (!apiConnected) {
         return (
             <div style={{ padding: 48, color: C.textDim, textAlign: "center" }}>
-                Connect to the API server to view predictions.
+                Connect to the API server to view the forecast.
             </div>
         );
     }
 
-    const display = resolveDisplayData(data, selectedModel);
-    const currentPrice = display.currentPrice ?? priceData?.bars?.[priceData.bars.length - 1]?.close;
-    const modelUnavailable = !loading && !error && display.unavailable;
-    const bullish = Number(display.changePct || 0) >= 0;
-    const reliabilityColor = display.reliability === "Low" ? C.red : display.reliability === "Medium" ? C.amber : C.green;
-    // A unified model answers for the next bar whatever the horizon selector says.
-    const horizonLocked = isUnifiedModel(selectedModel);
-    // per_step_predictions is authoritative; path_type is the readable fallback.
-    const perStepForecast = display.perStepPredictions
-        ?? display.pathType === "recursive_per_step";
-
     return (
-        <div style={{ display: "grid", gap: 18, paddingBottom: 36 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "end" }}>
+        <div style={{ display: "grid", gap: 16, paddingBottom: 36 }}>
+            {/* ── Header: what am I looking at, and over what window ── */}
+            <div
+                style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "end",
+                    gap: 16,
+                    flexWrap: "wrap",
+                }}
+            >
                 <div style={{ display: "grid", gap: 6 }}>
-                    <div style={{ color: C.textDim, fontSize: 12, fontWeight: 800, letterSpacing: "0.06em", textTransform: "uppercase" }}>Predictions</div>
-                    <div style={{ color: C.text, fontSize: 25, fontWeight: 900, lineHeight: 1 }}>{selectedTicker}</div>
-                </div>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                    <select
-                        value={selectedModel}
-                        onChange={(event) => setSelectedModel(event.target.value)}
+                    <div
                         style={{
-                            background: COLORS.surface,
-                            color: C.text,
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 8,
-                            padding: "8px 10px",
-                            fontSize: 13,
-                            fontWeight: 700,
-                            outline: "none",
+                            color: C.textDim,
+                            fontSize: 12,
+                            fontWeight: 800,
+                            letterSpacing: "0.08em",
+                            textTransform: "uppercase",
                         }}
                     >
-                        {MODEL_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                    </select>
-                    <div style={{ display: "inline-flex", background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 3, gap: 3 }}>
-                        {HORIZONS.map((days) => (
+                        Predictions
+                    </div>
+                    <div style={{ color: C.text, fontSize: 26, fontWeight: 900, lineHeight: 1 }}>
+                        {selectedTicker}
+                    </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    {typeof setSelectedTicker === "function" && symbols.length > 1 && (
+                        <select
+                            value={selectedTicker}
+                            onChange={(event) => setSelectedTicker(event.target.value)}
+                            style={controlStyle}
+                            aria-label="Stock"
+                        >
+                            {symbols.map((symbol) => (
+                                <option key={symbol} value={symbol}>
+                                    {symbol}
+                                </option>
+                            ))}
+                        </select>
+                    )}
+                    <div
+                        style={{
+                            display: "inline-flex",
+                            background: SURFACE,
+                            border: `1px solid ${C.border}`,
+                            borderRadius: 8,
+                            padding: 3,
+                            gap: 3,
+                        }}
+                    >
+                        {RANGES.map((range) => (
                             <button
-                                key={days}
+                                key={range.label}
                                 type="button"
-                                disabled={horizonLocked}
-                                title={horizonLocked ? "Unified models forecast the next bar only" : undefined}
-                                onClick={() => setHorizon(days)}
+                                onClick={() => setBars(range.bars)}
+                                title={`Show ${range.label} of candles`}
                                 style={{
-                                    background: horizon === days ? COLORS.ensemble : "transparent",
-                                    color: horizon === days ? "#10131A" : C.textMid,
+                                    background: bars === range.bars ? C.amber : "transparent",
+                                    color: bars === range.bars ? "#10131A" : C.textMid,
                                     border: "none",
                                     borderRadius: 6,
-                                    padding: "7px 12px",
-                                    minWidth: 42,
+                                    padding: "7px 13px",
                                     fontSize: 12,
                                     fontWeight: 900,
-                                    cursor: horizonLocked ? "not-allowed" : "pointer",
-                                    opacity: horizonLocked ? 0.5 : 1,
+                                    cursor: "pointer",
                                 }}
                             >
-                                {days}D
+                                {range.label}
                             </button>
                         ))}
                     </div>
                 </div>
             </div>
 
-            {/* ── The chart, with the forecast on it. ─────────────
-                Candles plus the best performing model's trajectory, its
-                interval and its direction call, drawn on one price scale. The
-                split this tab has always kept — TradingView visualises price,
-                our backend produces the analysis — is unchanged; what changed is
-                that the two are now drawn in the same coordinate space, which
-                the Advanced Chart embed cannot do because it is an iframe with
-                no series API. TradingView's own chart is one toggle away inside
-                the panel, and still owns drawing tools, replay and studies.
-
-                The horizon is passed straight through, so the line, the band
-                and the arrow are always for the window the selector above is
-                on. */}
-            <BestModelChartPanel
-                symbol={selectedTicker}
-                horizon={horizon}
-                bars={priceData?.bars}
-                apiConnected={apiConnected}
-                readyVersion={readyVersion}
-            />
-
-            {/* ── The analysis. Ours, not TradingView's. ───────────
-                Direction, probability, confidence and the evidence behind them,
-                from GET /api/direction/{symbol}/analysis: trend, momentum,
-                volume, price action, support/resistance, volatility regime and
-                historical analogs, blended with the classifier by measured
-                out-of-sample skill. */}
-            <DirectionAnalysisPanel symbol={selectedTicker} apiConnected={apiConnected} />
-
-            {/* The classifier's own track record, under the combined call it
-                feeds. This is the panel that says whether the model reading
-                tomorrow has ever been right: the gauge, the rolling hit rate
-                against the base rate, and equity against buy & hold. The
-                analysis above weights it by exactly these numbers, so the two
-                belong next to each other. */}
-            <DirectionPanel symbol={selectedTicker} modelPrep={modelPrep} />
-
-            {/* One panel covers every reason there is nothing to draw, and the
-                server decides which: training under way with its stages, a real
-                failure with a retry, or a model that trained and did not clear
-                its out-of-sample baseline. None of them is a button asking the
-                user to start a training run.
-
-                It renders while preparation is live even if a partial forecast
-                is also on screen — a degraded ensemble filling in its missing
-                member should say so while it happens. */}
-            {(preparing || (!loading && !error && modelUnavailable)) && (
-                <ModelPreparation preparation={modelPrep} context="forecast" />
-            )}
-
-            {!preparing && loading && (
-                <div style={{ padding: 46, color: C.textDim, background: COLORS.surface, border: `1px solid ${C.border}`, borderRadius: 8, textAlign: "center" }}>
-                    Loading forecast...
-                </div>
-            )}
-
-            {!preparing && !loading && error && (
-                <div style={{ padding: 18, color: C.red, background: "rgba(244,63,94,.08)", border: "1px solid rgba(244,63,94,.35)", borderRadius: 8 }}>
-                    {error}
-                </div>
-            )}
-
-            {!loading && !error && !modelUnavailable && display.payload && (
-                <>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-                        <MetricCard
-                            label="Current"
-                            value={formatPrice(currentPrice)}
-                            sub={display.currentPriceSource ? display.currentPriceSource.replace("_", " ") : null}
-                        />
-                        <MetricCard
-                            label={`${modelLabel(display.chartModel)} ${horizonLocked ? "Next Bar" : "Forecast"}`}
-                            value={formatPrice(display.target)}
-                            sub={`${formatPct(display.changePct)} ${display.signal || ""} | ${display.reliability || "Model"}`}
-                            color={bullish ? COLORS.ensemble : C.red}
-                        />
-                        {Number.isFinite(Number(display.probabilityUp)) ? (
-                            <MetricCard
-                                label="Direction"
-                                value={display.probabilityUp >= 0.5 ? "UP" : "DOWN"}
-                                sub={`Up ${(display.probabilityUp * 100).toFixed(1)}% | Down ${((display.probabilityDown ?? 1 - display.probabilityUp) * 100).toFixed(1)}%`}
-                                color={display.probabilityUp >= 0.5 ? C.green : C.red}
-                            />
-                        ) : (
-                            <MetricCard label="Upper 95%" value={formatPrice(display.upper95)} color={C.green} />
-                        )}
-                        <MetricCard
-                            label={horizonLocked ? "Forecast Horizon" : "Lower 95%"}
-                            value={horizonLocked ? "Next 1 Bar" : formatPrice(display.lower95)}
-                            color={horizonLocked ? COLORS.band : C.red}
-                        />
+            {/* ── The chart: real candles, and the forecast continuing them ── */}
+            <div
+                style={{
+                    background: PANEL,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 10,
+                    padding: 12,
+                }}
+            >
+                {historyLoading && !windowed.length ? (
+                    <div
+                        style={{
+                            height: CHART_HEIGHT,
+                            display: "grid",
+                            placeItems: "center",
+                            color: C.textDim,
+                            fontSize: 13,
+                        }}
+                    >
+                        Loading {selectedTicker}…
                     </div>
-
-                    <ForecastRange
-                        currentPrice={currentPrice}
-                        finalPoint={getFinalForecastPoint((display.points || []).slice(0, horizon))}
-                        horizon={horizon}
-                        scenarioPaths={display.scenarioPaths}
-                        label={modelLabel(display.chartModel)}
-                        interpolated={!perStepForecast}
-                    />
-
-                    <ForecastProvenanceNote
-                        pathType={display.pathType}
-                        perStepPredictions={display.perStepPredictions}
-                        modelOutputCount={display.modelOutputCount}
-                        horizon={horizon}
-                        scenarioCount={display.scenarioPaths?.length ?? 0}
-                    />
-
-                    {display.headsNote && (
-                        <div style={{
-                            padding: "8px 12px",
-                            borderRadius: 8,
-                            background: "rgba(245, 200, 66, 0.08)",
-                            border: `1px solid ${COLORS.ensemble}44`,
-                            color: C.sub,
-                            fontSize: 12,
-                        }}>
-                            {display.headsNote}
-                        </div>
-                    )}
-
-                    {display.degraded && display.modelsUnavailable && (
-                        <div style={{
-                            padding: "8px 12px",
-                            borderRadius: 8,
-                            border: `1px solid ${C.amber || "#8a6d3b"}`,
-                            background: "rgba(255,255,255,0.03)",
-                            color: C.sub,
-                            fontSize: 12,
-                            lineHeight: 1.5,
-                        }}>
-                            <span style={{ fontWeight: 900, color: C.amber || "#d6a13a", marginRight: 8 }}>
-                                Partial ensemble
-                            </span>
-                            Served by {(display.modelsAvailable || []).map((m) => MODEL_LABELS[m] || m).join(", ")}.{" "}
-                            {Object.entries(display.modelsUnavailable)
-                                .map(([m, why]) => `${MODEL_LABELS[m] || m} excluded — ${why}`)
-                                .join("; ")}.
-                        </div>
-                    )}
-
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 14, alignItems: "start" }}>
-                        <WeightsPanel
-                            weights={display.payload?.weights}
-                            consensus={display.consensus}
-                            signal={display.signal}
-                            reliability={display.reliability}
-                        />
-                        <div style={{ display: "grid", gap: 10 }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                                <div style={{ color: C.text, fontSize: 13, fontWeight: 900 }}>
-                                    {perStepForecast ? "Forecast Table" : "Model Output"}
-                                </div>
-                                <div style={{ color: reliabilityColor, fontSize: 12, fontWeight: 800 }}>
-                                    {display.reliability || "Model"}
-                                </div>
-                            </div>
-                            {/* Only a per-step model has a row per day. Listing the
-                                interpolated points would put the removed path back
-                                on screen as a table, which is the same fiction with
-                                gridlines: the model emitted one number, so one row
-                                is what there is to show. */}
-                            <ForecastTable
-                                rows={perStepForecast
-                                    ? (display.points || [])
-                                    : [getFinalForecastPoint(display.points || [])].filter(Boolean)}
-                                modelKey={display.chartModel === "all" ? "ensemble" : display.chartModel}
-                                label={`${display.tableLabel || "Predicted"} Price`}
-                            />
-                            {!perStepForecast && (
-                                <div style={{ color: C.textDim, fontSize: 11, lineHeight: 1.5 }}>
-                                    One row, because the model produced one number: the {horizon}-day
-                                    endpoint and its interval. The days in between were never predicted.
-                                </div>
-                            )}
-                        </div>
+                ) : historyError && !windowed.length ? (
+                    <div
+                        style={{
+                            height: CHART_HEIGHT,
+                            display: "grid",
+                            placeItems: "center",
+                            color: C.red,
+                            fontSize: 13,
+                        }}
+                    >
+                        {historyError}
                     </div>
-                </>
+                ) : (
+                    <ForecastOverlayChart
+                        bars={windowed}
+                        forecast={points}
+                        direction={direction}
+                        horizon={1}
+                        height={CHART_HEIGHT}
+                    />
+                )}
+            </div>
+
+            {/* ── The answer ── */}
+            {/* The one error state with no way out of itself. A forecast that
+                failed on the network is not retried on window focus (that is off
+                client-wide), and the query key only changes with the symbol or
+                the range — so without this the tab stays broken until the user
+                thinks to touch a control that has nothing to do with the error. */}
+            {error && (
+                <Notice tone="error">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                        <span>{error}</span>
+                        <button
+                            type="button"
+                            onClick={() => query.refetch()}
+                            disabled={query.isFetching}
+                            style={{
+                                background: "transparent",
+                                border: `1px solid ${C.red}66`,
+                                borderRadius: 6,
+                                color: C.red,
+                                padding: "5px 12px",
+                                fontSize: 12,
+                                fontWeight: 800,
+                                cursor: query.isFetching ? "default" : "pointer",
+                                opacity: query.isFetching ? 0.5 : 1,
+                                whiteSpace: "nowrap",
+                            }}
+                        >
+                            {query.isFetching ? "Retrying…" : "Try again"}
+                        </button>
+                    </div>
+                </Notice>
+            )}
+
+            {!error && loading && <ForecastBoxSkeleton symbol={selectedTicker} />}
+
+            {!error && data && !servable && (
+                <Notice>{data.message || `No forecast is available for ${selectedTicker} right now.`}</Notice>
+            )}
+
+            {!error && servable && <ForecastBox forecast={data} />}
+
+            {/* The one way out of this tab. A forecast is a claim about the next
+                bar; this hands that claim — symbol, direction, the close it was
+                made from — to the Backtest tab, which scores the same model
+                against the bars it has already seen. Shown only once there is a
+                forecast to carry, so it never appears as a dead control. */}
+            {!error && servable && typeof onBacktest === "function" && (
+                <button
+                    type="button"
+                    onClick={() =>
+                        onBacktest({
+                            symbol: selectedTicker,
+                            direction: data.direction,
+                            forecastPrice: data.forecast_price,
+                            anchorPrice: data.anchor_price,
+                            expectedChangePct: data.expected_change_pct,
+                            asOf: data.as_of,
+                            horizonLabel: data.horizon_label || "Next 1 Day",
+                            models: data.models || [],
+                        })
+                    }
+                    style={{
+                        background: "transparent",
+                        border: `1px solid ${C.amber}55`,
+                        borderRadius: 10,
+                        color: C.amber,
+                        padding: "14px 18px",
+                        fontSize: 13,
+                        fontWeight: 800,
+                        letterSpacing: "0.02em",
+                        cursor: "pointer",
+                        fontFamily: "inherit",
+                    }}
+                >
+                    Backtest this prediction →
+                </button>
+            )}
+
+            {/* ── Attribution, one line, because that is all it is worth ── */}
+            {servable && data.models?.length > 0 && (
+                <div style={{ color: C.textDim, fontSize: 12, textAlign: "center" }}>
+                    Models: {data.models.join(" · ")}
+                </div>
             )}
         </div>
     );

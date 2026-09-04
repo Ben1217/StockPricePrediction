@@ -36,6 +36,40 @@ DEFAULT_CACHE_DIR = Path("data/cache/ohlcv")
 # Daily bars settle once a session closes; a few hours keeps intraday reruns off
 # the wire without ever serving a stale close for a session that has since ended.
 DEFAULT_TTL_SECONDS = 6 * 3600
+# Yahoo sometimes answers a multi-year request with only its most recent months.
+# Such a frame is not corrupt, just short, so it is cached under a much tighter
+# TTL: refusing to cache it at all would hammer the API for tickers whose
+# history really is short (a recent IPO), while giving it the full TTL is what
+# wedged NVDA predictions behind a 422 for hours -- 153 rows were served from
+# disk for a window the caller needed 260 rows from.
+PARTIAL_TTL_SECONDS = 15 * 60
+# Sessions returned vs. sessions the requested window should hold. The bar sits
+# low on purpose: a ticker that listed midway through the window is legitimately
+# short (PLTR answers a 10-year ask with ~59% coverage), while the truncations
+# seen in practice came back at 12-35%.
+MIN_COVERAGE_RATIO = 0.5
+_SESSIONS_PER_CALENDAR_DAY = 252 / 365.25
+
+
+def expected_sessions(start: str, end: str) -> Optional[float]:
+    """Approximate trading sessions in [start, end], or None if unparseable."""
+    try:
+        span_days = (pd.Timestamp(end) - pd.Timestamp(start)).days
+    except Exception:
+        return None
+    if span_days <= 0:
+        return None
+    return span_days * _SESSIONS_PER_CALENDAR_DAY
+
+
+def is_partial_frame(df: Optional[pd.DataFrame], start: str, end: str) -> bool:
+    """True when `df` covers materially less of [start, end] than it should."""
+    if df is None or df.empty:
+        return False
+    expected = expected_sessions(start, end)
+    if not expected:
+        return False
+    return len(df) < MIN_COVERAGE_RATIO * expected
 
 
 class OHLCVCache:
@@ -65,9 +99,14 @@ class OHLCVCache:
         try:
             meta = json.loads(meta_path.read_text())
             age = time.time() - float(meta["written_at_epoch"])
+            ttl = self.ttl_seconds
+            if meta.get("partial"):
+                # A short frame is re-checked soon, so a truncated response
+                # cannot hold the slot for the whole normal TTL.
+                ttl = min(ttl, PARTIAL_TTL_SECONDS)
             # A ttl of zero means "never serve from cache", so compare
             # inclusively rather than letting a zero-age entry through.
-            if self.ttl_seconds <= 0 or age > self.ttl_seconds:
+            if ttl <= 0 or age > ttl:
                 logger.debug("OHLCV cache expired for %s (age %.0fs)", ticker, age)
                 return None
             df = pd.read_parquet(data_path)
@@ -82,7 +121,16 @@ class OHLCVCache:
             logger.warning("OHLCV cache read failed for %s: %s", ticker, exc)
             return None
 
-    def store(self, ticker: str, start: str, end: str, interval: str, df: pd.DataFrame) -> None:
+    def store(
+        self,
+        ticker: str,
+        start: str,
+        end: str,
+        interval: str,
+        df: pd.DataFrame,
+        *,
+        partial: bool = False,
+    ) -> None:
         if df is None or df.empty:
             return
         data_path, meta_path = self._paths(self._key(ticker, start, end, interval))
@@ -94,6 +142,7 @@ class OHLCVCache:
                 "end": str(end),
                 "interval": interval,
                 "rows": int(len(df)),
+                "partial": bool(partial),
                 "written_at": datetime.now().isoformat(),
                 "written_at_epoch": time.time(),
             }, indent=2))
@@ -146,13 +195,28 @@ def cached_download(
 
     delay = 2.0
     last_exc: Optional[Exception] = None
+    # Longest frame any attempt produced, kept in case they are all short.
+    best_short: Optional[pd.DataFrame] = None
     for attempt in range(1, max_retries + 1):
         try:
             df = downloader()
             if df is not None and not df.empty:
-                cache.store(ticker, start, end, interval, df)
-                return df
-            last_exc = ValueError("empty frame returned")
+                if not is_partial_frame(df, start, end):
+                    cache.store(ticker, start, end, interval, df)
+                    return df
+                # Short frame: either the response was truncated or the ticker
+                # genuinely has little history. Another attempt tells us which,
+                # and caching it now would serve the truncation for hours.
+                if best_short is None or len(df) > len(best_short):
+                    best_short = df
+                last_exc = ValueError(f"partial frame: {len(df)} rows")
+                logger.warning(
+                    "Download for %s [%s..%s] returned %d rows, well under the "
+                    "~%.0f sessions the window should hold; not caching",
+                    ticker, start, end, len(df), expected_sessions(start, end) or 0.0,
+                )
+            else:
+                last_exc = ValueError("empty frame returned")
         except Exception as exc:  # noqa: BLE001 - provider raises many shapes
             last_exc = exc
             message = str(exc).lower()
@@ -168,6 +232,24 @@ def cached_download(
             delay *= 2
 
     stale = _load_ignoring_ttl(cache, ticker, start, end, interval)
+
+    if best_short is not None:
+        # Every attempt agreed the history is short, so treat it as real rather
+        # than as a failure -- but a fuller frame already on disk still wins, so
+        # one truncated response cannot evict five years of bars.
+        if stale is not None and len(stale) > len(best_short):
+            logger.warning(
+                "Preferring STALE cached data for %s (%d rows) over a short fresh frame (%d rows)",
+                ticker, len(stale), len(best_short),
+            )
+            return stale
+        logger.warning(
+            "Serving short frame for %s [%s..%s]: %d rows after %d attempts; caching for %ds only",
+            ticker, start, end, len(best_short), max_retries, PARTIAL_TTL_SECONDS,
+        )
+        cache.store(ticker, start, end, interval, best_short, partial=True)
+        return best_short
+
     if stale is not None:
         logger.warning(
             "Serving STALE cached data for %s after %d failed download attempts (last error: %s)",

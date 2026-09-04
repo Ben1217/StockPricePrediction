@@ -29,7 +29,11 @@ from src.api.schemas.schemas import (
     BestModelForecastResponse,
     ChartForecastPoint,
     DirectionCall,
+    ForecastHistoryResponse,
+    PriceBar,
     SelectedModel,
+    SimpleForecastPoint,
+    SimpleForecastResponse,
     SUPPORTED_FORECAST_HORIZONS,
 )
 from src.data.ohlcv_cache import cached_download
@@ -63,12 +67,17 @@ from src.models.direction_utils import (
     probability_up,
     signal_from_probability,
 )
-from src.models.model_bundle import load_model_bundle
+from src.models.model_bundle import StaleBundleError, load_model_bundle
 from src.models.model_selection import (
     DIRECTION_REPORT_MODELS,
     direction_report_candidates,
     model_label,
     select_best_models,
+)
+from src.models.foundation.forecast_service import (
+    FOUNDATION_MEMBERS,
+    ForecastUnavailable,
+    run_foundation_forecast,
 )
 from src.models.preparation import preparation_state
 from src.utils.logger import get_logger
@@ -192,6 +201,21 @@ def _next_business_date(last_index: pd.Timestamp) -> str:
     date = pd.Timestamp(last_index).tz_localize(None) if pd.Timestamp(last_index).tzinfo else pd.Timestamp(last_index)
     next_date = pd.bdate_range(start=date, periods=2)[1]
     return str(next_date.date())
+
+
+def _load_next_day_bundle(model_type: str, symbol: str):
+    """Load the next-day bundle, treating an unloadable artifact as no bundle.
+
+    A symbol that only ever went through the legacy regression pipeline has a
+    regressor sitting where the direction classifier expects one. Every caller
+    below already answers "no trained bundle" with a train-this-symbol
+    response; without this guard the load raises first and the request 500s.
+    """
+    try:
+        return load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+    except StaleBundleError as exc:
+        logger.warning("Ignoring stale %s bundle for %s: %s", model_type, symbol, exc)
+        return None
 
 
 def _validate_bundle_objective(bundle) -> Optional[str]:
@@ -867,7 +891,7 @@ def _predict_unified_bundle(
     current_price_source: str,
 ) -> PredictResponse:
     """Next-day forecast from a trained unified bundle (XGBoost / Random Forest / LSTM)."""
-    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+    bundle = _load_next_day_bundle(model_type, symbol)
     if bundle is None:
         # Unified bundles are not in the default preparation plan — nothing
         # renders them until a user picks one by name. Asking for one is that
@@ -975,6 +999,12 @@ def _unified_prediction_response(
             "request was served as next-day."
         )
 
+    quantiles = (extra_info or {}).get("quantiles", {})
+    upper95 = quantiles.get(0.95, quantiles.get(0.975, predicted_price))
+    lower95 = quantiles.get(0.05, quantiles.get(0.025, predicted_price))
+    upper68 = quantiles.get(0.84, quantiles.get(0.85, predicted_price))
+    lower68 = quantiles.get(0.16, quantiles.get(0.15, predicted_price))
+
     return PredictResponse(
         symbol=symbol,
         model_type=model_type,
@@ -995,10 +1025,10 @@ def _unified_prediction_response(
             ForecastPoint(
                 date=prediction_date,
                 predicted=round(float(predicted_price), 2),
-                upper95=round(float(predicted_price), 2),
-                lower95=round(float(predicted_price), 2),
-                upper68=round(float(predicted_price), 2),
-                lower68=round(float(predicted_price), 2),
+                upper95=round(float(upper95), 2),
+                lower95=round(float(lower95), 2),
+                upper68=round(float(upper68), 2),
+                lower68=round(float(lower68), 2),
             )
         ],
         model_info=model_info,
@@ -1065,6 +1095,34 @@ def _predict_unified_univariate(
     )
 
 
+from src.models.foundation.kronos_pipeline import KronosPipeline
+from src.models.foundation.chronos_pipeline import ChronosPipeline
+from src.models.foundation.timesfm_pipeline import TimesFMPipeline
+from src.models.foundation.baseline_pipeline import BaselinePipeline
+
+_KRONOS_PIPELINE = None
+_CHRONOS_PIPELINE = None
+_TIMESFM_PIPELINE = None
+_BASELINE_PIPELINE = BaselinePipeline()
+
+def _get_foundation_pipeline(model_type: str):
+    global _KRONOS_PIPELINE, _CHRONOS_PIPELINE, _TIMESFM_PIPELINE
+    if model_type == "unified_kronos":
+        if _KRONOS_PIPELINE is None:
+            _KRONOS_PIPELINE = KronosPipeline()
+        return _KRONOS_PIPELINE
+    elif model_type == "unified_chronos":
+        if _CHRONOS_PIPELINE is None:
+            _CHRONOS_PIPELINE = ChronosPipeline()
+        return _CHRONOS_PIPELINE
+    elif model_type == "unified_timesfm":
+        if _TIMESFM_PIPELINE is None:
+            _TIMESFM_PIPELINE = TimesFMPipeline()
+        return _TIMESFM_PIPELINE
+    elif model_type == "baseline_rw":
+        return _BASELINE_PIPELINE
+    return None
+
 def _predict_unified_model(
     *,
     symbol: str,
@@ -1074,7 +1132,39 @@ def _predict_unified_model(
     current_price: float,
     current_price_source: str,
 ) -> PredictResponse:
-    """Route a ``unified_*`` request to the zero-shot or the trained-bundle path."""
+    pipeline = _get_foundation_pipeline(model_type)
+    if pipeline:
+        try:
+            result = pipeline.predict(raw_df, horizon=1)
+            predicted_price = result["price"]
+            p_up = result["p_up"]
+            return _unified_prediction_response(
+                symbol=symbol,
+                model_type=model_type,
+                requested_horizon=requested_horizon,
+                raw_df=raw_df,
+                current_price=current_price,
+                current_price_source=current_price_source,
+                predicted_price=predicted_price,
+                p_up=p_up,
+                source="foundation_model",
+                can_train=False,
+                extra_info={
+                    "quantiles": result.get("quantiles", {}),
+                    "samples_available": "samples" in result
+                }
+            )
+        except Exception as exc:
+            logger.error(f"Pipeline {model_type} failed: {exc}")
+            return _unavailable_prediction_response(
+                symbol=symbol,
+                model_type=model_type,
+                horizon=requested_horizon,
+                current_price=current_price,
+                current_price_source=current_price_source,
+                reason="pipeline_error",
+                message=f"{model_type} prediction failed: {exc}"
+            )
     arguments = {
         "symbol": symbol,
         "requested_horizon": requested_horizon,
@@ -1082,11 +1172,8 @@ def _predict_unified_model(
         "current_price": current_price,
         "current_price_source": current_price_source,
     }
-    if model_type == "unified_kronos":
-        return _predict_unified_kronos(**arguments)
-    if model_type in ("unified_timesfm", "unified_chronos"):
-        return _predict_unified_univariate(model_type=model_type, **arguments)
     return _predict_unified_bundle(model_type=model_type, **arguments)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1127,7 +1214,7 @@ def predict(req: PredictRequest):
         )
 
     # ── Legacy direction-only bundles (next-day) ─────────────────────────
-    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+    bundle = _load_next_day_bundle(model_type, symbol)
 
     if bundle is None:
         preparation = preparation_state(symbol)
@@ -1666,6 +1753,224 @@ def predict_best_model(
         preparation=(price_response.preparation if price_response else None),
     )
 
+
+# ---------------------------------------------------------------------------
+# GET /api/predict/forecast/{symbol}  — the Predictions tab, in one request
+# ---------------------------------------------------------------------------
+
+def _history_bars(raw_df: pd.DataFrame, days: int) -> List[PriceBar]:
+    """The tail of the download, as candles the chart can draw."""
+    window = raw_df.tail(max(int(days), 1))
+    bars: List[PriceBar] = []
+    for index, row in window.iterrows():
+        values = [row.get(column) for column in ("Open", "High", "Low", "Close")]
+        if any(value is None or not np.isfinite(float(value)) for value in values):
+            continue
+        open_, high, low, close = (float(value) for value in values)
+        volume = row.get("Volume")
+        bars.append(
+            PriceBar(
+                date=str(pd.Timestamp(index).date()),
+                open=round(open_, 4),
+                high=round(high, 4),
+                low=round(low, 4),
+                close=round(close, 4),
+                volume=int(volume) if volume is not None and np.isfinite(float(volume)) else 0,
+            )
+        )
+    return bars
+
+
+@router.get("/history/{symbol}", response_model=ForecastHistoryResponse)
+def forecast_history(
+    symbol: str,
+    days: int = Query(252, ge=30, le=1260, description="Historical candles to return."),
+):
+    """
+    Just the candles, off the model path entirely.
+
+    The Predictions tab draws its chart from this and asks for the forecast
+    separately, because the two cost three orders of magnitude apart: the OHLCV
+    download is ~0.08s cold and free once cached, while the forecast is ~7s
+    dominated by Kronos sampling 128 transformer paths. Serving both from one
+    handler -- which is what this route was split out of -- meant the chart sat
+    blank for seven seconds waiting on numbers that go in a box underneath it.
+
+    It reads the SAME `_download_prediction_data` the forecast does, so the bars
+    here are the bars the models saw rather than a differently-adjusted series
+    from the generic price route. The 6-hour OHLCV cache keeps the two calls on
+    one frame; if they ever disagree, the chart drops a forecast point that is
+    not strictly after its last candle rather than anchoring it to the wrong bar.
+
+    No live quote is fetched here. `_latest_available_price` costs ~1.25s in
+    yfinance `get_info` calls and the candles do not need it.
+    """
+    symbol = symbol.upper()
+    raw_df = _download_prediction_data(symbol)
+    return ForecastHistoryResponse(
+        symbol=symbol,
+        as_of=str(pd.Timestamp(raw_df.index[-1]).date()),
+        bars=_history_bars(raw_df, days),
+    )
+
+
+#: Model output by (symbol, last bar date). The forecast depends only on the
+#: bars, so it cannot change until a new one prints -- but it costs ~7s to
+#: produce, and re-selecting a symbol used to pay that again. Keyed on the bar
+#: rather than on a clock, so a new session invalidates it exactly.
+#:
+#: Only the FoundationForecast is cached, and it holds nothing quote-derived:
+#: the price, the direction and the anchor all come off the bars. The current
+#: price, the change measured against it and the "quote" split are recomputed
+#: per request, because those do move intraday and serving a cached quote would
+#: print a stale "Current Price".
+_FORECAST_CACHE: TTLCache = TTLCache(maxsize=256, ttl=6 * 3600)
+_FORECAST_CACHE_LOCK = threading.Lock()
+
+
+def _cached_foundation_forecast(symbol: str, raw_df: pd.DataFrame, as_of: str):
+    """
+    The model output for ``symbol`` on the bar ``as_of``, computed at most once.
+
+    The forecast is a pure function of the bars, so it cannot change until a new
+    session prints -- and it costs ~7s to produce, almost all of it Kronos
+    sampling 128 transformer paths. Without this, re-selecting a symbol paid
+    that again for a number that could not have moved.
+
+    No live quote reaches this function, and none can: the forecast is anchored
+    to the last close and nothing else, which is what makes (symbol, bar) a
+    complete key. Everything that depends on a quote -- the change measured
+    against it, and the "quote" split -- is recomputed by the caller per request.
+    """
+    key = (symbol, as_of)
+    with _FORECAST_CACHE_LOCK:
+        hit = _FORECAST_CACHE.get(key)
+    if hit is not None:
+        logger.debug("%s: forecast served from cache for bar %s", symbol, as_of)
+        return hit
+
+    # Deliberately computed outside the lock. This takes seconds, and holding a
+    # global lock across it would serialise every symbol behind whichever one
+    # arrived first. Two concurrent requests for the same cold symbol may both
+    # compute; they produce the same answer, so the duplicate work is wasted but
+    # never wrong -- which is the better trade against blocking every other
+    # symbol in the watchlist.
+    result = run_foundation_forecast(
+        raw_df,
+        pipeline_factory=_get_foundation_pipeline,
+        symbol=symbol,
+    )
+    with _FORECAST_CACHE_LOCK:
+        _FORECAST_CACHE[key] = result
+    return result
+
+
+@router.get("/forecast/{symbol}", response_model=SimpleForecastResponse)
+def simple_forecast(symbol: str):
+    """
+    The forecast alone. The candles come from ``GET /predict/history/{symbol}``.
+
+    The full pipeline runs here — OHLCV, the five technical-analysis feature
+    families, Kronos, Chronos-2 and TimesFM 2.5, then inverse-variance
+    aggregation — and none of it is in the response. What comes back is the next
+    bar the models predict and the direction they call.
+
+    This used to return the candles too, which made the chart wait on the
+    models: the bars are a cached download and the forecast is ~7s of transformer
+    sampling, so bundling them held a chart that was ready in 0.08s for two
+    orders of magnitude longer than it needed. The models still read the full
+    download rather than any chart window, because the feature layer needs long
+    windows (SMA_200 among them) that a short request would silently truncate.
+    """
+    symbol = symbol.upper()
+    raw_df = _download_prediction_data(symbol)
+    as_of = str(pd.Timestamp(raw_df.index[-1]).date())
+    current_price, current_price_source = _latest_available_price(symbol, raw_df)
+
+    try:
+        result = _cached_foundation_forecast(symbol, raw_df, as_of)
+    except ForecastUnavailable as exc:
+        logger.info("%s: no foundation forecast — %s (%s)", symbol, exc.message, exc.members_failed)
+        # A 200 with status "unavailable": the chart is drawn from its own
+        # request and is worth showing even when the box has nothing to say, so
+        # an error code here would be reported as a failure of both.
+        return SimpleForecastResponse(
+            symbol=symbol,
+            status="unavailable",
+            message=exc.message,
+            as_of=as_of,
+            # Known without any model: it is just the last bar's close.
+            anchor_price=round(float(raw_df["Close"].iloc[-1]), 2),
+            current_price=round(float(current_price), 2),
+            current_price_source=current_price_source,
+        )
+
+    # Two reference prices, and the response has to keep them apart.
+    #
+    # `anchor` is the close the models read: every member computes p_up as
+    # P(next bar > anchor), so the direction call and the expected move both
+    # belong to it. The quote is a live price from a session no model saw --
+    # `_download_prediction_data` ends its window at today's date and yfinance
+    # treats that end as exclusive, so the frame stops at the previous session
+    # however fresh the request is.
+    #
+    # Dividing the forecast by the quote and labelling the result "Expected
+    # Change" is what put +3.8% beside a DOWN arrow on PLTR: the stock had
+    # fallen 4% since the anchor, so a forecast 0.26% BELOW the bar the models
+    # read still landed well above the quote. Both figures are served, each
+    # named for what it is measured against.
+    anchor = float(result.anchor_price)
+    change_pct = ((result.price / anchor) - 1.0) * 100.0 if anchor else 0.0
+    quote_change_pct = ((result.price / current_price) - 1.0) * 100.0 if current_price else 0.0
+
+    # `result.split` is the two heads disagreeing on one price, which is the
+    # model's to report and travels with the cached run. The quote gap is not a
+    # disagreement at all -- it is the box showing a price the forecast was
+    # never about -- but it reads as one, so it is detected here, per request,
+    # where the quote is. It cannot be cached: the quote moves and the forecast
+    # under it does not.
+    rises_from_anchor = result.price >= anchor
+    if result.split:
+        split_reason = "heads"
+    elif current_price and rises_from_anchor != (result.price >= float(current_price)):
+        split_reason = "quote"
+    else:
+        split_reason = None
+
+    forecast_date = _next_business_date(raw_df.index[-1])
+    point = SimpleForecastPoint(
+        date=forecast_date,
+        predicted=round(result.price, 2),
+        upper_90=round(result.upper_90, 2),
+        lower_90=round(result.lower_90, 2),
+        upper_68=round(result.upper_68, 2),
+        lower_68=round(result.lower_68, 2),
+        # The chart hangs this segment off the last candle's close, so it is
+        # coloured by the move from that close. Measured against the quote
+        # instead, a segment drawn falling was painted green.
+        direction="up" if rises_from_anchor else "down",
+        change_pct=round(change_pct, 2),
+    )
+
+    return SimpleForecastResponse(
+        symbol=symbol,
+        status="ok",
+        as_of=as_of,
+        anchor_price=round(anchor, 2),
+        current_price=round(float(current_price), 2),
+        current_price_source=current_price_source,
+        forecast_price=round(result.price, 2),
+        expected_change_pct=round(change_pct, 2),
+        quote_change_pct=round(quote_change_pct, 2),
+        direction=result.direction,
+        forecast_date=forecast_date,
+        models=result.members_used,
+        split=split_reason is not None,
+        split_reason=split_reason,
+        forecast=[point],
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /api/predict/historical-signals/{symbol}
 # ---------------------------------------------------------------------------
@@ -1679,7 +1984,7 @@ def get_historical_signals(
     """Return recent next-day direction signals using the saved bundle."""
     symbol = symbol.upper()
     raw_df = _download_prediction_data(symbol)
-    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+    bundle = _load_next_day_bundle(model_type, symbol)
     if bundle is None:
         raise HTTPException(404, f"No trained {model_type} horizon-1 model bundle found for {symbol}")
     if _validate_bundle_objective(bundle):
@@ -1718,138 +2023,129 @@ def get_historical_signals(
 @router.post("/ensemble", response_model=EnsemblePredictResponse)
 def ensemble_predict(req: EnsemblePredictRequest):
     """
-    Run the weighted ensemble price-regression forecast.
+    The foundation ensemble, as an ``EnsemblePredictResponse``.
+
+    Same three models and same aggregation as ``GET /predict/forecast`` --
+    both delegate to :func:`run_foundation_forecast`, which is the point: this
+    handler used to carry its own copy of the member loop, the quantile
+    averaging and the interval assembly, so the two paths could drift into
+    disagreeing about the same symbol on the same bar. There is one
+    implementation now, and this endpoint is the older response shape over it,
+    kept for the Analysis tab's model panel.
+
+    The horizon is accepted and echoed but does not change the forecast: every
+    member answers for the next bar (see :func:`run_foundation_forecast`). It is
+    part of the request shape this endpoint has always had.
     """
     symbol = req.symbol.upper()
     horizon = req.horizon
 
-    try:
-        raw_df = _download_prediction_data(symbol)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(500, f"Failed to download data for {symbol}: {exc}")
-
+    # _download_prediction_data raises HTTPException, which FastAPI turns into the
+    # right response on its own, so it is left to propagate.
+    raw_df = _download_prediction_data(symbol)
+    as_of = str(pd.Timestamp(raw_df.index[-1]).date())
     current_price, current_price_source = _latest_available_price(symbol, raw_df)
 
-    servable, blocked = ensemble_availability(symbol, horizon)
-    if not servable:
-        # Every member is unservable. Start the training that can fix that and
-        # report it as work in progress; the client polls instead of being told
-        # to go and run a command. When training cannot help — the bundles are
-        # there and failed their skill gate — `preparation` comes back None and
-        # the status stays "unavailable" with the measured reason.
-        preparation = preparation_state(symbol)
-        detail = next(iter(blocked.values()), "no bundles are trained")
-        preparing = bool(preparation and preparation.get("status") in ("queued", "running"))
+    try:
+        result = run_foundation_forecast(
+            raw_df,
+            pipeline_factory=_get_foundation_pipeline,
+            symbol=symbol,
+        )
+    except ForecastUnavailable as exc:
         return EnsemblePredictResponse(
             symbol=symbol,
-            current_price=round(current_price, 2),
+            as_of=as_of,
+            # Known without any model: it is just the last bar's close.
+            anchor_price=round(float(raw_df["Close"].iloc[-1]), 2),
+            current_price=round(float(current_price), 2),
             current_price_source=current_price_source,
             horizon=horizon,
-            status="preparing" if preparing else "unavailable",
+            status="unavailable",
             model_available=False,
-            models_unavailable=blocked,
-            message=_unavailable_message(symbol, horizon, detail, preparation),
-            preparation=preparation,
+            models_unavailable=exc.members_failed,
+            message=exc.message,
         )
 
-    # Serve with whatever members are ready. Only the servable types are requested
-    # so a blocked bundle cannot slip in through the predictor's own loading path.
-    predictor = EnsemblePricePredictor()
-    forecast = predictor.predict(
-        symbol=symbol,
-        horizon=horizon,
-        raw_df=raw_df,
-        model_types=servable,
-        current_price=current_price,
+    # Measured against the close the models read, exactly as GET
+    # /predict/forecast does -- and for a sharper reason here, because the
+    # Analysis tab prints this change and `signal` in one string. Divided by a
+    # live quote instead, the tile read "+3.82% . DOWN" on a day PLTR had
+    # already gapped 4% below the last bar the ensemble saw.
+    anchor = float(result.anchor_price)
+    change_pct = ((result.price / anchor) - 1.0) * 100.0 if anchor else 0.0
+    quote_change_pct = ((result.price / current_price) - 1.0) * 100.0 if current_price else 0.0
+    prediction_date = _next_business_date(raw_df.index[-1])
+
+    # "Reliability" describes the width of the aggregated 90% interval relative
+    # to the price the band is drawn around -- dispersion, which is the only
+    # thing this response actually knows. It is deliberately NOT a calibration
+    # claim: no coverage check has been run here (Addendum A Requirement 6.3),
+    # so the label speaks about spread rather than confidence.
+    #
+    # The anchor is the denominator for the same reason it is everywhere else.
+    # A quote a session away scales this ratio by however far it has moved, and
+    # the buckets below are 2% and 5% wide -- narrow enough for a 4% gap to
+    # relabel a band that had not changed.
+    relative_width = (result.upper_90 - result.lower_90) / anchor if anchor else float("inf")
+    if relative_width <= 0.02:
+        reliability = "Narrow spread"
+    elif relative_width <= 0.05:
+        reliability = "Moderate spread"
+    else:
+        reliability = "Wide spread"
+
+    bounds = {
+        "upper_90": round(result.upper_90, 2),
+        "lower_90": round(result.lower_90, 2),
+        "upper_68": round(result.upper_68, 2),
+        "lower_68": round(result.lower_68, 2),
+    }
+    point = EnsembleForecastPoint(
+        date=prediction_date,
+        ensemble=round(result.price, 2),
+        prediction=round(result.price, 2),
+        **bounds,
     )
-
-    if forecast is None:
-        return EnsemblePredictResponse(
-            symbol=symbol,
-            current_price=round(current_price, 2),
-            current_price_source=current_price_source,
-            horizon=horizon,
-            status="error",
-            model_available=False,
-            message="Ensemble prediction failed - check server logs.",
-        )
-
-    points = []
-    for p in forecast.forecast_points:
-        prediction_value = p.get("prediction", p.get("predicted", p.get("ensemble", 0.0)))
-        points.append(
-            EnsembleForecastPoint(
-                date=p["date"],
-                ensemble=prediction_value,
-                prediction=prediction_value,
-                lstm=p.get("lstm"),
-                xgboost=p.get("xgboost"),
-                random_forest=p.get("random_forest"),
-                upper_90=p.get("upper_95", p.get("upper", 0.0)),
-                lower_90=p.get("lower_95", p.get("lower", 0.0)),
-                upper_95=p.get("upper_95", p.get("upper")),
-                lower_95=p.get("lower_95", p.get("lower")),
-                upper_68=p.get("upper_68"),
-                lower_68=p.get("lower_68"),
-            )
-        )
-
     summary = EnsembleSummary(
-        target=forecast.predicted_price,
-        change_pct=forecast.expected_change_pct,
-        upper_90=forecast.confidence_interval["upper"] if forecast.confidence_interval else forecast.predicted_price,
-        lower_90=forecast.confidence_interval["lower"] if forecast.confidence_interval else forecast.predicted_price,
-        upper_95=forecast.confidence_interval["upper"] if forecast.confidence_interval else forecast.predicted_price,
-        lower_95=forecast.confidence_interval["lower"] if forecast.confidence_interval else forecast.predicted_price,
-        upper_68=points[-1].upper_68 if points and points[-1].upper_68 is not None else forecast.predicted_price,
-        lower_68=points[-1].lower_68 if points and points[-1].lower_68 is not None else forecast.predicted_price,
-        reliability=forecast.reliability,
-        consensus=forecast.reason,
-        signal=forecast.signal,
+        target=round(result.price, 2),
+        change_pct=round(change_pct, 2),
+        quote_change_pct=round(quote_change_pct, 2),
+        reliability=reliability,
+        consensus="Foundation Aggregation",
+        signal=result.direction,
+        **bounds,
     )
 
-    weights_dict = {r.model_type: r.weight for r in forecast.model_predictions}
-
-    # A partial ensemble still answers, so this is served rather than blocked.
-    # Preparation is started anyway: the missing member is trained in the
-    # background and the next request gets the full ensemble, with no one having
-    # been shown a training button. `preparation_state` is a no-op when the gap
-    # is a failed skill gate, which training would not close.
-    degraded_message = None
-    degraded_preparation = None
-    if blocked:
-        degraded_preparation = preparation_state(symbol)
-        degraded_message = (
-            f"Partial ensemble: {', '.join(servable)} served; "
-            + "; ".join(f"{m} excluded because {why}" for m, why in blocked.items())
-            + (
-                ". The missing member is training in the background."
-                if degraded_preparation and degraded_preparation.get("status") in ("queued", "running")
-                else "."
-            )
-        )
-
+    # A member that failed is reported rather than quietly dropped: a forecast
+    # built from two of three models is still a forecast, but the client has to
+    # be able to say so instead of presenting it as the full ensemble.
+    unavailable = {
+        name: reason
+        for name, reason in result.members_failed.items()
+        if name in FOUNDATION_MEMBERS
+    }
     return EnsemblePredictResponse(
-        symbol=forecast.symbol,
-        current_price=forecast.current_price,
+        symbol=symbol,
+        as_of=as_of,
+        anchor_price=round(anchor, 2),
+        current_price=round(float(current_price), 2),
         current_price_source=current_price_source,
-        horizon=forecast.horizon,
-        ensemble=summary,
-        weights=weights_dict,
-        forecast_points=points,
+        horizon=horizon,
         status="ok",
         model_available=True,
-        message=degraded_message,
-        models_available=servable,
-        models_unavailable=blocked,
-        degraded=bool(blocked),
-        preparation=degraded_preparation,
-        scenario_paths=forecast.scenario_paths,
-        path_type=getattr(forecast, "path_type", "compounded_interpolation"),
-        per_step_predictions=getattr(forecast, "per_step_predictions", False),
-        model_output_count=getattr(forecast, "model_output_count", 0),
+        ensemble=summary,
+        forecast_points=[point],
+        weights=result.weights,
+        model_output_count=len(result.weights),
+        models_available=[name for name in FOUNDATION_MEMBERS if name in result.weights],
+        models_unavailable=unavailable,
+        degraded=bool(unavailable),
+        message=(
+            "Served without "
+            + ", ".join(FOUNDATION_MEMBERS[name] for name in unavailable)
+            + "."
+        ) if unavailable else None,
     )
 
 

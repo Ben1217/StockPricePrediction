@@ -247,6 +247,35 @@ export async function fetchBestModelForecast(symbol, horizon = 30) {
     return apiFetch(`/predict/best/${encodeSymbol(symbol)}?horizon=${horizon}`);
 }
 
+/**
+ * The candles the Predictions tab draws — no models, no live quote.
+ *
+ * Deliberately separate from `fetchSimpleForecast`. These come off a cached
+ * OHLCV download in milliseconds; the forecast is seconds of transformer
+ * sampling. Asking for them together is what made the chart wait on the box.
+ *
+ * Same server-side download the models read, so the bars are the bars the
+ * forecast was built on rather than a differently-adjusted series.
+ */
+export async function fetchForecastHistory(symbol, days = 252) {
+    return apiFetch(`/predict/history/${encodeSymbol(symbol)}?days=${days}`);
+}
+
+/**
+ * The forecast alone: next bar, direction, and the band around it.
+ *
+ * The server runs the whole pipeline — OHLCV, the technical-analysis features,
+ * Kronos, Chronos-2 and TimesFM 2.5, then the aggregation — and answers with
+ * only what is shown. There is deliberately nothing here to reconcile
+ * client-side.
+ *
+ * A 200 with `status: "unavailable"` is a normal answer, and the chart is
+ * unaffected by it: the candles arrive from their own request.
+ */
+export async function fetchSimpleForecast(symbol) {
+    return apiFetch(`/predict/forecast/${encodeSymbol(symbol)}`);
+}
+
 // ── Next-day direction ───────────────────────────────────────
 /**
  * Walk-forward evaluation, the gated P(up tomorrow) gauge, the rolling hit-rate
@@ -343,6 +372,25 @@ export async function runBacktest(params) {
     });
 }
 
+/**
+ * The walk-forward record for a symbol — the out-of-sample scorecard, not a
+ * trading simulation.
+ *
+ * Distinct from `runBacktest`, which simulates one strategy over one period.
+ * This reads what the benchmark already measured: purged folds, excess over
+ * base rate, the verdict against the random walk, and the forecast's worth
+ * after costs.
+ *
+ * `models` comes back empty rather than as a 404 when nothing has scored the
+ * symbol yet; `message` carries the command that would fix that. A record
+ * written before the null tests existed reports those fields as null rather
+ * than as zero, and the message says so.
+ */
+export async function fetchBacktestEvidence(symbol, model) {
+    const query = model ? `?model=${encodeURIComponent(model)}` : "";
+    return apiFetch(`/backtest/evidence/${encodeSymbol(symbol)}${query}`);
+}
+
 export async function listBacktests() {
     return apiFetch("/backtest/results");
 }
@@ -366,9 +414,63 @@ export async function fetchFrontier(params) {
     });
 }
 
-export async function fetchPortfolioMetrics(symbols, lookback = 252) {
-    const sym = Array.isArray(symbols) ? symbols.join(",") : symbols;
-    return apiFetch(`/portfolio/metrics?symbols=${sym}&lookback=${lookback}`);
+function symbolList(symbols) {
+    const list = Array.isArray(symbols) ? symbols : String(symbols || "").split(",");
+    return list.map((item) => String(item || "").trim().toUpperCase()).filter(Boolean);
+}
+
+/**
+ * How a given split of money would have performed over the lookback window.
+ *
+ * `weights` is the whole point: pass a ticker→weight map and the server scores
+ * that exact allocation, which is what makes "your current split" and "the
+ * optimizer's split" comparable — the same window, the same maths, one variable
+ * changed. Omit it and the server assumes equal weights.
+ *
+ * Every number that comes back is measured on history. None of it is a forecast.
+ */
+export async function fetchPortfolioMetrics(
+    symbols,
+    { lookback = 252, weights = null, includeAttribution = false } = {},
+) {
+    const params = new URLSearchParams({
+        symbols: symbolList(symbols).join(","),
+        lookback: String(lookback),
+    });
+    if (weights) params.set("weights", JSON.stringify(weights));
+    if (includeAttribution) params.set("include_attribution", "true");
+    return apiFetch(`/portfolio/metrics?${params.toString()}`);
+}
+
+/**
+ * How closely the holdings move together, pairwise.
+ *
+ * This is the number that explains diversification without jargon: two stocks
+ * at 0.9 are very nearly one position wearing two names, and owning both buys
+ * far less protection than the position count suggests. `high_corr_pairs`
+ * names the offenders directly.
+ */
+export async function fetchCorrelation(symbols, lookbackDays = 90) {
+    const params = new URLSearchParams({
+        symbols: symbolList(symbols).join(","),
+        lookback_days: String(lookbackDays),
+    });
+    return apiFetch(`/portfolio/correlation?${params.toString()}`);
+}
+
+/**
+ * Risk-limit breaches for one allocation — concentration, sector, drawdown.
+ *
+ * Answers "what is wrong with how my money is split right now" in sentences a
+ * reader can act on, rather than leaving them to infer it from a weights table.
+ */
+export async function fetchRiskAlerts(symbols, weights, lookbackDays = 90) {
+    const params = new URLSearchParams({
+        symbols: symbolList(symbols).join(","),
+        weights: JSON.stringify(weights || {}),
+        lookback_days: String(lookbackDays),
+    });
+    return apiFetch(`/portfolio/alerts?${params.toString()}`);
 }
 
 // ── Agent ────────────────────────────────────────────────────

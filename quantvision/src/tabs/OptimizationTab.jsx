@@ -1,12 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
     ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip,
-    ResponsiveContainer, RadarChart, Radar, PolarGrid, PolarAngleAxis,
-    PolarRadiusAxis, Legend
+    ResponsiveContainer
 } from "recharts";
 import { C } from "../utils/data";
-import { optimizePortfolio, fetchFrontier } from "../utils/api";
-import { StatCard, Section, ChartTooltip, Hint } from "../components/UIComponents";
+import { optimizePortfolio, fetchFrontier, fetchCorrelation } from "../utils/api";
+import { StatCard, Section, Hint } from "../components/UIComponents";
 
 /**
  * The four objectives the backend actually accepts (OptimizationMethod in
@@ -32,24 +31,29 @@ const METHODS = {
     },
 };
 
-export default function OptimizationTab({ apiConnected, notify }) {
-    const [symbols, setSymbols] = useState("AAPL,MSFT,GOOGL,AMZN,NVDA");
+export default function OptimizationTab({ apiConnected, notify, watchlist = [] }) {
+    // Seeded from the watchlist rather than a fixed list, so the tab explores
+    // the symbols this user actually follows.
+    const [symbols, setSymbols] = useState(() => (watchlist.length ? watchlist.join(",") : ""));
     const [method, setMethod] = useState("max_sharpe");
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState(null);
     const [frontier, setFrontier] = useState(null);
+    const [correlation, setCorrelation] = useState(null);
     const [error, setError] = useState(null);
 
     const runOptimize = async () => {
         setLoading(true); setError(null);
         const symList = symbols.split(",").map(s => s.trim()).filter(Boolean);
         try {
-            const [opt, front] = await Promise.all([
+            const [opt, front, corr] = await Promise.all([
                 optimizePortfolio({ symbols: symList, method }),
                 fetchFrontier({ symbols: symList, method }).catch(() => null),
+                fetchCorrelation(symList).catch(() => null),
             ]);
             setResult(opt);
             setFrontier(front);
+            setCorrelation(corr);
             notify?.("Optimization complete");
         } catch (e) { setError(e.message); }
         setLoading(false);
@@ -65,14 +69,6 @@ export default function OptimizationTab({ apiConnected, notify }) {
     const weightData = Object.entries(weights).map(([sym, w]) => ({
         name: sym, weight: Math.round(w * 100),
     }));
-
-    const radarData = [
-        { metric: "Return", value: Math.min(100, ((result?.expected_return || 0) + 0.05) * 200) },
-        { metric: "Sharpe", value: Math.min(100, (result?.sharpe_ratio || 0) * 40) },
-        { metric: "Low Vol", value: Math.min(100, (1 - (result?.volatility || 0.2)) * 100) },
-        { metric: "Diversif.", value: Math.min(100, Object.keys(weights).length * 20) },
-        { metric: "Liquidity", value: 85 },
-    ];
 
     const inputStyle = {
         background: C.bg2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 6,
@@ -141,7 +137,7 @@ export default function OptimizationTab({ apiConnected, notify }) {
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
                     <Section title="OPTIMAL WEIGHTS"
                         hint="How much of every $100 to put in each stock. Positions are capped at 40% and floored at 2% by default.">
-                        {weightData.map((d, i) => (
+                        {weightData.map((d) => (
                             <div key={d.name} style={{ marginBottom: 12 }}>
                                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                                     <span style={{ color: C.amber, fontWeight: 700, fontSize: 12 }}>{d.name}</span>
@@ -180,15 +176,81 @@ export default function OptimizationTab({ apiConnected, notify }) {
 
                 {/* Radar + Metrics table */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
-                    <Section title="RISK PROFILE">
-                        <ResponsiveContainer width="100%" height={250}>
-                            <RadarChart data={radarData}>
-                                <PolarGrid stroke={C.border} />
-                                <PolarAngleAxis dataKey="metric" tick={{ fill: C.textDim, fontSize: 10 }} />
-                                <PolarRadiusAxis tick={false} domain={[0, 100]} />
-                                <Radar dataKey="value" stroke={C.cyan} fill={C.cyan} fillOpacity={0.2} />
-                            </RadarChart>
-                        </ResponsiveContainer>
+                    {/* Replaces a radar chart whose five axes were rescalings
+                        invented for the picture — including a "Liquidity" spoke
+                        pinned at a constant 85 with no data behind it. This is
+                        the measured thing that radar was gesturing at: how alike
+                        the holdings are, which is the entire reason a split can
+                        beat a concentrated bet. */}
+                    <Section
+                        title="HOW ALIKE ARE THESE STOCKS?"
+                        hint="Correlation of daily returns over the last 90 days. 1.00 means two names moved in lockstep, 0 means they moved independently, and below 0 means they tended to move opposite ways. Diversification is exactly what you buy by holding names that do not move together."
+                    >
+                        {correlation?.matrix && correlation?.tickers?.length ? (
+                            <>
+                                <div style={{ color: C.textMid, fontSize: 12, marginBottom: 12 }}>
+                                    Average pair:{" "}
+                                    <span style={{ color: C.cyan, fontFamily: "'DM Mono',monospace", fontWeight: 700 }}>
+                                        {Number(correlation.avg_correlation).toFixed(2)}
+                                    </span>
+                                    <span style={{ color: C.textDim }}>
+                                        {" "}— lower is better diversified.
+                                    </span>
+                                </div>
+                                <div style={{ overflowX: "auto" }}>
+                                    <table style={{ borderCollapse: "collapse", fontSize: 11, fontFamily: "'DM Mono',monospace" }}>
+                                        <thead>
+                                            <tr>
+                                                <th style={{ padding: "6px 8px" }} />
+                                                {correlation.tickers.map(t => (
+                                                    <th key={t} style={{ padding: "6px 8px", color: C.textDim, fontWeight: 400 }}>{t}</th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {correlation.tickers.map(row => (
+                                                <tr key={row}>
+                                                    <td style={{ padding: "6px 8px", color: C.amber, fontWeight: 700 }}>{row}</td>
+                                                    {correlation.tickers.map(col => {
+                                                        const value = Number(correlation.matrix[row]?.[col]);
+                                                        const self = row === col;
+                                                        // Tint by strength: strongly-paired names are the
+                                                        // ones a reader should notice.
+                                                        const tint = !Number.isFinite(value) || self
+                                                            ? "transparent"
+                                                            : value >= 0.8 ? `${C.red}33`
+                                                                : value >= 0.5 ? `${C.amber}26`
+                                                                    : value <= 0 ? `${C.green}22` : "transparent";
+                                                        return (
+                                                            <td key={col} style={{
+                                                                padding: "6px 8px", textAlign: "right",
+                                                                background: tint,
+                                                                color: self ? C.textDim : C.text,
+                                                            }}>
+                                                                {Number.isFinite(value) ? value.toFixed(2) : "—"}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {correlation.high_corr_pairs?.length > 0 && (
+                                    <div style={{ color: C.textMid, fontSize: 11.5, marginTop: 12, lineHeight: 1.6 }}>
+                                        Moving closely together:{" "}
+                                        {correlation.high_corr_pairs
+                                            .map(p => `${p.ticker_a}/${p.ticker_b} (${Number(p.correlation).toFixed(2)})`)
+                                            .join(", ")}
+                                        . Holding both buys less protection than the position count suggests.
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div style={{ color: C.textDim, padding: 40, textAlign: "center", fontSize: 12 }}>
+                                Run optimization to see how closely these move together
+                            </div>
+                        )}
                     </Section>
                     <Section title="OPTIMIZATION METRICS"
                         hint="How this mix would have behaved over the lookback window, had you held it the whole time.">

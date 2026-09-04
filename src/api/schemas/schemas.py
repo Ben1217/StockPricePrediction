@@ -46,6 +46,7 @@ class ModelTypeEnum(str, Enum):
     unified_kronos = "unified_kronos"
     unified_timesfm = "unified_timesfm"
     unified_chronos = "unified_chronos"
+    baseline_rw = "baseline_rw"
 
 
 #: Model types a training request can target. The foundation models are
@@ -359,6 +360,121 @@ class BestModelForecastResponse(BaseModel):
     message: Optional[str] = None
     preparation: Optional[Dict] = None
 
+
+class ForecastHistoryResponse(BaseModel):
+    """
+    The candles the Predictions tab draws, with no forecast attached.
+
+    Split out from :class:`SimpleForecastResponse` because the two halves cost
+    three orders of magnitude apart -- the bars are a cached download, the
+    forecast is ~7s of transformer sampling -- and bundling them made the chart
+    wait on the box. ``as_of`` is the last bar, so a client can tell whether a
+    forecast it holds was built on this same frame.
+    """
+
+    symbol: str
+    as_of: Optional[str] = None
+    bars: List[PriceBar] = Field(default_factory=list)
+
+
+class SimpleForecastPoint(BaseModel):
+    """
+    One future bar and the band around it.
+
+    Named for the coverage the bounds actually have. ``ChartForecastPoint`` --
+    which this deliberately does not reuse -- calls its outer pair
+    ``upper95``/``lower95``, and the foundation ensemble's outer pair is the
+    q0.05/q0.95 quantiles, which bracket 90% of the mass rather than 95%.
+    Reusing that schema would have published a 90% interval under a name
+    claiming five points more coverage than it has.
+    """
+
+    date: str
+    predicted: float
+    upper_90: float
+    lower_90: float
+    upper_68: float
+    lower_68: float
+    #: Sign of the move away from ``SimpleForecastResponse.anchor_price``, so
+    #: the chart can colour the segment. The chart hangs this line off the last
+    #: candle's close, so it has to be measured from that same close: against a
+    #: live quote from a later session it once painted a falling segment green.
+    #: Not the direction call -- that is one probability, served once.
+    direction: str  # "up" | "down"
+    change_pct: float
+
+
+class SimpleForecastResponse(BaseModel):
+    """
+    The whole Predictions tab, in one payload.
+
+    Deliberately small. The tab answers two questions -- what is the next price,
+    and is it up or down -- so this carries the candles to draw, the one forecast
+    point that continues them, and the four numbers in the forecast box. The
+    feature assembly, the three model runs and the aggregation that produced them
+    stay on the server; none of that reaches this schema, because none of it
+    belongs on the screen.
+
+    The candles are NOT here: they come from ``GET /predict/history/{symbol}``,
+    because they are ready in milliseconds and this is not. ``as_of`` names the
+    bar the models read, so a client holding both can tell they describe the
+    same frame -- and the chart drops any forecast point that is not strictly
+    after its last candle, so a mismatch degrades to "no forecast drawn" rather
+    than to a point anchored on the wrong bar.
+    """
+
+    symbol: str
+    #: "ok" | "unavailable". Unavailable is a normal answer with a `message`.
+    status: str = "ok"
+    message: Optional[str] = None
+
+    #: Date of the last historical bar -- the session `anchor_price` closed at.
+    as_of: Optional[str] = None
+    #: The close the models measured against. `direction` is P(next bar > this)
+    #: thresholded at 0.5, and `expected_change_pct` is the move away from it,
+    #: so the two are readings of one bar rather than of two reference prices.
+    anchor_price: Optional[float] = None
+    #: The live quote. It can be a whole session later than `anchor_price` --
+    #: the download window ends at today's date and yfinance treats that end as
+    #: exclusive, so the frame always stops at the previous session -- and no
+    #: model saw it. Context for the reader, never the reference for a number.
+    current_price: Optional[float] = None
+    current_price_source: Optional[str] = None
+
+    forecast_price: Optional[float] = None
+    #: The forecast move away from `anchor_price`.
+    expected_change_pct: Optional[float] = None
+    #: The same forecast against the live quote. This is the figure that reads
+    #: +3.8% when a stock has fallen 4% since the bar the models read, and it
+    #: is named separately so it can never be printed as "Expected Change".
+    quote_change_pct: Optional[float] = None
+    #: "UP" | "DOWN", from the aggregated probability rather than the price.
+    direction: Optional[str] = None
+    #: The bar being forecast, and how it is written in the box.
+    forecast_date: Optional[str] = None
+    horizon_label: str = "Next 1 Day"
+
+    #: Display names of the members behind this number, for the one-line footer.
+    models: List[str] = Field(default_factory=list)
+    #: Set when the rows above would otherwise read as self-contradictory. One
+    #: short line in the UI, not a panel -- and `split_reason` says which line,
+    #: because the two causes need different sentences and writing the rarer
+    #: one over the commoner case described a model disagreement that was not
+    #: happening.
+    split: bool = False
+    #: Why `split` is set, or None:
+    #:
+    #:   "heads"  the aggregated probability and the aggregated price disagree
+    #:            on `anchor_price`. Rare, and genuinely the models disagreeing.
+    #:   "quote"  the two agree, but the live quote sits on the other side of
+    #:            the forecast from `anchor_price`, so "Current Price" next to
+    #:            "Forecast Price" implies the opposite of the call. Common
+    #:            after a gap, and not a disagreement about anything.
+    split_reason: Optional[str] = None
+
+    forecast: List[SimpleForecastPoint] = Field(default_factory=list)
+
+
 # ── Ensemble Prediction Schemas ────────────────────────────────
 
 class EnsemblePredictRequest(BaseModel):
@@ -414,7 +530,14 @@ class ModelPredictionDetail(BaseModel):
 
 class EnsembleSummary(BaseModel):
     target: float
+    #: The move from `EnsemblePredictResponse.anchor_price` to `target`, so this
+    #: and `signal` are two readings of one bar. The Analysis tab prints them in
+    #: a single string, so measuring them from different prices is visible at a
+    #: glance: against a live quote a session away this tile read "+3.82% DOWN".
     change_pct: float
+    #: The same move measured against the live quote, which no model saw. Kept
+    #: apart from `change_pct` for the reason above.
+    quote_change_pct: Optional[float] = None
     upper_90: float
     lower_90: float
     upper_95: Optional[float] = None
@@ -433,6 +556,10 @@ class EnsembleForecastPoint(BaseModel):
     lstm: Optional[float] = None
     xgboost: Optional[float] = None
     random_forest: Optional[float] = None
+    unified_kronos: Optional[float] = None
+    unified_chronos: Optional[float] = None
+    unified_timesfm: Optional[float] = None
+    model_predictions: Optional[Dict[str, float]] = None
     upper_90: float
     lower_90: float
     upper_95: Optional[float] = None
@@ -443,6 +570,15 @@ class EnsembleForecastPoint(BaseModel):
 
 class EnsemblePredictResponse(BaseModel):
     symbol: str
+    #: Date of the last bar the models read -- the session `anchor_price`
+    #: closed at.
+    as_of: Optional[str] = None
+    #: The close the ensemble measured against. `EnsembleSummary.change_pct`
+    #: and `EnsembleSummary.signal` both belong to it. Same two prices, and the
+    #: same reason for serving both, as `SimpleForecastResponse`.
+    anchor_price: Optional[float] = None
+    #: The live quote. It can be a whole session later than `anchor_price` and
+    #: no model saw it: context for the reader, not a reference for a number.
     current_price: float
     current_price_source: Optional[str] = None
     horizon: int
@@ -642,6 +778,26 @@ class BacktestResponse(BaseModel):
     bh_curve: List[Dict[str, Any]] = Field(default_factory=list)
     trades: List[Dict[str, Any]] = Field(default_factory=list)
     benchmark_notice: Optional[str] = None
+    message: str
+
+
+class BacktestEvidenceResponse(BaseModel):
+    """
+    The walk-forward record for one symbol, as the UI needs to read it.
+
+    Distinct from :class:`BacktestResponse`, which is a trading simulation over
+    one strategy. This is the out-of-sample scorecard the benchmark produces —
+    purged folds, excess over base rate, the verdict against the random walk,
+    and what the forecast is worth after costs.
+
+    ``models`` is empty rather than a 404 when the benchmark has not been run
+    for the symbol: "nobody has scored this yet" is an ordinary answer with a
+    remedy, not a missing resource, and ``message`` carries the remedy.
+    """
+
+    symbol: str
+    source: str
+    models: List[Dict[str, Any]] = Field(default_factory=list)
     message: str
 
 

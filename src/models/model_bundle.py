@@ -44,6 +44,17 @@ MODEL_FACTORIES = {
     **UNIFIED_FACTORIES,
 }
 
+
+class StaleBundleError(RuntimeError):
+    """A saved artifact cannot be loaded by the model class that now owns it.
+
+    A symbol trained only by the legacy regression pipeline leaves a regressor
+    on disk where the next-day direction classifier looks for one, and XGBoost
+    refuses the mismatch outright. The remedy is always to retrain, so callers
+    get one exception type to act on rather than each backend's own error.
+    """
+
+
 CANONICAL_BUNDLE_LAYOUT = "canonical_symbol_model"
 LEGACY_BUNDLE_LAYOUT = "legacy_horizon"
 
@@ -471,7 +482,14 @@ def load_model_bundle(
                 feature_columns = list(json.load(handle))
 
     model = factory()
-    model.load(str(model_path))
+    try:
+        model.load(str(model_path))
+    except Exception as exc:  # noqa: BLE001 - each backend raises its own type
+        raise StaleBundleError(
+            f"{resolved_model_type} artifact for {meta.get('symbol')} at {model_path} "
+            f"cannot be loaded by the current {resolved_model_type} model; "
+            f"retrain the bundle ({exc})"
+        ) from exc
     scaler = joblib.load(scaler_path) if scaler_path and scaler_path.exists() else None
 
     return LoadedModelBundle(

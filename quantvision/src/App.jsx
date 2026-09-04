@@ -582,6 +582,12 @@ export default function App() {
     const [showModal, setShowModal] = useState(false);
     const [hoveredChip, setHoveredChip] = useState(null); // ticker string
 
+    // The prediction a user chose to backtest, handed from Predictions to
+    // Backtest. Held here rather than in either tab because it is the one piece
+    // of state both of them need to agree on; `at` is a timestamp so pressing
+    // the button twice on the same symbol still reads as a new request.
+    const [backtestRequest, setBacktestRequest] = useState(null);
+
     // Persist watchlist on change
     useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
 
@@ -618,6 +624,18 @@ export default function App() {
         const normalized = String(ticker || "").toUpperCase().trim();
         if (normalized) setSelectedTicker(normalized);
     }, []);
+
+    /* Send a prediction to the Backtest tab and switch to it. */
+    const backtestPrediction = useCallback((prediction) => {
+        const symbol = String(prediction?.symbol || "").toUpperCase().trim();
+        if (!symbol) return;
+        setBacktestRequest({ ...prediction, symbol, at: Date.now() });
+        setSelectedTicker(symbol);
+        setActiveTab("backtest");
+    }, []);
+
+    /* The Backtest tab clears the request once it has acted on it. */
+    const clearBacktestRequest = useCallback(() => setBacktestRequest(null), []);
 
     /* Watchlist mutations */
     const addTicker = useCallback((ticker) => {
@@ -817,12 +835,18 @@ export default function App() {
                         modelPrep={modelPrep}
                     />
                 )}
+                {/* The Predictions tab fetches its own candles alongside its
+                    forecast, from one endpoint, so the last candle and the bar
+                    the forecast continues from are the same bar. Passing
+                    `priceData` in would reintroduce exactly the drift that
+                    request was consolidated to remove. */}
                 {activeTab === "predictions" && (
                     <PredictionsTab
                         selectedTicker={selectedTicker}
+                        setSelectedTicker={handleTickerSelect}
+                        watchlist={watchlist}
                         apiConnected={apiConnected}
-                        priceData={priceData}
-                        modelPrep={modelPrep}
+                        onBacktest={backtestPrediction}
                     />
                 )}
                 {activeTab === "portfolio" && (
@@ -830,19 +854,25 @@ export default function App() {
                         notify={notify}
                         apiConnected={apiConnected}
                         setSelectedTicker={handleTickerSelect}
+                        watchlist={watchlist}
                     />
                 )}
                 {activeTab === "backtest" && (
                     <BacktestTab
                         selectedTicker={selectedTicker}
+                        setSelectedTicker={handleTickerSelect}
+                        watchlist={watchlist}
                         apiConnected={apiConnected}
                         notify={notify}
+                        request={backtestRequest}
+                        onRequestConsumed={clearBacktestRequest}
                     />
                 )}
                 {activeTab === "optimization" && (
                     <OptimizationTab
                         apiConnected={apiConnected}
                         notify={notify}
+                        watchlist={watchlist}
                     />
                 )}
                 {activeTab === "heatmap" && (

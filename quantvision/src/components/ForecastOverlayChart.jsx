@@ -132,14 +132,20 @@ function alignForecast(forecast, anchor) {
         // A forecast bar landing on or before the last historical bar would
         // collide with the anchor and break the ascending-time requirement.
         if (anchor && time <= anchor.time) continue;
+        // `upper95`/`lower95` are this chart's slot names for the OUTER band and
+        // are a drawing vocabulary, not a coverage claim — nothing on the pane
+        // prints a percentage. Two payload shapes feed them: /predict/best sends
+        // `upper95`, and /predict/forecast sends `upper_90`, whose bounds really
+        // are the q0.05/q0.95 quantiles and so really are a 90% interval. Both
+        // land in the same slot; neither is relabelled as the other.
         points.push({
             time,
             predicted,
             direction: point.direction,
-            upper95: price(point.upper95),
-            lower95: price(point.lower95),
-            upper68: price(point.upper68),
-            lower68: price(point.lower68),
+            upper95: price(point.upper_90 ?? point.upper95),
+            lower95: price(point.lower_90 ?? point.lower95),
+            upper68: price(point.upper_68 ?? point.upper68),
+            lower68: price(point.lower_68 ?? point.lower68),
         });
     }
     return points;

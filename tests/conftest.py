@@ -2,6 +2,8 @@
 pytest configuration and fixtures
 """
 
+import os
+
 import pytest
 import pandas as pd
 import numpy as np
@@ -9,6 +11,48 @@ from datetime import datetime, timedelta
 
 from src.models.model_manager import AUTO_PREPARE_ENV
 from src.models.preparation import registry as preparation_registry
+
+
+# Models whose "unit" test performs real foundation-model inference. Kronos is a
+# ~102M-parameter transformer sampled Monte-Carlo style: the repo's own benchmark
+# notes budget roughly ten seconds PER ROW on CPU, and
+# TestExpandingWindowSplits::test_interface_and_probability_range scores 200 test
+# rows at sample_count=128 for each of these names. That is half an hour per
+# parameter, so `pytest tests/unit` never reached its summary line -- it stalled
+# at 117 of 583 tests and looked like a hang.
+#
+# The same reasoning as _no_automatic_training below: a unit run must not kick
+# off multi-minute real work. These are deselected by default and reported as
+# skips (never silently dropped), and set QV_RUN_SLOW_MODELS=1 to run them.
+SLOW_MODEL_IDS = ("kronos", "tabpfn", "foundation_ensemble")
+SLOW_MODELS_ENV = "QV_RUN_SLOW_MODELS"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "slow_model: performs real foundation-model inference; deselected unless "
+        f"{SLOW_MODELS_ENV}=1",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip the heavyweight foundation-model parametrisations by default."""
+    if os.environ.get(SLOW_MODELS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    skip = pytest.mark.skip(
+        reason=(
+            "runs real foundation-model inference (minutes to hours on CPU); "
+            f"set {SLOW_MODELS_ENV}=1 to include it"
+        )
+    )
+    for item in items:
+        # Match the parametrised id, e.g. "...[foundation_ensemble]", rather than
+        # the test name, so only the heavy parameters are affected.
+        _, bracket, remainder = item.name.partition("[")
+        parameter = remainder[:-1] if bracket else ""
+        if parameter in SLOW_MODEL_IDS or "slow_model" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

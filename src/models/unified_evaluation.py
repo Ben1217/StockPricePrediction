@@ -27,15 +27,28 @@ what actually separates the models, so both are reported.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+from src.evaluation.economics import (
+    CostModel,
+    breakeven_round_trip_bps,
+    long_flat_positions,
+    paper_trading_overlay,
+)
+from src.evaluation.metrics import directional_metrics, probabilistic_metrics
+from src.evaluation.splitting import (
+    describe_split,
+    effective_sample_size,
+    purged_walk_forward_splits,
+)
+from src.evaluation.testing import diebold_mariano_test
 from src.models.direction_metrics import accuracy_edge_test, classification_metrics
 from src.models.unified_models import UnifiedEstimator, prepare_fold
-from src.models.walk_forward import expanding_window_splits
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -90,6 +103,38 @@ def _flatten_direction(metrics: Dict[str, Any]) -> Dict[str, float]:
     return flat
 
 
+def _native(value: Any) -> Any:
+    """
+    Numpy scalars converted to the Python types ``json`` can write.
+
+    Without this the scorecard serialises through ``default=str`` and a
+    ``float64`` accuracy lands in the artifact as the *string* ``"0.412698"``,
+    which every downstream reader then has to guess at. Non-finite floats become
+    ``null`` for the same reason: ``NaN`` is not JSON, and a reader that accepts
+    it is accepting something no other parser will.
+    """
+    if isinstance(value, dict):
+        return {key: _native(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_native(item) for item in value]
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    return value
+
+
+def _series(values: np.ndarray, digits: int) -> List[Optional[float]]:
+    """One per-bar column, rounded and JSON-safe."""
+    return [
+        round(float(item), digits) if math.isfinite(float(item)) else None
+        for item in np.asarray(values, dtype=np.float64)
+    ]
+
+
 def evaluate_unified_walk_forward(
     model: UnifiedEstimator,
     X: pd.DataFrame,
@@ -99,28 +144,43 @@ def evaluate_unified_walk_forward(
     *,
     test_size: int = 63,
     n_splits: int = 4,
-    embargo: int = 1,
+    embargo: Optional[int] = None,
     min_train: int = 252,
+    horizon: int = 1,
 ) -> Dict[str, Any]:
     """
-    Score one model with expanding-window walk-forward validation.
+    Score one model with purged, embargoed expanding-window walk-forward validation.
 
     Chronological order is preserved throughout: every fold trains on a prefix
-    of the series and tests on the block that follows it, with ``embargo`` rows
-    purged in between so the last training label cannot resolve inside the test
-    window. No shuffling, anywhere.
+    of the series and tests on the block that follows it. No shuffling, anywhere.
+
+    The gap between the two is two blocks, not one. ``horizon`` rows are
+    *purged* off the training tail because their labels resolve at or after the
+    test window opens, and ``embargo`` rows are vacated after that as protection
+    against serial correlation across the boundary; it defaults to ``horizon``
+    and may not be smaller. At horizon 1 that is a two-bar gap where the older
+    splitter left one -- slightly stricter, and the reason a rerun will not
+    reproduce a pre-existing artifact to the last decimal.
 
     Returns the mean of each metric across folds, the fold-level detail under
-    ``per_fold``, and the test-window base rate -- the accuracy a model that
-    always guesses the majority class would score, which is the number any
-    direction accuracy has to be read against.
+    ``per_fold``, the protocol itself under ``split_protocol`` so a reader can
+    audit the gap without rerunning, and the test-window base rate -- the
+    accuracy a model that always guesses the majority class would score, which
+    is the number any direction accuracy has to be read against.
     """
-    splits = expanding_window_splits(
-        len(X), test_size=test_size, n_splits=n_splits, embargo=embargo, min_train=min_train
+    horizon = max(1, int(horizon))
+    folds = purged_walk_forward_splits(
+        len(X),
+        horizon=horizon,
+        test_size=test_size,
+        n_splits=n_splits,
+        min_train=min_train,
+        embargo=embargo,
     )
-    if not splits:
+    if not folds:
         logger.warning("Not enough rows to form a walk-forward fold for %s", model.name)
         return {}
+    splits = [(spec.train_pos, spec.test_pos) for spec in folds]
 
     y_return = np.asarray(y_return, dtype=np.float64)
     y_direction = np.asarray(y_direction, dtype=np.int8)
@@ -154,33 +214,215 @@ def evaluate_unified_walk_forward(
             continue
 
         positions = positions[valid]
-        price_scores = price_metrics(
-            realised_price[valid], predicted_price[valid], prev_close[positions]
-        )
+        fold_prev_close = prev_close[positions]
+        fold_actual_price = realised_price[valid]
+        fold_predicted_price = predicted_price[valid]
+        fold_p_up = p_up[valid]
+
+        price_scores = price_metrics(fold_actual_price, fold_predicted_price, fold_prev_close)
         direction_scores = classification_metrics(
-            y_direction[positions], (p_up[valid] >= 0.5).astype(int), p_up[valid]
+            y_direction[positions], (fold_p_up >= 0.5).astype(int), fold_p_up
         )
 
-        per_fold.append(
-            {
-                "fold": fold_number,
-                "train_start": str(fold.index[train_idx[0]].date()),
-                "train_end": str(fold.index[train_idx[-1]].date()),
-                "test_start": str(fold.index[positions[0]].date()),
-                "test_end": str(fold.index[positions[-1]].date()),
-                "train_size": int(len(train_idx)),
-                "test_size": int(len(positions)),
-                "base_rate": float(np.mean(y_direction[positions])),
-                **{f"price_{key}": value for key, value in price_scores.items()},
-                **_flatten_direction(direction_scores),
-            }
-        )
+        base_rate = float(np.mean(y_direction[positions]))
+        record: Dict[str, Any] = {
+            "fold": fold_number,
+            "train_start": str(fold.index[train_idx[0]].date()),
+            "train_end": str(fold.index[train_idx[-1]].date()),
+            "test_start": str(fold.index[positions[0]].date()),
+            "test_end": str(fold.index[positions[-1]].date()),
+            "train_size": int(len(train_idx)),
+            "test_size": int(len(positions)),
+            "base_rate": base_rate,
+            **{f"price_{key}": value for key, value in price_scores.items()},
+            **_flatten_direction(direction_scores),
+        }
+
+        # Excess over base rate, per fold and against *this* fold's own base
+        # rate. Averaging the per-fold values is not the same as scoring the
+        # averaged accuracy against the averaged base rate -- max() is not
+        # linear -- and the per-fold form is the honest one, because each fold
+        # is judged against the coin it was actually dealt.
+        accuracy = record.get("direction_accuracy")
+        if accuracy is not None and math.isfinite(float(accuracy)):
+            record["direction_eobr"] = round(
+                float(accuracy) - max(base_rate, 1.0 - base_rate), 6
+            )
+
+        # The per-bar record. Everything downstream of a mean -- Diebold-Mariano,
+        # McNemar, CRPS, the cost overlay -- needs paired observations, and none
+        # of it can be recovered from an aggregate after the fact.
+        record["predictions"] = {
+            "date": [str(pd.Timestamp(stamp).date()) for stamp in fold.index[positions]],
+            "prev_close": _series(fold_prev_close, 6),
+            "actual_price": _series(fold_actual_price, 6),
+            "predicted_price": _series(fold_predicted_price, 6),
+            "actual_return": _series(y_return[positions], 8),
+            "p_up": _series(fold_p_up, 6),
+            "y_direction": [int(item) for item in y_direction[positions]],
+        }
+
+        per_fold.append(record)
 
     if not per_fold:
         logger.error("%s produced no scored folds", model.name)
         return {}
 
-    return _aggregate(model.name, per_fold, test_size)
+    scorecard = _aggregate(model.name, per_fold, test_size)
+    scorecard["horizon"] = int(horizon)
+    # The audit trail: where training stopped, where scoring started, and how
+    # many bars were purged and embargoed between them. A reader who was not
+    # present at the run can check the protocol without rerunning it.
+    scorecard["split_protocol"] = _native(describe_split(folds, X.index))
+    scorecard["evaluation"] = _pooled_evaluation(per_fold, horizon)
+    return scorecard
+
+
+def _economics(p_up: np.ndarray, period_log_returns: np.ndarray, horizon: int) -> Dict[str, Any]:
+    """
+    What the forecast is worth once someone has to pay to act on it.
+
+    Deliberately last and deliberately narrow. The overlay tunes nothing -- the
+    threshold is 0.5, the notional is fixed, and the rebalance period is the
+    horizon -- so this measures the forecast rather than a strategy built around
+    it. ``breakeven_bps`` is the number worth quoting: the per-side cost at
+    which the gross edge is exactly consumed.
+
+    Only horizon 1 is served. Past that the pooled returns overlap, and running
+    a period-by-period equity curve over overlapping windows would compound the
+    same move repeatedly -- a wrong number rather than a missing one.
+    """
+    if horizon != 1:
+        return {
+            "available": False,
+            "reason": f"overlapping returns at horizon {horizon}; needs non-overlapping periods",
+        }
+    if p_up.size < 3:
+        return {"available": False, "reason": f"only {p_up.size} observations"}
+
+    cost = CostModel()
+    positions = long_flat_positions(p_up)
+    return {
+        "available": True,
+        "cost_model": cost.to_dict(),
+        "breakeven": breakeven_round_trip_bps(positions, period_log_returns),
+        "overlay": paper_trading_overlay(
+            p_up,
+            period_log_returns,
+            cost=cost,
+            periods_per_year=252,
+        ),
+    }
+
+
+def _pooled_evaluation(per_fold: List[Dict[str, Any]], horizon: int) -> Dict[str, Any]:
+    """
+    The verdict, pooled across folds: does this model beat the martingale null?
+
+    Fold means answer "how did it score"; this answers "is the score separable
+    from doing nothing", which is the only question a price forecast has to pass
+    before any of the rest is worth reading. Two nulls are tested, because a
+    model can fail either independently:
+
+    ``vs_random_walk``
+        The primary one. Scoring is in squared log-return space, where the
+        random walk forecasts exactly zero -- so the baseline loss is the
+        realised squared log return and needs no model to compute. Diebold-
+        Mariano on the paired losses says whether the difference is real.
+        ``r2_vs_random_walk`` is the same comparison as a fraction of variance:
+        below zero means the random walk won.
+
+    ``edge_vs_majority``
+        The direction equivalent: accuracy against always guessing the more
+        common class, with the one-sided test that says whether a few hundred
+        bars can support it.
+
+    Pooling is what makes these testable at all -- three folds of 63 bars are
+    189 paired observations together and far too few apiece.
+    """
+    prev_close: List[Any] = []
+    actual_price: List[Any] = []
+    predicted_price: List[Any] = []
+    probability_up: List[Any] = []
+
+    for fold in per_fold:
+        record = fold.get("predictions") or {}
+        prev_close.extend(record.get("prev_close") or [])
+        actual_price.extend(record.get("actual_price") or [])
+        predicted_price.extend(record.get("predicted_price") or [])
+        probability_up.extend(record.get("p_up") or [])
+
+    lengths = {len(prev_close), len(actual_price), len(predicted_price), len(probability_up)}
+    if len(lengths) != 1:
+        return {"available": False, "reason": f"per-bar columns disagree in length: {sorted(lengths)}"}
+
+    def as_array(values: List[Any]) -> np.ndarray:
+        return np.asarray([np.nan if item is None else item for item in values], dtype=np.float64)
+
+    prev = as_array(prev_close)
+    actual = as_array(actual_price)
+    predicted = as_array(predicted_price)
+    p_up = as_array(probability_up)
+
+    # Log returns need strictly positive prices on both ends, and the ratio is
+    # undefined without a previous close.
+    usable = (
+        np.isfinite(prev) & np.isfinite(actual) & np.isfinite(predicted) & np.isfinite(p_up)
+        & (prev > 0) & (actual > 0) & (predicted > 0)
+    )
+    n = int(usable.sum())
+    if n < 3:
+        return {"available": False, "reason": f"only {n} usable paired observations; need at least 3"}
+
+    actual_log = np.log(actual[usable] / prev[usable])
+    model_log = np.log(predicted[usable] / prev[usable])
+    p_up_usable = p_up[usable]
+
+    loss_model = (model_log - actual_log) ** 2
+    loss_random_walk = actual_log ** 2  # the random walk forecasts a zero return
+
+    sse_model = float(np.sum(loss_model))
+    sse_random_walk = float(np.sum(loss_random_walk))
+    r2_vs_random_walk = (
+        1.0 - sse_model / sse_random_walk if sse_random_walk > 0 else float("nan")
+    )
+
+    truth = pd.Series(actual_log)
+    probabilities = pd.Series(p_up_usable)
+    direction = directional_metrics(truth, probabilities)
+    probabilistic = probabilistic_metrics(truth, probabilities)
+
+    accuracy = direction.get("accuracy")
+    base_rate = direction.get("base_rate")
+    edge: Dict[str, Any] = {}
+    if accuracy is not None and base_rate is not None and math.isfinite(float(accuracy)):
+        reference = max(float(base_rate), 1.0 - float(base_rate))
+        edge = accuracy_edge_test(float(accuracy), reference, n)
+
+    return _native(
+        {
+            "available": True,
+            "n": n,
+            # Overlapping h-period returns are not h independent observations.
+            # At horizon 1 this equals n; past that it is the number every
+            # p-value here should really be read against.
+            "effective_n": effective_sample_size(n, horizon),
+            "horizon": int(horizon),
+            "loss_space": "squared_log_return",
+            "direction": direction,
+            "probabilistic": probabilistic,
+            "edge_vs_majority": edge,
+            "economics": _economics(p_up_usable, actual_log, horizon),
+            "vs_random_walk": {
+                "mse_model": sse_model / n,
+                "mse_random_walk": sse_random_walk / n,
+                "r2_vs_random_walk": r2_vs_random_walk,
+                "diebold_mariano": diebold_mariano_test(
+                    loss_model, loss_random_walk, horizon=int(horizon)
+                ),
+            },
+        }
+    )
 
 
 def _aggregate(model_name: str, per_fold: List[Dict[str, Any]], test_size: int) -> Dict[str, Any]:

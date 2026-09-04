@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -115,136 +117,115 @@ def test_predict_uses_recursive_one_step_bundle_when_available():
     assert len(payload["forecasts"]) == 5
 
 
-def _fake_forecast():
-    """A seven-day ensemble forecast with a distinct value on every day."""
-    dates = ["2026-04-28", "2026-04-29", "2026-04-30", "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06"]
-    forecast_points = [
-        {
-            "date": dates[index],
-            "predicted": value,
-            "xgboost": value - 0.5,
-            "random_forest": value + 0.25,
-            "lstm": value,
-            "lower_95": value - 8,
-            "upper_95": value + 8,
-            "lower_68": value - 4,
-            "upper_68": value + 4,
+class _FakeFoundationMember:
+    """One foundation pipeline: a point, a P(up), and a real spread to weight by."""
+
+    def __init__(self, price: float, p_up: float, spread: float = 3.0):
+        self.price = price
+        self.p_up = p_up
+        self.spread = spread
+
+    def predict(self, df, horizon: int = 1, covariates=None):
+        samples = np.linspace(self.price - self.spread, self.price + self.spread, 128)
+        return {
+            "price": self.price,
+            "p_up": self.p_up,
+            "samples": samples,
+            "quantiles": {q: float(np.quantile(samples, q)) for q in (0.1, 0.5, 0.9)},
         }
-        for index, value in enumerate([270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5])
-    ]
-    return SimpleNamespace(
-        symbol="SHOP",
-        current_price=272.0,
-        horizon=7,
-        predicted_price=259.5,
-        expected_change_pct=-4.6,
-        confidence_interval={"lower": 251.5, "upper": 267.5},
-        reliability="Medium",
-        reason="test forecast",
-        signal="Bearish",
-        model_predictions=[
-            SimpleNamespace(model_type="xgboost", weight=0.35),
-            SimpleNamespace(model_type="random_forest", weight=0.25),
-            SimpleNamespace(model_type="lstm", weight=0.4),
-        ],
-        forecast_points=forecast_points,
-        scenario_paths=[[272.0, 271.0, 268.0], [272.0, 274.0, 269.0]],
-    )
 
 
-def test_ensemble_predict_returns_daily_prediction_series():
+def _serving(members):
+    """A `_get_foundation_pipeline` stand-in over a {model_type: member} map."""
+    return lambda model_type: members.get(model_type)
+
+
+def test_ensemble_predict_serves_the_foundation_aggregate():
+    """
+    POST /predict/ensemble is the older response shape over the SAME forecast
+    the Predictions tab serves -- both go through `run_foundation_forecast`.
+    These used to be two implementations of one calculation, which is how they
+    could disagree about the same symbol on the same bar.
+    """
     app = FastAPI()
     app.include_router(predict_route.router, prefix="/api/predict")
     client = TestClient(app)
 
-    forecast = _fake_forecast()
-
-    class FakePredictor:
-        def predict(self, **_kwargs):
-            return forecast
-
+    members = {
+        "unified_kronos": _FakeFoundationMember(270.0, 0.30),
+        "unified_chronos": _FakeFoundationMember(268.0, 0.35),
+        "unified_timesfm": _FakeFoundationMember(269.0, 0.40),
+    }
+    # 430 rows puts the last close at 271.60, just above every member. The
+    # quote is the number this assertion used to be written against, back when
+    # `change_pct` was measured from it; the anchor is a bar the models read.
     with (
-        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
+        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=430)),
         patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
-        patch.object(
-            predict_route,
-            "ensemble_availability",
-            return_value=(["xgboost", "random_forest", "lstm"], {}),
-        ),
-        patch.object(predict_route, "EnsemblePricePredictor", return_value=FakePredictor()),
+        patch.object(predict_route, "_get_foundation_pipeline", side_effect=_serving(members)),
     ):
         response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
 
     assert response.status_code == 200
     payload = response.json()
-    values = [point["prediction"] for point in payload["forecast_points"]]
 
     assert payload["status"] == "ok"
-    assert len(payload["forecast_points"]) == 7
-    assert values == [270.0, 267.5, 264.0, 259.0, 261.0, 258.5, 259.5]
-    assert payload["forecast_points"][0]["ensemble"] == 270.0
-    assert len(set(values)) > 1
-    assert payload["scenario_paths"] == [[272.0, 271.0, 268.0], [272.0, 274.0, 269.0]]
+    assert payload["model_available"] is True
+    assert payload["degraded"] is False
+    assert payload["models_available"] == ["unified_kronos", "unified_chronos", "unified_timesfm"]
+
+    # Every member answers for the next bar, so there is exactly one point
+    # whatever horizon was asked for -- and the horizon is echoed, not applied.
+    assert payload["horizon"] == 7
+    assert len(payload["forecast_points"]) == 1
+
+    summary = payload["ensemble"]
+    assert 268.0 <= summary["target"] <= 270.0
+    # P(up) is under 0.5 across every member, so the call is DOWN -- and the
+    # forecast is below the 271.60 close those probabilities were computed
+    # against, so the change is negative too. The tile prints the two in one
+    # string, so they have to be measured from the same price to agree.
+    assert payload["anchor_price"] == pytest.approx(271.60)
+    assert summary["signal"] == "DOWN"
+    assert summary["change_pct"] < 0
+    # The quote reading is served beside it and measured from 272.00, so the
+    # two differ by however far the quote has drifted off the anchor. Here that
+    # is 40 cents and both still fall; the point is that they are separate
+    # numbers, so a wider gap cannot silently overwrite the one on the left.
+    assert summary["quote_change_pct"] < 0
+    assert summary["quote_change_pct"] != summary["change_pct"]
+
+    # The band is named for the coverage it has: q0.05..q0.95 is 90%, not 95%.
+    # This is the field the Analysis tab's band card reads.
+    assert summary["lower_90"] < summary["target"] < summary["upper_90"]
+    assert summary["lower_68"] > summary["lower_90"]
+    assert summary["upper_68"] < summary["upper_90"]
+    assert summary["upper_95"] is None and summary["lower_95"] is None
 
 
-def test_ensemble_predict_explains_why_an_unproven_bundle_is_not_served():
-    """A bundle that fails the skill gate must say so, not read as 'not trained yet'."""
-    app = FastAPI()
-    app.include_router(predict_route.router, prefix="/api/predict")
-    client = TestClient(app)
-
-    reason = "the xgboost bundle does not beat a constant forecast (skill score -0.7563)"
-    blocked = {mtype: reason for mtype in ("xgboost", "random_forest", "lstm")}
-    with (
-        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
-        patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
-        patch.object(predict_route, "ensemble_availability", return_value=([], blocked)),
-    ):
-        response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["status"] == "unavailable"
-    assert payload["model_available"] is False
-    assert "does not beat a constant forecast" in payload["message"]
-    # A failed skill gate is a measurement, not a missing artifact, so the
-    # response must not read as "come back once it is trained" — retraining the
-    # same bars reproduces the same verdict, and preparation declines to try.
-    assert "not a missing model" in payload["message"]
-    assert payload["preparation"] is None
-    assert payload["models_unavailable"] == blocked
-
-
-def test_ensemble_serves_a_partial_ensemble_when_one_member_is_blocked():
+def test_ensemble_predict_says_which_member_is_missing():
     """
-    One unservable member must not take the whole horizon offline.
-
-    This is the regression behind "Prediction model unavailable": the gate
-    required all three bundles, so a single failing LSTM blanked a tab whose
-    XGBoost and Random Forest bundles were both ready to serve.
+    One unservable member must not take the whole ensemble offline -- but the
+    client has to be able to say the result is partial rather than presenting
+    two models as three.
     """
     app = FastAPI()
     app.include_router(predict_route.router, prefix="/api/predict")
     client = TestClient(app)
 
-    forecast = _fake_forecast()
-    requested: dict = {}
+    class _Broken:
+        def predict(self, df, horizon: int = 1, covariates=None):
+            raise RuntimeError("model weights are not downloaded")
 
-    class FakePredictor:
-        def predict(self, **kwargs):
-            requested.update(kwargs)
-            return forecast
-
-    blocked = {"lstm": "the lstm bundle does not beat a constant forecast"}
+    members = {
+        "unified_kronos": _FakeFoundationMember(270.0, 0.62),
+        "unified_chronos": _Broken(),
+        "unified_timesfm": None,
+    }
     with (
         patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
         patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
-        patch.object(
-            predict_route,
-            "ensemble_availability",
-            return_value=(["xgboost", "random_forest"], blocked),
-        ),
-        patch.object(predict_route, "EnsemblePricePredictor", return_value=FakePredictor()),
+        patch.object(predict_route, "_get_foundation_pipeline", side_effect=_serving(members)),
     ):
         response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
 
@@ -252,11 +233,38 @@ def test_ensemble_serves_a_partial_ensemble_when_one_member_is_blocked():
     assert payload["status"] == "ok"
     assert payload["model_available"] is True
     assert payload["degraded"] is True
-    assert payload["models_available"] == ["xgboost", "random_forest"]
-    assert payload["models_unavailable"] == blocked
-    assert "lstm" in payload["message"]
-    # The blocked member must not be handed to the predictor.
-    assert requested["model_types"] == ["xgboost", "random_forest"]
+    assert payload["models_available"] == ["unified_kronos"]
+    assert set(payload["models_unavailable"]) == {"unified_chronos", "unified_timesfm"}
+    assert "model weights are not downloaded" in payload["models_unavailable"]["unified_chronos"]
+    assert "Chronos-2" in payload["message"] and "TimesFM 2.5" in payload["message"]
+
+
+def test_ensemble_predict_refuses_to_serve_a_point_with_no_model_behind_it():
+    """
+    Nothing servable is a 200 saying so, not a fabricated number. A point
+    forecast with no interval is what Requirement 11.2 forbids.
+    """
+    app = FastAPI()
+    app.include_router(predict_route.router, prefix="/api/predict")
+    client = TestClient(app)
+
+    with (
+        patch.object(predict_route, "_download_prediction_data", return_value=_sample_ohlcv(rows=320)),
+        patch.object(predict_route, "_latest_available_price", return_value=(272.0, "latest_close")),
+        patch.object(predict_route, "_get_foundation_pipeline", return_value=None),
+    ):
+        response = client.post("/api/predict/ensemble", json={"symbol": "SHOP", "horizon": 7})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "unavailable"
+    assert payload["model_available"] is False
+    assert payload["ensemble"] is None
+    assert payload["forecast_points"] == []
+    assert payload["message"]
+    assert set(payload["models_unavailable"]) == {
+        "unified_kronos", "unified_chronos", "unified_timesfm",
+    }
 
 
 def test_predict_reports_stale_bundle_instead_of_retraining_inline():

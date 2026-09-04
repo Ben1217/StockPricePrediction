@@ -42,12 +42,37 @@ from src.models.model_manager import (  # noqa: E402
 )
 
 
+def _drain_preparation_jobs(timeout=10.0):
+    """
+    Wait for any worker still in the pool to finish.
+
+    `registry.reset()` clears the job dictionaries but does not touch the thread
+    pool, so a job still running at the end of a test keeps going -- and calls
+    whatever `preparation._execute` is bound to *by then*, which is the next
+    test's monkeypatched stub. That test would see a call it never made, from a
+    symbol it never asked for. Draining first is what keeps each test's executor
+    list its own.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with preparation.registry._lock:
+            in_flight = [job for job in preparation.registry._jobs.values() if job.active]
+        if not in_flight:
+            return
+        time.sleep(0.01)
+    raise AssertionError(
+        "preparation jobs still running at teardown: "
+        + ", ".join(f"{job.symbol}/{job.job_id}" for job in in_flight)
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     monkeypatch.delenv(API_KEY_ENV, raising=False)
     limiter.reset()
     preparation.registry.reset()
     yield
+    _drain_preparation_jobs()
     limiter.reset()
     preparation.registry.reset()
 
@@ -378,7 +403,7 @@ class TestPreparationRegistry:
 
         second = preparation.ensure_prepared("NVDA", respect_auto_flag=False, force=True)
         assert second.job_id != first.job_id
-        assert len(stub_executor) == 2
+        _wait_for_executor(stub_executor, 2)
 
     def test_auto_flag_gates_implicit_starts_only(self, monkeypatch, stub_executor):
         monkeypatch.setenv(AUTO_PREPARE_ENV, "false")
@@ -408,6 +433,23 @@ def _wait_until_finished(job, timeout=10.0):
     while job.active and time.monotonic() < deadline:
         time.sleep(0.01)
     assert not job.active, f"job {job.job_id} did not finish within {timeout}s"
+
+
+def _wait_for_executor(calls, expected, timeout=10.0):
+    """
+    Wait until the stub executor has recorded ``expected`` runs.
+
+    `ensure()` submits to a thread pool and returns; the worker that calls
+    `_execute` runs later. Asserting the call count straight after `ensure`
+    returns therefore tests how fast the pool was scheduled, not whether the job
+    was started -- and fails whenever the machine is busy enough to delay it.
+    """
+    deadline = time.monotonic() + timeout
+    while len(calls) < expected and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(calls) == expected, (
+        f"expected {expected} preparation run(s) within {timeout}s, saw {len(calls)}: {calls}"
+    )
 
 
 class TestJobProgress:
@@ -467,6 +509,7 @@ class TestModelsRoute:
         monkeypatch.setenv(AUTO_PREPARE_ENV, "true")
         response = client.get("/api/models/NVDA?prepare=true")
         assert response.status_code == 200
+        _wait_for_executor(stub_executor, 1)
         assert [symbol for symbol, _ in stub_executor] == ["NVDA"]
 
     def test_prepare_ignores_the_auto_flag(self, client, monkeypatch, stub_executor):
@@ -482,6 +525,7 @@ class TestModelsRoute:
         response = client.post("/api/models/NVDA/prepare")
         assert response.status_code == 200
         assert response.json()["started"] is True
+        _wait_for_executor(stub_executor, 1)
         assert [symbol for symbol, _ in stub_executor] == ["NVDA"]
 
     def test_prepare_is_idempotent_when_nothing_is_missing(self, client, monkeypatch, stub_executor):

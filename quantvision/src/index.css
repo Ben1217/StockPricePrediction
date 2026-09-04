@@ -85,3 +85,15 @@ body {
         transform: rotate(360deg);
     }
 }
+/* Placeholder blocks in the forecast box while the models run. The chart is
+   already interactive by then; this marks the one part still waiting. */
+@keyframes skeleton-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .45; }
+}
+.skeleton-shimmer {
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+    .skeleton-shimmer { animation: none; }
+}

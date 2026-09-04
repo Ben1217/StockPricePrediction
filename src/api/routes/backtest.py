@@ -13,7 +13,11 @@ import pandas as pd
 from cachetools import LRUCache
 from fastapi import APIRouter, HTTPException
 
-from src.api.schemas.schemas import BacktestRequest, BacktestResponse
+from src.api.schemas.schemas import (
+    BacktestEvidenceResponse,
+    BacktestRequest,
+    BacktestResponse,
+)
 from src.backtesting.backtest_engine import BacktestEngine
 from src.backtesting.backtest_service import run_backtest as run_simple_backtest
 from src.defaults import DEFAULT_INDEX_SYMBOL
@@ -35,6 +39,7 @@ from src.models.direction_utils import (
     signal_from_probability,
 )
 from src.models.model_bundle import load_model_bundle
+from src.models.model_selection import BENCHMARK_ARTIFACT, model_label
 from src.models.model_trainer import ModelTrainer
 from src.signals.signal_generator import TradingSignalGenerator
 
@@ -1080,3 +1085,151 @@ def list_backtests():
             for bid, data in list_backtest_results()
         ]
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest/evidence/{symbol}  — the walk-forward record, for the UI
+# ---------------------------------------------------------------------------
+
+#: Heavy per-bar arrays. They exist so Diebold-Mariano and the cost overlay can
+#: be computed server-side; a browser drawing fold summaries has no use for 189
+#: floats per column per fold, so they are dropped on the way out.
+_PER_BAR_KEY = "predictions"
+
+
+def _read_benchmark_artifact() -> Optional[List[Dict[str, Any]]]:
+    """
+    The benchmark file, or ``None`` when it is absent or unreadable.
+
+    A missing artifact is the ordinary state of a fresh checkout, not a fault,
+    so it is not logged as an error and the caller turns it into an instruction.
+    """
+    try:
+        with open(BENCHMARK_ARTIFACT, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, list) else None
+
+
+def _fold_summary(fold: Dict[str, Any]) -> Dict[str, Any]:
+    """One fold, without the per-bar payload."""
+    return {key: value for key, value in fold.items() if key != _PER_BAR_KEY}
+
+
+def _evidence_for_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    One benchmark row reshaped for the tab.
+
+    Written to tolerate both artifact generations. A file produced before the
+    scoring rewrite has no ``evaluation`` and no ``split_protocol``; those come
+    back as ``None`` rather than being invented, so the panel can say "this
+    symbol predates the null tests, rerun the benchmark" instead of rendering a
+    confident blank.
+    """
+    evaluation = row.get("evaluation") if isinstance(row.get("evaluation"), dict) else None
+    random_walk = (evaluation or {}).get("vs_random_walk") or {}
+    dm = random_walk.get("diebold_mariano") or {}
+
+    return {
+        "model_type": row.get("model_type") or row.get("model_name"),
+        "label": model_label(str(row.get("model_name") or "")),
+        "horizon": row.get("horizon"),
+        "interval": row.get("interval", "1d"),
+        "n_folds": row.get("n_splits"),
+        "total_test_rows": row.get("total_test_rows"),
+        "direction": {
+            "accuracy": row.get("direction_accuracy"),
+            "base_rate": row.get("base_rate"),
+            "eobr": row.get("direction_eobr"),
+            "eobr_std": row.get("direction_eobr_std"),
+            "roc_auc": row.get("direction_roc_auc"),
+            "brier_score": row.get("direction_brier_score"),
+        },
+        "price": {
+            "mae": row.get("price_mae"),
+            "rmse": row.get("price_rmse"),
+            "mape": row.get("price_mape"),
+            "r2_level": row.get("price_r2"),
+            "r2_return": row.get("price_r2_return"),
+        },
+        # The two verdicts, lifted to the top level because they are the point.
+        # `r2_vs_random_walk` below zero means the random walk forecast better;
+        # the DM p-value says whether that gap is separable from noise.
+        "vs_random_walk": {
+            "r2": random_walk.get("r2_vs_random_walk"),
+            "verdict": dm.get("sign"),
+            "p_value": dm.get("p_value"),
+            "n": dm.get("n"),
+        } if evaluation else None,
+        "edge_vs_majority": (evaluation or {}).get("edge_vs_majority"),
+        "economics": (evaluation or {}).get("economics"),
+        "effective_n": (evaluation or {}).get("effective_n"),
+        "split_protocol": row.get("split_protocol"),
+        "folds": [_fold_summary(fold) for fold in (row.get("per_fold") or [])],
+    }
+
+
+@router.get("/evidence/{symbol}", response_model=BacktestEvidenceResponse)
+def backtest_evidence(symbol: str, model: Optional[str] = None):
+    """
+    Every model's out-of-sample record for ``symbol``, from the benchmark.
+
+    This is the read half of the bridge: the walk-forward scorecard already
+    reaches model ranking, and this lets the Backtest tab reach it too. It only
+    reads — regenerating the artifact is a separate, slower operation and does
+    not belong behind a GET.
+    """
+    symbol = symbol.upper().strip()
+    payload = _read_benchmark_artifact()
+
+    if payload is None:
+        return BacktestEvidenceResponse(
+            symbol=symbol,
+            source=str(BENCHMARK_ARTIFACT),
+            models=[],
+            message=(
+                f"No benchmark artifact at {BENCHMARK_ARTIFACT}. Generate one with "
+                f"`python scripts/unified_benchmark.py --symbols {symbol}`."
+            ),
+        )
+
+    wanted = str(model).strip().lower() if model else None
+    rows = [
+        row
+        for row in payload
+        if isinstance(row, dict)
+        and str(row.get("symbol", "")).upper() == symbol
+        and (wanted is None or str(row.get("model_name", "")).lower() == wanted)
+    ]
+
+    if not rows:
+        scored = sorted({str(r.get("symbol", "")).upper() for r in payload if isinstance(r, dict)})
+        return BacktestEvidenceResponse(
+            symbol=symbol,
+            source=str(BENCHMARK_ARTIFACT),
+            models=[],
+            message=(
+                f"No benchmark record for {symbol}"
+                + (f" and model {model}" if wanted else "")
+                + ". Scored so far: "
+                + (", ".join(filter(None, scored)) or "nothing")
+                + f". Run `python scripts/unified_benchmark.py --symbols {symbol}` to add it."
+            ),
+        )
+
+    models = [_evidence_for_row(row) for row in rows]
+    dated = any(entry["vs_random_walk"] is not None for entry in models)
+    return BacktestEvidenceResponse(
+        symbol=symbol,
+        source=str(BENCHMARK_ARTIFACT),
+        models=models,
+        message=(
+            f"{len(models)} model(s) scored for {symbol}."
+            if dated
+            else (
+                f"{len(models)} model(s) scored for {symbol}, from a benchmark run that predates "
+                "the null tests. Rerun it to get the random-walk verdict and the cost overlay."
+            )
+        ),
+    )

@@ -101,6 +101,20 @@ export default function ModelAnalysisPanel({ symbol, modelPrep, apiConnected }) 
     const tradeable = Boolean(nextSession?.available && nextSession?.tradeable);
     const weights = Object.entries(forecast?.weights || {});
 
+    // The forecast tile prints the change and the call in one string, so both
+    // have to come off the same price: `change_pct` is the move away from the
+    // close the models read, never from the live quote. The two are routinely
+    // a session apart -- the server's download window cannot include today --
+    // and on a gap day dividing by the quote printed "+3.82% DOWN" in a single
+    // line. The quote reading still exists under its own name; it goes in the
+    // hint, where it is context rather than a competing headline.
+    const forecastHint = hasForecast
+        ? `Measured against the ${forecast.as_of || "last"} close of ` +
+          `${money(forecast.anchor_price)} — the last bar the models read. ` +
+          `The live quote is ${money(forecast.current_price)}, and against it the ` +
+          `same forecast reads ${signed(summary.quote_change_pct)}.`
+        : null;
+
     return (
         <Section
             title="Model analysis"
@@ -124,10 +138,16 @@ export default function ModelAnalysisPanel({ symbol, modelPrep, apiConnected }) 
                             value={money(summary.target)}
                             sub={`${signed(summary.change_pct)} · ${summary.signal || "—"}`}
                             color={Number(summary.change_pct) >= 0 ? C.green : C.red}
+                            hint={forecastHint}
                         />
+                        {/* 90%, not 95%: the ensemble's outer bounds are the
+                            q0.05/q0.95 quantiles, which bracket 90% of the mass.
+                            This card read `lower_95`/`upper_95` — fields the
+                            route never fills — so it rendered an empty range
+                            under a label claiming coverage the band never had. */}
                         <StatCard
-                            label="95% BAND"
-                            value={`${money(summary.lower_95)} – ${money(summary.upper_95)}`}
+                            label="90% BAND"
+                            value={`${money(summary.lower_90)} – ${money(summary.upper_90)}`}
                             sub={summary.reliability ? `${summary.reliability} reliability` : null}
                             color={C.cyan}
                         />
