@@ -29,14 +29,31 @@
  * knows about coordinates is testable without a chart.
  */
 class BandRenderer {
-    constructor(regions) {
+    constructor(regions, divider) {
         this._regions = regions;
+        this._divider = divider;
     }
 
     draw(target) {
-        target.useMediaCoordinateSpace(({ context }) => {
+        target.useMediaCoordinateSpace(({ context, mediaSize }) => {
+            // The boundary between what happened and what is predicted. Without
+            // it the dashed line and the cone read as more chart, and a reader
+            // scanning quickly has no cue for where the record stops. Drawn
+            // first so the bands sit over it rather than the other way round.
+            if (this._divider !== null && this._divider !== undefined) {
+                context.save();
+                context.beginPath();
+                context.setLineDash([3, 3]);
+                context.strokeStyle = "rgba(148, 163, 184, 0.45)";
+                context.lineWidth = 1;
+                context.moveTo(this._divider, 0);
+                context.lineTo(this._divider, mediaSize.height);
+                context.stroke();
+                context.restore();
+            }
+
             for (const region of this._regions) {
-                const { upper, lower, fill } = region;
+                const { upper, lower, fill, stroke } = region;
                 // Two points make a line, not an area. One is what a horizon of
                 // a single bar produces, and filling it would paint nothing
                 // while still costing a path.
@@ -54,6 +71,15 @@ class BandRenderer {
                 context.closePath();
                 context.fillStyle = fill;
                 context.fill();
+
+                // A hairline edge turns a soft wash into a bounded interval.
+                // Without it the two nested fills blur into one gradient and
+                // the reader cannot see where 68% ends and 90% begins.
+                if (stroke) {
+                    context.strokeStyle = stroke;
+                    context.lineWidth = 1;
+                    context.stroke();
+                }
             }
         });
     }
@@ -70,6 +96,7 @@ class BandPaneView {
     constructor(source) {
         this._source = source;
         this._regions = [];
+        this._divider = null;
     }
 
     update() {
@@ -78,8 +105,14 @@ class BandPaneView {
         const points = this._source.points;
         if (!series || !timeScale || !points?.length) {
             this._regions = [];
+            this._divider = null;
             return;
         }
+
+        // The first band point sits on the last real close — the band is zero
+        // wide there — so it is exactly where history ends.
+        const dividerX = timeScale.timeToCoordinate(points[0].time);
+        this._divider = dividerX === null ? null : dividerX;
 
         const project = (time, price) => {
             const x = timeScale.timeToCoordinate(time);
@@ -90,7 +123,7 @@ class BandPaneView {
             return x === null || y === null ? null : { x, y };
         };
 
-        const build = (upperKey, lowerKey, fill) => {
+        const build = (upperKey, lowerKey, fill, stroke) => {
             const upper = [];
             const lower = [];
             for (const point of points) {
@@ -101,12 +134,12 @@ class BandPaneView {
                     lower.push(bottom);
                 }
             }
-            return { upper, lower, fill };
+            return { upper, lower, fill, stroke };
         };
 
         this._regions = [
-            build("upper95", "lower95", this._source.options.fill95),
-            build("upper68", "lower68", this._source.options.fill68),
+            build("upper95", "lower95", this._source.options.fill95, this._source.options.stroke95),
+            build("upper68", "lower68", this._source.options.fill68, this._source.options.stroke68),
         ];
     }
 
@@ -122,13 +155,19 @@ class BandPaneView {
     }
 
     renderer() {
-        return new BandRenderer(this._regions);
+        return new BandRenderer(this._regions, this._divider);
     }
 }
 
+//: Two nested intervals, each with an edge. The outer one is deliberately
+//: faint: it is the wider claim and should read as the softer statement, while
+//: the inner 68% carries the weight. Both are struck with a hairline so the
+//: boundary between them is visible rather than a gradient.
 const DEFAULT_OPTIONS = {
-    fill95: "rgba(99, 102, 241, 0.13)",
-    fill68: "rgba(99, 102, 241, 0.20)",
+    fill95: "rgba(99, 102, 241, 0.10)",
+    stroke95: "rgba(99, 102, 241, 0.28)",
+    fill68: "rgba(99, 102, 241, 0.22)",
+    stroke68: "rgba(129, 140, 248, 0.55)",
 };
 
 /**

@@ -44,15 +44,14 @@ def export_csv(
 ):
     """Export data as CSV. Resources: prices, predictions, backtest, portfolio."""
     if resource == "prices":
-        import yfinance as yf
-        import pandas as pd
         from datetime import timedelta
+
+        from src.data.ohlcv_cache import safe_yf_download
+
         end = datetime.now().strftime("%Y-%m-%d")
         start = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-        df = yf.download(symbol, start=start, end=end, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if df.empty:
+        df = safe_yf_download(symbol, start=start, end=end)
+        if df is None or df.empty:
             raise HTTPException(404, f"No data for {symbol}")
         output = io.StringIO()
         df.to_csv(output)

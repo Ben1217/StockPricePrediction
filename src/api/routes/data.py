@@ -515,17 +515,35 @@ def get_indicators(
 
 @router.get("/sp500", response_model=SP500Response)
 def get_sp500():
-    """Get S&P 500 constituents."""
+    """
+    The S&P 500 constituents, with the company name and GICS sector for each.
+
+    This is what the client builds its stock picker from, so the name and the
+    sector are part of the answer rather than a nicety: a list of 503 bare
+    tickers cannot be filtered by sector or searched by company name, which is
+    how anyone actually finds a stock in it.
+
+    Both of those used to be dropped. ``get_sp500_constituents`` renames the
+    scraped columns to Symbol / Company / Sector / Industry, and this handler
+    selected the pre-rename ``Security`` and ``GICS Sector`` -- so every call
+    raised KeyError into a bare ``except: pass``, fell through to the
+    ticker-only path, and scraped Wikipedia a second time to return symbols
+    alone. The endpoint answered 200 with a plausible count throughout, which
+    is why it read as working.
+    """
     try:
         from src.data.market_data import get_sp500_constituents
         df = get_sp500_constituents()
         if df is not None and not df.empty:
-            symbols = df[["Symbol", "Security", "GICS Sector"]].rename(
-                columns={"Security": "company", "GICS Sector": "sector", "Symbol": "symbol"}
-            ).to_dict("records")
+            frame = df.rename(columns={"Symbol": "symbol", "Company": "company", "Sector": "sector"})
+            columns = [c for c in ("symbol", "company", "sector") if c in frame.columns]
+            symbols = frame[columns].astype(str).to_dict("records")
             return SP500Response(symbols=symbols, count=len(symbols))
-    except Exception:
-        pass
+        logger.warning("S&P 500 constituent scrape returned nothing; falling back to tickers only")
+    except Exception as exc:
+        # Still a fallback rather than a 500 -- a ticker-only list is a usable
+        # picker -- but it is no longer silent about why it degraded.
+        logger.warning("Could not build the full S&P 500 constituent table: %s", exc, exc_info=True)
     tickers = get_sp500_tickers()
     return SP500Response(symbols=[{"symbol": t} for t in tickers], count=len(tickers))
 

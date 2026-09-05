@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.data.data_acquisition import get_sp500_tickers
-from src.defaults import DEFAULT_INDEX_SYMBOL
+from src.defaults import DEFAULT_INDEX_SYMBOL, DEFAULT_TRAINING_LOOKBACK_DAYS
 from src.data.data_loader import download_stock_data
 from src.features.feature_engineering import (
     build_supervised_dataset,
@@ -23,11 +23,16 @@ from src.models.model_bundle import select_model_metadata, save_model_bundle
 from src.models.direction_utils import (
     BUY_PROBABILITY_THRESHOLD,
     NEXT_DAY_HORIZON,
+    direction_skill_passes,
+    direction_skill_record,
     normalize_supported_horizons,
     probability_up,
     simple_long_flat_backtest,
 )
 from src.models.model_trainer import ModelTrainer
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 DEFAULT_UI_HORIZONS: List[int] = [NEXT_DAY_HORIZON]
 DEFAULT_BUNDLE_HORIZONS: List[int] = [NEXT_DAY_HORIZON]
@@ -160,6 +165,7 @@ def _evaluate_direction_split(model, X_eval, y_eval, forward_returns) -> Dict[st
     return {
         "metrics": metrics,
         "backtest": simple_long_flat_backtest(probabilities, forward_returns),
+        "skill": direction_skill_record(y_eval, probabilities),
     }
 
 
@@ -168,7 +174,7 @@ def train_model_bundles(
     symbol: str,
     model_type: str,
     horizons: Optional[Iterable[int]] = None,
-    lookback_days: int = 756,
+    lookback_days: int = DEFAULT_TRAINING_LOOKBACK_DAYS,
     test_size: float = 0.2,
     params: Optional[Dict[str, Any]] = None,
     raw_df: Optional[pd.DataFrame] = None,
@@ -300,6 +306,23 @@ def train_model_bundles(
     validation_metrics = validation_summary["metrics"]
     test_metrics = test_summary["metrics"]
 
+    # The gate is decided here, once, and travels with the bundle. Serving reads
+    # the verdict rather than re-deriving it, so a model cannot be judged by one
+    # rule at training time and a different one at request time.
+    test_skill = test_summary["skill"]
+    passes_baseline = direction_skill_passes(test_skill)
+    if not passes_baseline:
+        logger.warning(
+            "%s %s next-day direction fails the skill gate: ROC-AUC %.4f, probability "
+            "spread %.4f, trained on %d rows. The bundle is saved for inspection but "
+            "will not be served.",
+            symbol,
+            model_type,
+            test_skill["roc_auc"],
+            test_skill["probability_std"],
+            len(split["train_frame"]),
+        )
+
     trained_at = datetime.now().isoformat()
     bundle_meta = save_model_bundle(
         model=model,
@@ -341,6 +364,12 @@ def train_model_bundles(
                 "validation": validation_metrics,
                 "test": test_metrics,
             },
+            "passes_baseline": passes_baseline,
+            "skill": {
+                "validation": validation_summary["skill"],
+                "test": test_skill,
+                "rule": "roc_auc_above_0.5_and_probability_std_at_least_0.01",
+            },
             "backtest": {
                 "validation": validation_summary["backtest"],
                 "test": test_summary["backtest"],
@@ -361,6 +390,8 @@ def train_model_bundles(
         "validation": validation_metrics,
         "test": test_metrics,
         "backtest": test_summary["backtest"],
+        "passes_baseline": passes_baseline,
+        "skill": test_skill,
     }
 
     return {
@@ -380,7 +411,7 @@ def train_batch_model_bundles(
     use_sp500: bool = False,
     model_types: Optional[Iterable[str]] = None,
     horizons: Optional[Iterable[int]] = None,
-    lookback_days: int = 756,
+    lookback_days: int = DEFAULT_TRAINING_LOOKBACK_DAYS,
     test_size: float = 0.2,
     params: Optional[Dict[str, Dict[str, Any]]] = None,
     skip_fresh_hours: Optional[int] = None,

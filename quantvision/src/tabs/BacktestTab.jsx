@@ -629,11 +629,11 @@ export default function BacktestTab({
     } else if (ranConfig && signalsQuery.isPending) {
         accuracyMessage = `Loading ${modelLabel} calls for ${ranConfig.symbol}…`;
     } else if (ranConfig && signalsQuery.error) {
-        // 404 and 409 are one situation wearing two status codes: there is no
-        // model that forecasts direction for this symbol. Only the cause and
-        // the remedy differ, and neither is a fault — rendering them red as
-        // "the request failed" sends a reader hunting a network problem they
-        // do not have.
+        // Neither status is a fault, so neither renders red — that sends a
+        // reader hunting a network problem they do not have. 404 means no
+        // direction model exists for this symbol. 409 means one exists but
+        // must not be served, and the server says which of several reasons
+        // applies.
         const status = signalsQuery.error.status;
         if (status === 404) {
             accuracyStatus = "empty";
@@ -641,17 +641,22 @@ export default function BacktestTab({
                 `No ${modelLabel} model for ${ranConfig.symbol} yet. Training starts on its own ` +
                 `when the symbol is selected; this panel fills in once it finishes.`;
         } else if (status === 409) {
-            // Deliberately not "it will retrain itself". Readiness decides by
-            // whether a bundle file is present and how old it is; it never
-            // reads what the bundle was trained for. So a legacy price bundle
-            // satisfies the check, auto-preparation skips the symbol, and this
-            // state persists until someone forces a retrain.
+            // Three different causes share this status — a legacy bundle
+            // trained to predict price, a model that does not beat a coin flip
+            // out of sample, and one that emits the same probability for every
+            // bar — and they need different fixes. The server names the one
+            // that applies, so it is shown rather than restated here; the
+            // sentence this used to hardcode was wrong for two of the three as
+            // soon as the skill gate began using the code.
+            //
+            // Common to all three: none of them clears on its own. Readiness
+            // decides by whether a bundle file exists and how old it is, never
+            // by what it was trained for or whether it works, so auto-preparation
+            // skips the symbol and the state persists until a forced retrain.
             accuracyStatus = "empty";
-            accuracyMessage =
-                `The ${modelLabel} bundle for ${ranConfig.symbol} was trained to predict price, ` +
-                `not direction, so its calls cannot be scored. This one will not fix itself: ` +
-                `readiness checks that a bundle exists, not what it was trained for, so a forced ` +
-                `retrain is needed.`;
+            accuracyMessage = signalsQuery.error.detail
+                ? `${signalsQuery.error.detail} Auto-preparation will not do this on its own.`
+                : `The ${modelLabel} bundle for ${ranConfig.symbol} cannot be scored and needs a forced retrain.`;
         } else {
             accuracyStatus = "error";
             accuracyMessage = signalsQuery.error.message || "The model's past calls could not be loaded.";

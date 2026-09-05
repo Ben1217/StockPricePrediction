@@ -5,6 +5,7 @@ rebalancing, correlation, Monte Carlo simulation, sectors, alerts, drift.
 
 import json
 import logging
+import math
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 from src.api.schemas.schemas import (
     PortfolioOptimizeRequest, PortfolioOptimizeResponse, EfficientFrontierResponse
 )
-from src.data.ohlcv_cache import cached_download
+from src.data.ohlcv_cache import cached_download, normalize_ohlcv_frame, safe_yf_download
 from src.portfolio.optimization import (
     optimize_portfolio, calculate_efficient_frontier, calculate_rebalancing_trades
 )
@@ -34,6 +35,49 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _finite(value, default: float = 0.0) -> float:
+    """
+    Coerce `value` to a float that JSON can actually represent.
+
+    NaN and ±Inf are legitimate outcomes of the maths here — a zero-variance
+    window makes a Sharpe ratio infinite, an empty CVaR tail makes it NaN — but
+    they cannot be rendered, so they collapse to `default` for the typed fields
+    that must hold a number.
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if math.isfinite(result) else default
+
+
+def _json_safe(obj):
+    """
+    Recursively replace non-finite floats with None and numpy scalars with builtins.
+
+    FastAPI renders responses with ``json.dumps(..., allow_nan=False)``, so one NaN
+    anywhere in the payload raises ValueError *after* the handler has returned and
+    the browser sees a bare 500. Reporting the unmeasurable cell as null keeps the
+    rest of the answer intact, which is what the caller actually needs.
+    """
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, (float, np.floating)):
+        value = float(obj)
+        return value if math.isfinite(value) else None
+    if isinstance(obj, np.ndarray):
+        return _json_safe(obj.tolist())
+    if isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    return obj
+
 
 def _parse_json_param(raw: Optional[str], name: str) -> Optional[dict]:
     """
@@ -62,31 +106,63 @@ def _fetch_returns(symbols, lookback_days):
     tickers over the same window, and a burst of identical uncached requests is
     what earns a 429 from Yahoo. `cached_download` also retries with backoff and
     falls back to an expired entry, so a provider hiccup degrades instead of
-    raising — an exception here is what produced the unexplained 500s.
-    """
-    import yfinance as yf
+    raising.
 
+    Everything after the download is defensive because this function assembles a
+    frame from several independent sources, and any one of them being malformed
+    used to take down the whole request:
+
+      * ``safe_yf_download`` holds the global download lock and returns exactly
+        one ticker's columns. Without it, two overlapping requests merged into a
+        single frame with duplicate 'Close' labels, ``df["Close"]`` came back
+        two-dimensional, and ``pd.DataFrame({...})`` raised "Data must be
+        1-dimensional" — a 500 for every request in flight.
+      * Duplicate timestamps are collapsed upstream, since duplicate index labels
+        make the alignment below raise instead of aligning.
+      * Non-positive prices are dropped, because ``pct_change`` turns them into
+        ±Inf and FastAPI renders with ``allow_nan=False``.
+    """
     end = datetime.now().strftime("%Y-%m-%d")
     start = (datetime.now() - timedelta(days=lookback_days + 30)).strftime("%Y-%m-%d")
 
+    seen, ordered = set(), []
+    for raw in symbols:
+        sym = str(raw or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            ordered.append(sym)
+    if not ordered:
+        raise HTTPException(400, "No symbols given.")
+
     frames, failed = {}, []
-    for sym in symbols:
+    for sym in ordered:
         def _download(symbol=sym):
-            df = yf.download(symbol, start=start, end=end, progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            return df
+            return safe_yf_download(symbol, start=start, end=end)
 
         try:
-            df = cached_download(sym, start, end, "1d", _download)
+            # "1d-adj" namespaces these adjusted closes away from the raw bars
+            # training caches under the same ticker and window. The key covers
+            # ticker/range/interval only, so sharing a tag across callers with
+            # different auto_adjust settings serves one caller the other's prices.
+            df = cached_download(sym, start, end, "1d-adj", _download)
+            # Cache entries predate the normalizer, so clean on the way out too.
+            df = normalize_ohlcv_frame(df, sym)
         except Exception:  # noqa: BLE001 - provider raises many shapes
             logger.exception("Price download failed for %s", sym)
             df = None
 
-        if df is None or df.empty or "Close" not in df.columns:
+        if df is None or df.empty:
             failed.append(sym)
             continue
-        frames[sym] = df["Close"]
+
+        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+        # A non-positive price makes pct_change return inf, and FastAPI renders with
+        # allow_nan=False, so a single bad tick would 500 the whole response.
+        close = close[close > 0]
+        if close.empty:
+            failed.append(sym)
+            continue
+        frames[sym] = close
 
     if not frames:
         raise HTTPException(
@@ -97,8 +173,14 @@ def _fetch_returns(symbols, lookback_days):
     if failed:
         logger.warning("Dropping symbols with no price data: %s", ", ".join(failed))
 
-    prices = pd.DataFrame(frames).dropna()
-    returns = prices.pct_change().dropna().tail(lookback_days)
+    prices = pd.concat(frames, axis=1, join="outer").sort_index().dropna()
+    prices.columns = list(frames)
+    returns = (
+        prices.pct_change()
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+        .tail(lookback_days)
+    )
     return returns, prices
 
 
@@ -118,14 +200,20 @@ def optimize(req: PortfolioOptimizeRequest):
         returns, objective=req.method.value,
         risk_free_rate=req.risk_free_rate, constraints=constraints
     )
+    # A solver that half-converges can hand back NaN weights; those would poison
+    # every metric below and then fail to render as a `float` response field.
+    weights = {str(k): _finite(v) for k, v in weights.items()}
 
     # Compute portfolio metrics
     mean_ret = returns.mean() * 252
     cov = returns.cov() * 252
     w = np.array([weights.get(s, 0) for s in returns.columns])
-    exp_ret = float(mean_ret.values @ w)
-    vol = float(np.sqrt(w @ cov.values @ w))
-    sharpe = (exp_ret - req.risk_free_rate) / vol if vol > 0 else 0
+    exp_ret = _finite(mean_ret.values @ w)
+    # A covariance quadratic form can land a hair below zero on a near-singular
+    # window, and sqrt of that is NaN rather than an error.
+    variance = _finite(w @ cov.values @ w)
+    vol = math.sqrt(variance) if variance > 0 else 0.0
+    sharpe = (exp_ret - req.risk_free_rate) / vol if vol > 0 else 0.0
 
     port_daily_ret = (returns * pd.Series(weights)).sum(axis=1)
     perf = calculate_portfolio_metrics(port_daily_ret)
@@ -136,12 +224,14 @@ def optimize(req: PortfolioOptimizeRequest):
 
     return PortfolioOptimizeResponse(
         method=req.method.value,
-        weights={k: round(v, 4) for k, v in weights.items()},
+        weights={k: round(v, 4) for k, v in weights.items()},  # already finite
         expected_return=round(exp_ret, 4),
         volatility=round(vol, 4),
         sharpe_ratio=round(sharpe, 4),
-        metrics={k: round(float(v), 4) if isinstance(v, (int, float, np.floating)) else v
-                 for k, v in perf.items()},
+        metrics=_json_safe({
+            k: round(float(v), 4) if isinstance(v, (int, float, np.floating)) else v
+            for k, v in perf.items()
+        }),
     )
 
 
@@ -156,14 +246,26 @@ def efficient_frontier(req: PortfolioOptimizeRequest):
 
     points = []
     for v, r, w in zip(vols, rets, weights_list):
+        # Degenerate solves produce a NaN volatility; such a point cannot be
+        # plotted or compared, so drop it rather than render it as a hole.
+        vol, ret = float(v), float(r)
+        if not (math.isfinite(vol) and math.isfinite(ret)) or vol <= 0:
+            continue
         points.append({
-            "volatility": round(float(v), 4),
-            "return": round(float(r), 4),
-            "sharpe": round((float(r) - 0.04) / float(v), 4) if float(v) > 0 else 0,
-            "weights": {k: round(float(wv), 4) for k, wv in w.items()},
+            "volatility": round(vol, 4),
+            "return": round(ret, 4),
+            "sharpe": round((ret - 0.04) / vol, 4),
+            "weights": {k: round(_finite(wv), 4) for k, wv in w.items()},
         })
 
-    optimal = max(points, key=lambda p: p["sharpe"]) if points else {}
+    if not points:
+        raise HTTPException(
+            422,
+            "Could not build an efficient frontier from this data — the covariance "
+            "matrix is degenerate. Try a longer lookback or fewer correlated symbols.",
+        )
+
+    optimal = max(points, key=lambda p: p["sharpe"])
     return EfficientFrontierResponse(points=points, optimal_portfolio=optimal)
 
 
@@ -201,7 +303,7 @@ def portfolio_metrics(
     if include_attribution:
         result["attribution"] = calculate_contribution(returns_df, w)
 
-    return result
+    return _json_safe(result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,7 +337,7 @@ def rebalance_portfolio(request: RebalanceRequest):
         total_portfolio_value=request.total_portfolio_value,
         transaction_cost_bps=request.transaction_cost_bps,
     )
-    return result
+    return _json_safe(result)
 
 
 # ── §4.4 Weight Drift Tracking ───────────────────────────────────────────────
@@ -262,12 +364,12 @@ def get_weight_drift(
         current_values=cv,
         total_value=total_value,
     )
-    return {
+    return _json_safe({
         "drift": drift,
         "last_rebalanced": snapshot["saved_at"],
         "strategy": snapshot["strategy"],
         "needs_rebalance_count": sum(1 for v in drift.values() if v["needs_rebalance"]),
-    }
+    })
 
 
 # ── §5.1 Correlation Heatmap ─────────────────────────────────────────────────
@@ -286,7 +388,9 @@ def get_correlation(
     returns_df, _ = _fetch_returns(sym_list, lookback_days)
     if returns_df.empty:
         raise HTTPException(404, "No data")
-    return calculate_correlation_matrix(returns_df, high_corr_threshold)
+    # A symbol that never moved in the window has zero variance, so its whole row
+    # of correlations is NaN; those cells serialise as null instead of 500ing.
+    return _json_safe(calculate_correlation_matrix(returns_df, high_corr_threshold))
 
 
 # ── §5.2 Monte Carlo Simulation ──────────────────────────────────────────────
@@ -312,13 +416,13 @@ def simulate_portfolio(request: SimulateRequest):
     returns_df, _ = _fetch_returns(request.symbols, request.lookback_days)
     if returns_df.empty:
         raise HTTPException(404, "No data")
-    return run_monte_carlo(
+    return _json_safe(run_monte_carlo(
         returns_df=returns_df,
         weights=request.weights,
         n_simulations=request.n_simulations,
         n_days=request.n_days,
         initial_value=request.initial_value,
-    )
+    ))
 
 
 # ── §5.3 Sector Allocation ───────────────────────────────────────────────────
@@ -336,7 +440,7 @@ def get_sectors(
     """
     sym_list = [s.strip().upper() for s in symbols.split(",")]
     w = _parse_json_param(weights, "weights") or {s: 1 / len(sym_list) for s in sym_list}
-    return get_sector_allocation(w)
+    return _json_safe(get_sector_allocation(w))
 
 
 # ── §5.4 Risk Controls & Alerts ──────────────────────────────────────────────
@@ -376,8 +480,8 @@ def get_risk_alerts(
         portfolio_metrics=metrics,
         correlation_result=correlation,
     )
-    return {
+    return _json_safe({
         "alerts": alerts,
         "alert_count": len(alerts),
         "critical_count": sum(1 for a in alerts if a["severity"] == "CRITICAL"),
-    }
+    })

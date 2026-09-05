@@ -22,6 +22,7 @@ import yfinance as yf
 from cachetools import TTLCache
 
 from src.data.live_data import get_cache_ttl, is_market_open
+from src.data.ohlcv_cache import YF_DOWNLOAD_LOCK, normalize_ohlcv_frame, ticker_variants
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,10 @@ _cache_closed: TTLCache = TTLCache(maxsize=MAX_CACHED_FRAMES, ttl=_CLOSED_TTL)
 # these calls. Now that handlers run in a threadpool they genuinely overlap, so the
 # network call itself is serialised here. The cache absorbs most requests, and the point
 # of the threadpool is that the event loop stays free, not that Yahoo is hit in parallel.
-_download_lock = threading.Lock()
+# The lock lives in ohlcv_cache so that this module, the on-disk cache and every route
+# that reaches yfinance share ONE lock object. Two separate locks would each serialise
+# their own callers and still let the two groups race against each other.
+_download_lock = YF_DOWNLOAD_LOCK
 
 # Exported so routes that call yf.download directly (the batch quotes endpoint) share it.
 download_lock = _download_lock
@@ -108,21 +112,17 @@ def cache_stats() -> dict:
         }
 
 
-def _normalise(df: pd.DataFrame) -> pd.DataFrame:
-    """Flatten yfinance's MultiIndex columns and drop rows with no close price."""
-    if df is None or df.empty:
+def _normalise(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
+    """Flatten yfinance's MultiIndex columns and drop rows with no close price.
+
+    Delegates to the shared normalizer, which picks the field level by name and — when
+    a concurrent download has merged a second symbol in — keeps `symbol`'s columns
+    rather than whichever happened to sort first.
+    """
+    cleaned = normalize_ohlcv_frame(df, symbol)
+    if cleaned is None:
         return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    # Defence in depth against the thread-safety issue above: if a frame still comes
-    # back with duplicated column labels, keep the first of each rather than handing
-    # downstream code a DataFrame whose row["Close"] is a Series.
-    if df.columns.duplicated().any():
-        logger.warning("Dropping duplicate columns from fetched frame: %s", list(df.columns))
-        df = df.loc[:, ~df.columns.duplicated()]
-    if "Close" in df.columns:
-        df = df.dropna(subset=["Close"])
-    return df
+    return cleaned.dropna(subset=["Close"])
 
 
 def fetch_ohlcv(
@@ -157,29 +157,46 @@ def fetch_ohlcv(
         if cached is not None:
             return cached
 
+    def _download(spelling: str) -> pd.DataFrame:
+        try:
+            with _download_lock:
+                if use_range:
+                    return yf.download(spelling, start=start, end=end, interval=interval, progress=False)
+                return yf.download(spelling, period=resolved_period, interval=interval, progress=False)
+        except Exception as exc:
+            logger.warning("yfinance fetch failed for %s at %s: %s", spelling, interval, exc)
+            return pd.DataFrame()
+
+    # `ticker_variants` is the same class-share fallback the prediction path
+    # uses: the index prints BRK.B and BF.B, Yahoo indexes them as BRK-B and
+    # BF-B, and this is the route the "Search Any Ticker" box validates against
+    # — so without it a ticker whose forecast serves fine is rejected as
+    # nonexistent before it can ever be added to a watchlist.
     df = pd.DataFrame()
-    try:
-        with _download_lock:
-            if use_range:
-                df = yf.download(symbol, start=start, end=end, interval=interval, progress=False)
-            else:
-                df = yf.download(symbol, period=resolved_period, interval=interval, progress=False)
-    except Exception as exc:
-        logger.warning("yfinance fetch failed for %s at %s: %s", symbol, interval, exc)
-        df = pd.DataFrame()
+    resolved = symbol
+    for spelling in ticker_variants(symbol):
+        df = _download(spelling)
+        # Yahoo intermittently returns an empty frame for valid symbols; retry
+        # once wider before moving on to the next spelling, so a transient
+        # empty response is not misread as "wrong spelling".
+        if df.empty:
+            fallback = FALLBACK_PERIODS.get(interval)
+            if fallback:
+                try:
+                    with _download_lock:
+                        df = yf.download(spelling, period=fallback, interval=interval, progress=False)
+                except Exception as exc:
+                    logger.error("Fallback fetch failed for %s at %s: %s", spelling, interval, exc)
+                    df = pd.DataFrame()
+        if not df.empty:
+            resolved = spelling
+            if spelling != symbol:
+                logger.info("Resolved %s as %s", symbol, spelling)
+            break
 
-    # Yahoo intermittently returns an empty frame for valid symbols; retry once wider.
-    if df.empty:
-        fallback = FALLBACK_PERIODS.get(interval)
-        if fallback:
-            try:
-                with _download_lock:
-                    df = yf.download(symbol, period=fallback, interval=interval, progress=False)
-            except Exception as exc:
-                logger.error("Fallback fetch failed for %s at %s: %s", symbol, interval, exc)
-                df = pd.DataFrame()
-
-    df = _normalise(df)
+    # Normalised against the spelling that answered — the frame's MultiIndex
+    # carries that name, not the one the caller asked for.
+    df = _normalise(df, resolved)
     if use_cache:
         cache_set(key, df)
     return df

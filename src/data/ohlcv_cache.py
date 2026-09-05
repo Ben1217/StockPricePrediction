@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -270,3 +272,166 @@ def _load_ignoring_ttl(cache: OHLCVCache, ticker: str, start: str, end: str, int
         return df if not df.empty else None
     except Exception:
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THREAD-SAFE DOWNLOADS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# ``yfinance.download`` is not thread-safe. It stores every result in module-level
+# globals and resets them on entry::
+#
+#     shared._DFS = {}                       # cleared by EVERY caller
+#     while len(shared._DFS) < len(tickers): ...
+#     data = pd.concat(shared._DFS.values(), axis=1, keys=shared._DFS.keys(), ...)
+#
+# Two overlapping calls therefore share one dict, and each ends up concatenating the
+# other's ticker into its own result. The caller for XOM gets a frame whose columns are
+# ``[('Close','NVDA'), ('Close','XOM'), ...]``; flattening that to the first level leaves
+# two 'Close' columns, so ``df["Close"]`` is a DataFrame rather than a Series and the
+# next ``pd.DataFrame(...)`` raises "Data must be 1-dimensional" — an uncaught 500 for
+# every request in flight. The same crossover silently files one symbol's bars under
+# another's cache key, which is how a correlation matrix reported XOM and NVDA at 1.00.
+#
+# This was harmless while route handlers were ``async def``, because the event loop
+# serialised them. FastAPI runs plain ``def`` handlers in a threadpool, so they now
+# genuinely overlap. One process-wide lock is the fix; the disk cache absorbs the
+# repeat asks, so serialising the network call costs little.
+YF_DOWNLOAD_LOCK = threading.RLock()
+
+_OHLCV_FIELDS = {"open", "high", "low", "close", "adj close", "volume", "dividends", "stock splits"}
+
+
+def _pick_field_level(columns: pd.MultiIndex) -> int:
+    """Return the level of `columns` holding OHLCV field names, preferring level names."""
+    names = [str(n).lower() if n is not None else "" for n in columns.names]
+    for level, name in enumerate(names):
+        if name == "price":
+            return level
+    for level, name in enumerate(names):
+        if name == "ticker":
+            return 1 - level if columns.nlevels == 2 else level
+    # Unnamed levels: the field level is the one whose values look like OHLCV fields.
+    for level in range(columns.nlevels):
+        values = {str(v).lower() for v in columns.get_level_values(level)}
+        if values & _OHLCV_FIELDS:
+            return level
+    return 0
+
+
+def normalize_ohlcv_frame(df: Optional[pd.DataFrame], ticker: str) -> Optional[pd.DataFrame]:
+    """
+    Reduce a yfinance frame to plain single-level OHLCV columns for one ticker.
+
+    Handles the shapes that reach us in practice: a flat frame, a
+    ``(Price, Ticker)`` MultiIndex, the transposed ``(Ticker, Price)`` from
+    ``group_by='ticker'``, and — the one that used to crash — a frame carrying a
+    second symbol's columns because a concurrent download bled into it. Returns
+    None when nothing usable is left, so callers can treat it like an empty frame.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    df = df.copy()
+    want = str(ticker).upper()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        field_level = _pick_field_level(df.columns)
+        other_levels = [lvl for lvl in range(df.columns.nlevels) if lvl != field_level]
+        # Keep only this ticker's columns when the frame carries several symbols.
+        for lvl in other_levels:
+            values = [str(v).upper() for v in df.columns.get_level_values(lvl)]
+            if want in values:
+                df = df.loc[:, [v == want for v in values]]
+                break
+        df.columns = df.columns.get_level_values(field_level)
+
+    df.columns = [str(c) for c in df.columns]
+
+    # A merged frame can still leave duplicate field names; the first is this
+    # ticker's after the selection above, and dropping the rest keeps every
+    # column one-dimensional.
+    if len(set(df.columns)) != len(df.columns):
+        logger.warning(
+            "Duplicate columns %s in frame for %s; keeping the first of each",
+            [c for c in df.columns if list(df.columns).count(c) > 1][:4], want,
+        )
+        df = df.loc[:, ~pd.Index(df.columns).duplicated()]
+
+    df = _normalize_index(df, want)
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    return df
+
+
+def _normalize_index(df: pd.DataFrame, ticker: str) -> Optional[pd.DataFrame]:
+    """Sort the index, drop tz, and collapse repeated timestamps to one row each."""
+    try:
+        idx = pd.DatetimeIndex(df.index)
+    except (TypeError, ValueError):
+        logger.warning("Non-datetime index for %s; leaving it as-is", ticker)
+        return df[~df.index.duplicated(keep="last")].sort_index()
+
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    df.index = idx
+    df = df.sort_index()
+    if df.index.has_duplicates:
+        # Duplicate labels make every later pd.DataFrame({...}) alignment raise
+        # "cannot reindex on an axis with duplicate labels".
+        logger.warning("Duplicate timestamps in frame for %s; keeping the last of each", ticker)
+        df = df[~df.index.duplicated(keep="last")]
+    return df
+
+
+#: A US class share is written with a dot on the exchange and with a dash on
+#: Yahoo: the S&P 500 constituent table lists BRK.B and BF.B, and yfinance
+#: answers both with "possibly delisted; no timezone found". The dot form
+#: reaches us from the index list, from a saved watchlist and from anyone who
+#: types the ticker the way it is printed, so it has to resolve.
+_CLASS_SHARE_SUFFIX = re.compile(r"^([A-Z0-9]{1,6})\.([A-Z])$")
+
+
+def ticker_variants(ticker: str) -> list[str]:
+    """
+    ``ticker`` first, then the spellings Yahoo may know it by instead.
+
+    The dash form is a FALLBACK and never a rewrite. A trailing dot is also how
+    Yahoo names a foreign listing's exchange -- SHEL.L, RY.TO, 0700.HK -- and
+    those single-letter suffixes are indistinguishable from a share class by
+    shape alone. Rewriting up front would break symbols that resolve today;
+    trying the dot form first and the dash form only once it comes back empty
+    costs one extra request on a symbol that already had none.
+    """
+    want = str(ticker).upper().strip()
+    variants = [want]
+    match = _CLASS_SHARE_SUFFIX.match(want)
+    if match:
+        variants.append(f"{match.group(1)}-{match.group(2)}")
+    return variants
+
+
+def safe_yf_download(ticker: str, **kwargs) -> Optional[pd.DataFrame]:
+    """
+    Download one ticker's bars under `YF_DOWNLOAD_LOCK` and normalize the result.
+
+    Every ``yf.download`` in this process must go through here (or hold the same
+    lock); a single unguarded caller is enough to corrupt everybody else's frame.
+
+    Falls back through :func:`ticker_variants` when a spelling returns nothing,
+    so a class share reaches the provider in the form it indexes.
+    """
+    import yfinance as yf
+
+    kwargs.setdefault("progress", False)
+    for symbol in ticker_variants(ticker):
+        with YF_DOWNLOAD_LOCK:
+            raw = yf.download(symbol, **kwargs)
+        # Normalized against the spelling actually requested: the frame's
+        # MultiIndex carries that name, not the one the caller asked for.
+        frame = normalize_ohlcv_frame(raw, symbol)
+        if frame is not None and not frame.empty:
+            if symbol != str(ticker).upper().strip():
+                logger.info("Resolved %s as %s", ticker, symbol)
+            return frame
+    return None

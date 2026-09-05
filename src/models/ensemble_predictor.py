@@ -26,6 +26,7 @@ from src.features.feature_engineering import (
     normalize_feature_config,
     transform_feature_frame,
 )
+from src.defaults import ENFORCE_MODEL_SKILL_ENV
 from src.models.regression_models import REGRESSOR_FACTORIES, REGRESSOR_FILE_NAMES
 from src.utils.config_loader import get_env_bool
 from src.utils.logger import get_logger
@@ -48,7 +49,8 @@ N_DISPLAY_PATHS = 12   # scenario lines handed to the frontend fan chart
 # are treated as unproven, because those are precisely the ones that returned a
 # fixed number for every input. Set QUANTVISION_ENFORCE_MODEL_SKILL=false to serve
 # them anyway while retraining.
-ENFORCE_MODEL_SKILL_ENV = "QUANTVISION_ENFORCE_MODEL_SKILL"
+# The name itself is imported from src.defaults so the direction gate can share
+# this one flag without importing this module.
 
 # Which mechanism builds the days between today and the horizon.
 #

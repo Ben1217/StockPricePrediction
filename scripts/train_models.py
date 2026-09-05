@@ -15,6 +15,7 @@ from pathlib import Path
 # Add project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.defaults import DEFAULT_TRAINING_LOOKBACK_DAYS  # noqa: E402
 from src.models.bundle_training import (  # noqa: E402
     DEFAULT_BOOTSTRAP_MODELS,
     DEFAULT_BOOTSTRAP_SYMBOLS,
@@ -32,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on the number of symbols to process")
     parser.add_argument("--model-types", nargs="+", default=DEFAULT_BOOTSTRAP_MODELS)
     parser.add_argument("--horizons", nargs="+", type=int, default=DEFAULT_BUNDLE_HORIZONS)
-    parser.add_argument("--lookback-days", type=int, default=756)
+    parser.add_argument("--lookback-days", type=int, default=DEFAULT_TRAINING_LOOKBACK_DAYS)
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--skip-fresh-hours", type=int, default=24)
     return parser.parse_args()

@@ -95,12 +95,11 @@ MIN_SIGNAL_HISTORY = 60
 
 
 def _download_price_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    import yfinance as yf
+    from src.data.ohlcv_cache import safe_yf_download
 
-    df = yf.download(symbol, start=start_date, end=end_date, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df.sort_index()
+    df = safe_yf_download(symbol, start=start_date, end=end_date)
+    if df is None:
+        df = pd.DataFrame()
 
     required_cols = {"Open", "High", "Low", "Close", "Volume"}
     if df.empty or not required_cols.issubset(df.columns):

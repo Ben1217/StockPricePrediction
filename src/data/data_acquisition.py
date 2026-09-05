@@ -12,6 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from ..utils.logger import get_logger
+from .ohlcv_cache import YF_DOWNLOAD_LOCK
 
 logger = get_logger(__name__)
 
@@ -109,7 +110,8 @@ def download_index_data(
 
     for ticker in tqdm(tickers, desc=f"Downloading {index_name}"):
         try:
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            with YF_DOWNLOAD_LOCK:
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)

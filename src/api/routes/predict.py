@@ -63,6 +63,7 @@ from src.models.direction_utils import (
     SELL_PROBABILITY_THRESHOLD,
     confidence_from_probability,
     direction_from_probability,
+    direction_skill_failure,
     expected_move_from_probability,
     probability_up,
     signal_from_probability,
@@ -86,7 +87,30 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 LOOKBACK_DAYS = 1825
+#: Rows the *legacy* regression and direction bundles need. Those read the wide
+#: feature frame, SMA_200 among it, so a frame shorter than this hands the model
+#: a warm-up column rather than an indicator.
 MIN_LONG_WINDOW_HISTORY_ROWS = 260
+#: Rows the foundation stack needs, which is a different and much smaller
+#: number. It reads only the twelve Spec v2 Section 4 covariates, whose longest
+#: window is 20 bars, and never SMA_200 -- so the 260-row gate was refusing
+#: symbols the models can serve perfectly well. Measured, not guessed:
+#: ``build_technical_features`` raises below 28 rows, leaves OBV_Slope_20 NaN on
+#: the last row through 39, and is complete from 40. A NaN covariate is not a
+#: crash but it does silently drop Chronos-2 to its univariate arm, so the floor
+#: is the first row count at which every member gets the input it is documented
+#: to receive.
+#:
+#: This is what shut the Predictions tab off for every recent listing in the
+#: index. Three S&P 500 constituents sat under 260 bars -- Q (216), FDXF (71)
+#: and HONA (58), all 2025-26 spinoffs with complete, current data -- and all
+#: three answered 422 while Chronos-2 and TimesFM 2.5 could forecast them.
+MIN_FORECAST_HISTORY_ROWS = 40
+#: Below this the frame is too short for Kronos's 128-bar context, so the
+#: forecast comes from two members instead of three. Not an error -- the
+#: response names the members that ran -- but the caller is told, because
+#: "thin history" is a real qualifier on the number.
+FULL_STACK_HISTORY_ROWS = 128
 N_SCENARIOS = 50       # Monte Carlo paths
 N_DISPLAY_PATHS = 12   # scenario lines sent to the frontend
 
@@ -95,24 +119,32 @@ N_DISPLAY_PATHS = 12   # scenario lines sent to the frontend
 # Data helpers
 # ---------------------------------------------------------------------------
 
-def _download_prediction_data(symbol: str) -> pd.DataFrame:
+def _download_prediction_data(
+    symbol: str,
+    min_rows: int = MIN_LONG_WINDOW_HISTORY_ROWS,
+) -> pd.DataFrame:
+    """
+    The bars every prediction route reads, gated on ``min_rows``.
+
+    The gate is a parameter because the two model families genuinely differ:
+    the legacy bundles need :data:`MIN_LONG_WINDOW_HISTORY_ROWS` for their
+    long-window indicators, while the foundation stack needs only
+    :data:`MIN_FORECAST_HISTORY_ROWS`. Sharing one number meant the stricter
+    requirement silently governed a path that does not have it.
+    """
     end = pd.Timestamp.utcnow().tz_localize(None).normalize()
     start = end - pd.Timedelta(days=LOOKBACK_DAYS)
 
     def _fetch() -> Optional[pd.DataFrame]:
-        import yfinance as yf
+        from src.data.ohlcv_cache import safe_yf_download
 
-        raw = yf.download(
+        return safe_yf_download(
             symbol,
             start=start.strftime("%Y-%m-%d"),
             end=end.strftime("%Y-%m-%d"),
             auto_adjust=False,
-            progress=False,
             prepost=True,
         )
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
-        return raw
 
     # Every prediction request used to issue its own download; the disk cache
     # collapses those into one call per symbol per TTL window. The "1d-prepost"
@@ -129,16 +161,17 @@ def _download_prediction_data(symbol: str) -> pd.DataFrame:
     df = df.sort_index().ffill().dropna().ffill().dropna()
     if df.empty:
         raise HTTPException(404, f"No data for {symbol}")
-    if len(df) < MIN_LONG_WINDOW_HISTORY_ROWS:
-        logger.error(
-            "Prediction download for %s returned only %s rows; need at least %s rows for long-window indicators such as SMA_200",
+    if len(df) < min_rows:
+        logger.warning(
+            "Download for %s returned %s rows; this path needs at least %s",
             symbol,
             len(df),
-            MIN_LONG_WINDOW_HISTORY_ROWS,
+            min_rows,
         )
         raise HTTPException(
             422,
-            f"Need at least {MIN_LONG_WINDOW_HISTORY_ROWS} historical candles for prediction feature engineering.",
+            f"{symbol} has only {len(df)} trading days of history; "
+            f"this forecast needs at least {min_rows}.",
         )
     return df
 
@@ -153,8 +186,28 @@ def _valid_price(value) -> Optional[float]:
     return price
 
 
+#: The quote fields ``_latest_available_price`` can actually use. A yfinance
+#: payload that carries none of them is metadata, not a quote, however many
+#: other keys it has.
+_QUOTE_FIELDS = ("regularMarketPrice", "preMarketPrice", "postMarketPrice")
+
+
+def _has_quote(info: Dict[str, object]) -> bool:
+    """True when `info` carries at least one usable price."""
+    return any(_valid_price(info.get(field)) is not None for field in _QUOTE_FIELDS)
+
+
 def _latest_available_price(symbol: str, raw_df: pd.DataFrame) -> Tuple[float, str]:
-    """Resolve the base price, including extended-hours quotes when available."""
+    """
+    Resolve the base price, including extended-hours quotes when available.
+
+    The quote is looked up under every spelling the bars could have come from,
+    not just the one the caller typed. Those two used to diverge: the download
+    resolves BRK.B to the dash form the provider indexes, while this function
+    asked ``yf.Ticker("BRK.B")``, got nothing, and fell through to the last
+    close -- so the same stock reported a live quote under one spelling and a
+    stale close under the other, with nothing on screen to say which.
+    """
     latest_close = _valid_price(raw_df["Close"].iloc[-1])
     if latest_close is None:
         raise HTTPException(422, "Latest close price is unavailable for prediction.")
@@ -164,11 +217,30 @@ def _latest_available_price(symbol: str, raw_df: pd.DataFrame) -> Tuple[float, s
     try:
         import yfinance as yf
 
-        ticker = yf.Ticker(symbol)
-        try:
-            info = ticker.get_info() or {}
-        except Exception as exc:
-            logger.info("Could not fetch yfinance info for %s: %s", symbol, exc)
+        from src.data.ohlcv_cache import ticker_variants
+
+        # A spelling counts as resolved only when it yields a PRICE. An
+        # unknown ticker does not come back empty: yfinance answers BRK.B with
+        # a truthy 15-key stub (symbol, region, priceHint, tradeable...) that
+        # carries no quote at all, while BRK-B returns 175 keys including
+        # regularMarketPrice. Testing the dict for truthiness therefore
+        # accepted the stub and never tried the spelling that works.
+        for spelling in ticker_variants(symbol):
+            candidate = yf.Ticker(spelling)
+            try:
+                probe = candidate.get_info() or {}
+            except Exception as exc:
+                logger.info("Could not fetch yfinance info for %s: %s", spelling, exc)
+                probe = {}
+            if _has_quote(probe):
+                ticker, info = candidate, probe
+                if spelling != symbol.upper().strip():
+                    logger.info("Quote for %s resolved under %s", symbol, spelling)
+                break
+        else:
+            # No spelling carried a quote. Keep the last stub for its metadata
+            # and let fast_info try; the last-close fallback covers the rest.
+            ticker, info = candidate, probe
         try:
             raw_fast_info = getattr(ticker, "fast_info", {}) or {}
             fast_info = dict(raw_fast_info) if not isinstance(raw_fast_info, dict) else raw_fast_info
@@ -1186,7 +1258,17 @@ def predict(req: PredictRequest):
     symbol = req.symbol.upper()
     model_type = req.model_type.value
     requested_horizon = int(req.horizon)
-    raw_df = _download_prediction_data(symbol)
+    # The unified members are the foundation stack and carry its (much lower)
+    # history requirement; everything else here is a legacy bundle that reads
+    # the wide feature frame.
+    raw_df = _download_prediction_data(
+        symbol,
+        min_rows=(
+            MIN_FORECAST_HISTORY_ROWS
+            if model_type.startswith("unified_")
+            else MIN_LONG_WINDOW_HISTORY_ROWS
+        ),
+    )
     current_price, current_price_source = _latest_available_price(symbol, raw_df)
 
     # ── Unified models (Kronos, unified_xgboost, …) ──────────────────────
@@ -1806,7 +1888,10 @@ def forecast_history(
     yfinance `get_info` calls and the candles do not need it.
     """
     symbol = symbol.upper()
-    raw_df = _download_prediction_data(symbol)
+    # Matched to the forecast route's floor so the chart and the box are drawn
+    # from one frame. A stricter gate here would blank the chart for a symbol
+    # whose forecast is served, which is the worse half of the pair to lose.
+    raw_df = _download_prediction_data(symbol, min_rows=MIN_FORECAST_HISTORY_ROWS)
     return ForecastHistoryResponse(
         symbol=symbol,
         as_of=str(pd.Timestamp(raw_df.index[-1]).date()),
@@ -1883,7 +1968,9 @@ def simple_forecast(symbol: str):
     windows (SMA_200 among them) that a short request would silently truncate.
     """
     symbol = symbol.upper()
-    raw_df = _download_prediction_data(symbol)
+    # The foundation floor, not the legacy one: this route runs Kronos,
+    # Chronos-2 and TimesFM 2.5 and none of them reads a 200-bar indicator.
+    raw_df = _download_prediction_data(symbol, min_rows=MIN_FORECAST_HISTORY_ROWS)
     as_of = str(pd.Timestamp(raw_df.index[-1]).date())
     current_price, current_price_source = _latest_available_price(symbol, raw_df)
 
@@ -1903,6 +1990,8 @@ def simple_forecast(symbol: str):
             anchor_price=round(float(raw_df["Close"].iloc[-1]), 2),
             current_price=round(float(current_price), 2),
             current_price_source=current_price_source,
+            history_days=len(raw_df),
+            thin_history=len(raw_df) < FULL_STACK_HISTORY_ROWS,
         )
 
     # Two reference prices, and the response has to keep them apart.
@@ -1963,8 +2052,17 @@ def simple_forecast(symbol: str):
         expected_change_pct=round(change_pct, 2),
         quote_change_pct=round(quote_change_pct, 2),
         direction=result.direction,
+        probability_up=round(float(result.p_up), 4),
+        # No walk-forward has ever been run over this stack, so the number is
+        # the model's own and nothing has checked it. Stated, not implied.
+        probability_is_calibrated=False,
         forecast_date=forecast_date,
         models=result.members_used,
+        history_days=len(raw_df),
+        # Reported off the frame rather than off len(members_used): a member can
+        # also drop out for reasons that have nothing to do with history, and
+        # those two causes need different sentences.
+        thin_history=len(raw_df) < FULL_STACK_HISTORY_ROWS,
         split=split_reason is not None,
         split_reason=split_reason,
         forecast=[point],
@@ -1989,6 +2087,16 @@ def get_historical_signals(
         raise HTTPException(404, f"No trained {model_type} horizon-1 model bundle found for {symbol}")
     if _validate_bundle_objective(bundle):
         raise HTTPException(409, f"{model_type} bundle for {symbol} must be retrained for next-day direction")
+
+    # A bundle that cannot beat a coin flip is refused rather than drawn. These
+    # signals land on a price chart as BUY and SELL marks, which is the most
+    # credible presentation the app has -- rendering noise that way would be the
+    # one place a reader has no cue that the model failed its own gate.
+    skill_failure = direction_skill_failure(bundle.metadata)
+    if skill_failure:
+        raise HTTPException(
+            409, f"{model_type} bundle for {symbol} {skill_failure}. Retrain it before using these signals."
+        )
 
     feature_frame = build_feature_frame(raw_df, feature_config=bundle.feature_config)
     pred_index, probabilities = _predict_history_probabilities(bundle, feature_frame)

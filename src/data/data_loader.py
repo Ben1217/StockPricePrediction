@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Union
 
 from ..utils.logger import get_logger
-from .ohlcv_cache import cached_download
+from .ohlcv_cache import cached_download, YF_DOWNLOAD_LOCK
 
 logger = get_logger(__name__)
 
@@ -48,30 +48,42 @@ def download_stock_data(
         Historical OHLCV data, or None if download fails
     """
     def _fetch() -> Optional[pd.DataFrame]:
-        data = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            interval=interval,
-            auto_adjust=False,
-            progress=False,
-        )
+        # Class shares reach this path too: the preparation worker trains on
+        # whatever the tab is showing, so a spelling the tab resolves and this
+        # does not turns into a background job that always fails.
+        from .ohlcv_cache import ticker_variants
 
-        # Fix MultiIndex columns if present
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
+        for spelling in ticker_variants(ticker):
+            with YF_DOWNLOAD_LOCK:
+                data = yf.download(
+                    spelling,
+                    start=start_date,
+                    end=end_date,
+                    interval=interval,
+                    auto_adjust=False,
+                    progress=False,
+                )
 
-        if data.empty:
-            logger.warning(f"No data returned for {ticker}")
-            return None
-        logger.info(f"Downloaded {len(data)} records for {ticker}")
-        return data
+            # Fix MultiIndex columns if present
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+
+            if not data.empty:
+                if spelling != str(ticker).upper().strip():
+                    logger.info(f"Resolved {ticker} as {spelling}")
+                logger.info(f"Downloaded {len(data)} records for {spelling}")
+                return data
+
+        logger.warning(f"No data returned for {ticker}")
+        return None
 
     return cached_download(
         str(ticker),
         str(pd.Timestamp(start_date).date()) if start_date is not None else "",
         str(pd.Timestamp(end_date).date()) if end_date is not None else "",
-        interval,
+        # auto_adjust=False above, so these are raw closes; the tag keeps them out
+        # of the adjusted-close namespace the portfolio routes use.
+        f"{interval}-raw",
         _fetch,
         use_cache=use_cache,
     )

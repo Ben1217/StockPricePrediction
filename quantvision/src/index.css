@@ -97,3 +97,155 @@ body {
 @media (prefers-reduced-motion: reduce) {
     .skeleton-shimmer { animation: none; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SIGNAL HEATMAP
+   Inline styles cover everything except :hover / :focus-visible and the
+   container query, which have to live in a stylesheet.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Equal cards, reflowing. Tile area deliberately carries no data: every stock
+   is equally legible, and the grid adapts from phone to wide desktop without a
+   media query. */
+.hm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
+    gap: 10px;
+}
+
+@media (max-width: 560px) {
+    .hm-grid {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    }
+}
+
+/* The whole cell is the hit target — never just the painted glyphs. */
+.hm-cell {
+    position: relative;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 10px;
+    padding: 11px 12px 10px;
+    transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
+    font-family: 'DM Mono', monospace;
+    min-height: 132px;
+}
+
+.hm-cell:hover {
+    filter: brightness(1.18);
+    transform: translateY(-2px);
+    z-index: 3;
+}
+
+.hm-cell:focus-visible {
+    outline: 2px solid #fbbf24;
+    outline-offset: 2px;
+    z-index: 3;
+}
+
+.hm-cell[data-selected="true"] {
+    box-shadow: 0 0 0 2px #fbbf24, 0 6px 18px rgba(0, 0, 0, .45);
+}
+
+/* NEUTRAL: the probability still tints the tile, but the model declined to
+   call a direction. The hatch says so without spending another hue — and it
+   survives greyscale, CVD and forced-colors, where a badge colour would not. */
+.hm-neutral::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 10px;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(135deg,
+            rgba(226, 232, 240, .085) 0 5px,
+            transparent 5px 11px);
+}
+
+/* Rows still filling in. Holds the previous render rather than flashing a
+   skeleton — no layout jump when the analysis lands. */
+.hm-pending {
+    opacity: .55;
+}
+
+.hm-drawer {
+    animation: hmSlideIn .22s ease both;
+}
+
+@keyframes hmSlideIn {
+    from {
+        opacity: 0;
+        transform: translateX(14px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.hm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'DM Mono', monospace;
+    font-size: 11.5px;
+}
+
+.hm-table th {
+    position: sticky;
+    top: 0;
+    background: #0d1524;
+    text-align: right;
+    font-family: 'Syne', sans-serif;
+    font-size: 9.5px;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: #94a3b8;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(42, 58, 92, .7);
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+}
+
+.hm-table th:first-child,
+.hm-table td:first-child {
+    text-align: left;
+}
+
+.hm-table th:hover {
+    color: #fbbf24;
+}
+
+.hm-table td {
+    text-align: right;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(42, 58, 92, .35);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.hm-table tbody tr {
+    cursor: pointer;
+}
+
+.hm-table tbody tr:hover {
+    background: rgba(251, 191, 36, .07);
+}
+
+.hm-table tbody tr:focus-visible {
+    outline: 2px solid #fbbf24;
+    outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    .hm-cell,
+    .hm-drawer {
+        transition: none;
+        animation: none;
+    }
+
+    .hm-cell:hover {
+        transform: none;
+    }
+}

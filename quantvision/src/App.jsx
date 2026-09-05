@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import "./index.css";
 import { fetchPrices, askAgent } from "./utils/api";
-import { useApiHealth, useDataSources, useQuotes, usePrices, useIndicators } from "./hooks/useMarketData";
+import { useApiHealth, useDataSources, useQuotes, usePrices, useIndicators, useSP500 } from "./hooks/useMarketData";
 import { useModelPreparation } from "./hooks/useModelPreparation";
 import { C, DEFAULT_INDEX_SYMBOL, LEGACY_TICKERS, SP500_LIST, TICKERS } from "./utils/data";
 import { Tab } from "./components/UIComponents";
@@ -23,10 +23,16 @@ function TabFallback() {
     );
 }
 
-/* ─── Sector colour map for screener badges ──────────────────── */
+/* ─── Sector colour map for screener badges ──────────────────────
+   Keyed on the GICS sector names the index publishes, which is what
+   /api/data/sp500 returns. The screener used to key on "Technology" and
+   "Communication" while the data says "Information Technology" and
+   "Communication Services", so those two sectors fell through to the default
+   amber and their filter chips matched nothing. The short spellings are kept
+   as aliases so any older saved state still resolves. */
 const SECTOR_COLORS = {
-    "Technology": "#6366f1",
-    "Communication": "#0ea5e9",
+    "Information Technology": "#6366f1",
+    "Communication Services": "#0ea5e9",
     "Consumer Discretionary": "#f59e0b",
     "Consumer Staples": "#10b981",
     "Health Care": "#ec4899",
@@ -37,6 +43,13 @@ const SECTOR_COLORS = {
     "Real Estate": "#06b6d4",
     "Utilities": "#a78bfa",
 };
+
+const SECTOR_COLOR_ALIASES = {
+    "Technology": SECTOR_COLORS["Information Technology"],
+    "Communication": SECTOR_COLORS["Communication Services"],
+};
+
+const sectorColor = (sector) => SECTOR_COLORS[sector] || SECTOR_COLOR_ALIASES[sector] || C.amber;
 
 const ALL_SECTORS = ["All", ...Object.keys(SECTOR_COLORS)];
 
@@ -93,13 +106,20 @@ function saveWatchlist(list) {
 /* ═══════════════════════════════════════════════════════════════
    STOCK SEARCH MODAL
 ═══════════════════════════════════════════════════════════════ */
-function StockSearchModal({ watchlist, onAdd, onClose }) {
+function StockSearchModal({ watchlist, onAdd, onClose, apiConnected }) {
     const [tab, setTab] = useState("search");           // "search" | "screener"
     const [query, setQuery] = useState("");
     const [searching, setSearching] = useState(false);
     const [searchError, setSearchError] = useState("");
     const [sectorFilter, setSectorFilter] = useState("All");
     const inputRef = useRef(null);
+
+    // The index as the server currently reads it, so an addition or removal
+    // shows up without a frontend release. SP500_LIST is the bundled snapshot
+    // this falls back to when the API is unreachable — it is the whole index
+    // too, so an offline picker is complete rather than a quarter of one.
+    const { data: liveConstituents } = useSP500(apiConnected);
+    const universe = liveConstituents?.length ? liveConstituents : SP500_LIST;
 
     // Focus input on open
     useEffect(() => { inputRef.current?.focus(); }, []);
@@ -137,7 +157,7 @@ function StockSearchModal({ watchlist, onAdd, onClose }) {
     };
 
     /* Screener filtered list */
-    const screenerList = SP500_LIST.filter(s => {
+    const screenerList = universe.filter(s => {
         const q = query.toLowerCase();
         const sectorMatch = sectorFilter === "All" || s.sector === sectorFilter;
         const textMatch = !q || s.ticker.toLowerCase().includes(q) || s.name.toLowerCase().includes(q);
@@ -226,14 +246,24 @@ function StockSearchModal({ watchlist, onAdd, onClose }) {
                                 key={s}
                                 onClick={() => setSectorFilter(s)}
                                 style={{
-                                    background: sectorFilter === s ? (SECTOR_COLORS[s] || C.amber) + "33" : "transparent",
-                                    border: `1px solid ${sectorFilter === s ? (SECTOR_COLORS[s] || C.amber) + "88" : C.border}`,
-                                    borderRadius: 20, color: sectorFilter === s ? (SECTOR_COLORS[s] || C.amber) : C.textDim,
+                                    background: sectorFilter === s ? sectorColor(s) + "33" : "transparent",
+                                    border: `1px solid ${sectorFilter === s ? sectorColor(s) + "88" : C.border}`,
+                                    borderRadius: 20, color: sectorFilter === s ? sectorColor(s) : C.textDim,
                                     padding: "3px 10px", cursor: "pointer", fontSize: 10,
                                     fontFamily: "'DM Mono',monospace",
                                 }}
                             >{s}</button>
                         ))}
+                    </div>
+                )}
+
+                {/* How much of the index this list is. Worth a line because the
+                    screener used to show 130 hand-picked names under the same
+                    "S&P 500" heading, and nothing on screen said so. */}
+                {tab === "screener" && (
+                    <div style={{ padding: "8px 20px 0", fontSize: 10, color: C.textDim }}>
+                        {screenerList.length} of {universe.length} constituents
+                        {liveConstituents?.length ? "" : " · offline snapshot"}
                     </div>
                 )}
 
@@ -278,7 +308,7 @@ function StockSearchModal({ watchlist, onAdd, onClose }) {
                             )}
                             {screenerList.map(s => {
                                 const inList = watchlist.includes(s.ticker);
-                                const sColor = SECTOR_COLORS[s.sector] || C.amber;
+                                const sColor = sectorColor(s.sector);
                                 return (
                                     <div
                                         key={s.ticker}
@@ -588,6 +618,12 @@ export default function App() {
     // the button twice on the same symbol still reads as a new request.
     const [backtestRequest, setBacktestRequest] = useState(null);
 
+    // The shortlist the Heatmap picked out, handed to the Optimize tab. Same
+    // shape and the same reason as `backtestRequest` above: it is the one piece
+    // of state the two tabs have to agree on, and `at` is a timestamp so
+    // sending the same set twice still reads as a new request.
+    const [optimizeRequest, setOptimizeRequest] = useState(null);
+
     // Persist watchlist on change
     useEffect(() => { saveWatchlist(watchlist); }, [watchlist]);
 
@@ -637,6 +673,39 @@ export default function App() {
     /* The Backtest tab clears the request once it has acted on it. */
     const clearBacktestRequest = useCallback(() => setBacktestRequest(null), []);
 
+    /* Send the Heatmap's shortlist to the optimizer and switch to it. */
+    const optimizeShortlist = useCallback((symbols) => {
+        const list = [...new Set(
+            (Array.isArray(symbols) ? symbols : [])
+                .map((s) => String(s || "").toUpperCase().trim())
+                .filter(Boolean)
+        )];
+        if (list.length < 2) return;
+        setOptimizeRequest({ symbols: list, at: Date.now() });
+        setActiveTab("optimization");
+    }, []);
+
+    /* Send ONE stock from the Predictions tab to the optimizer's selection.
+       Deliberately not `optimizeShortlist`: a single symbol cannot be
+       optimised, so this adds to the selection and leaves the build to the
+       user, rather than kicking off a run that would fail on a one-stock
+       universe. */
+    const optimizeAddSymbol = useCallback((ticker) => {
+        const symbol = String(ticker || "").toUpperCase().trim();
+        if (!symbol) return;
+        setOptimizeRequest({ add: symbol, at: Date.now() });
+        setActiveTab("optimization");
+    }, []);
+
+    const clearOptimizeRequest = useCallback(() => setOptimizeRequest(null), []);
+
+    /* Open one stock on a named tab. The Heatmap's drawer is a reading surface,
+       so its exits have to land somewhere that shows more than it does. */
+    const openTickerOn = useCallback((ticker, tab) => {
+        handleTickerSelect(ticker);
+        if (tab) setActiveTab(tab);
+    }, [handleTickerSelect]);
+
     /* Watchlist mutations */
     const addTicker = useCallback((ticker) => {
         if (watchlist.includes(ticker) || watchlist.length >= 8) return;
@@ -673,6 +742,7 @@ export default function App() {
                     watchlist={watchlist}
                     onAdd={addTicker}
                     onClose={() => setShowModal(false)}
+                    apiConnected={apiConnected}
                 />
             )}
 
@@ -847,6 +917,7 @@ export default function App() {
                         watchlist={watchlist}
                         apiConnected={apiConnected}
                         onBacktest={backtestPrediction}
+                        onOptimize={optimizeAddSymbol}
                     />
                 )}
                 {activeTab === "portfolio" && (
@@ -873,12 +944,21 @@ export default function App() {
                         apiConnected={apiConnected}
                         notify={notify}
                         watchlist={watchlist}
+                        /* Clicking a ticker on a signal card selects it and lands on
+                           Analysis, so the portfolio's per-stock reasoning opens into
+                           the full chart rather than dead-ending on the card. */
+                        setSelectedTicker={(t) => { handleTickerSelect(t); setActiveTab("analysis"); }}
+                        request={optimizeRequest}
+                        onRequestConsumed={clearOptimizeRequest}
                     />
                 )}
                 {activeTab === "heatmap" && (
                     <HeatmapTab
                         apiConnected={apiConnected}
-                        setSelectedTicker={handleTickerSelect}
+                        watchlist={watchlist}
+                        notify={notify}
+                        onOpenTicker={openTickerOn}
+                        onOptimize={optimizeShortlist}
                     />
                 )}
                 </Suspense>

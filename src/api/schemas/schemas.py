@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 from datetime import date, datetime
 from enum import Enum
 
-from src.defaults import DEFAULT_INDEX_SYMBOL
+from src.defaults import DEFAULT_INDEX_SYMBOL, DEFAULT_TRAINING_LOOKBACK_DAYS
 
 
 SUPPORTED_FORECAST_HORIZONS = [7, 15, 30, 60]
@@ -129,7 +129,7 @@ class TrainRequest(BaseModel):
     symbol: str = Field(default=DEFAULT_INDEX_SYMBOL, description="Ticker symbol")
     model_type: ModelTypeEnum = Field(default=ModelTypeEnum.xgboost)
     horizons: List[int] = Field(default_factory=lambda: [1])
-    lookback_days: int = Field(default=756)
+    lookback_days: int = Field(default=DEFAULT_TRAINING_LOOKBACK_DAYS)
     test_size: float = Field(default=0.2, ge=0.05, le=0.5)
     params: Optional[Dict] = None
 
@@ -158,7 +158,7 @@ class BootstrapTrainRequest(BaseModel):
     )
     model_types: List[ModelTypeEnum] = Field(default_factory=lambda: [ModelTypeEnum.xgboost, ModelTypeEnum.random_forest, ModelTypeEnum.lstm])
     horizons: List[int] = Field(default_factory=lambda: [1])
-    lookback_days: int = Field(default=756)
+    lookback_days: int = Field(default=DEFAULT_TRAINING_LOOKBACK_DAYS)
     test_size: float = Field(default=0.2, ge=0.05, le=0.5)
     use_sp500: bool = Field(default=False)
     skip_fresh_hours: Optional[int] = Field(default=24, ge=0)
@@ -450,12 +450,36 @@ class SimpleForecastResponse(BaseModel):
     quote_change_pct: Optional[float] = None
     #: "UP" | "DOWN", from the aggregated probability rather than the price.
     direction: Optional[str] = None
+    #: The aggregated P(next bar > anchor_price) that `direction` is the 0.5
+    #: threshold of. Served because a direction shown without the number behind
+    #: it cannot be told apart from a coin flip: 0.51 and 0.94 render as the
+    #: same arrow.
+    #:
+    #: NOT a calibrated probability, and a client must not present it as one.
+    #: It is the inverse-variance-weighted mean of each member's own P(up) --
+    #: Kronos over its sampled paths, Chronos-2 and TimesFM 2.5 through their
+    #: quantile CDFs -- and no walk-forward has ever measured whether a 0.7 from
+    #: this stack comes up more often than a 0.6. `probability_is_calibrated`
+    #: says so in the payload rather than leaving it to a reader to know.
+    probability_up: Optional[float] = None
+    #: False for as long as the foundation stack has no walk-forward report.
+    #: A hardcoded honest answer beats an absent field a client will assume.
+    probability_is_calibrated: bool = False
     #: The bar being forecast, and how it is written in the box.
     forecast_date: Optional[str] = None
     horizon_label: str = "Next 1 Day"
 
     #: Display names of the members behind this number, for the one-line footer.
     models: List[str] = Field(default_factory=list)
+    #: Trading days of history the members actually read. A recent listing has
+    #: far fewer than the five years an established name does, and the forecast
+    #: is correspondingly thinner evidence.
+    history_days: Optional[int] = None
+    #: Set when `history_days` is too short for the full member set -- Kronos
+    #: needs a 128-bar context and drops out below it, leaving Chronos-2 and
+    #: TimesFM 2.5. The forecast is real and served; this is the qualifier on
+    #: it, so the tab can say so instead of presenting two members as three.
+    thin_history: bool = False
     #: Set when the rows above would otherwise read as self-contradictory. One
     #: short line in the UI, not a panel -- and `split_reason` says which line,
     #: because the two causes need different sentences and writing the rarer

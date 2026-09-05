@@ -217,14 +217,45 @@ function toBandPoints(points, anchor) {
  * winner's trajectory turns, because an arrow on all sixty bars of a monotone
  * path is noise, not information.
  */
-function toMarkers(points, direction) {
+function toMarkers(points, direction, anchor) {
     const markers = [];
     if (!points.length) return markers;
 
+    const target = points[points.length - 1];
+    const rising = anchor ? target.predicted >= anchor.value : target.direction !== "down";
+    const movePct =
+        anchor && anchor.value
+            ? ((target.predicted - anchor.value) / anchor.value) * 100
+            : null;
+
+    // The estimate, always labelled with the number it is making. This is the
+    // foundation stack's own output and the chart is that stack's chart, so it
+    // is drawn whether or not a scored call exists — a forecast line ending in
+    // an unmarked point leaves the reader to eyeball a price off the axis.
+    //
+    // It says "est" because that is what it is. The scored call, when there is
+    // one, is a different statement and gets its own marker below.
+    const moveLabel = movePct === null
+        ? `est $${target.predicted.toFixed(2)}`
+        : `est $${target.predicted.toFixed(2)} (${movePct >= 0 ? "+" : ""}${movePct.toFixed(2)}%)`;
+    markers.push({
+        time: target.time,
+        position: rising ? "aboveBar" : "belowBar",
+        shape: "circle",
+        color: rising ? COLORS.up : COLORS.down,
+        text: moveLabel,
+        size: 1,
+    });
+
+    // The scored direction, when the measured stack made one. Deliberately on
+    // the opposite side of the bar from the estimate so the two labels cannot
+    // overlap, and carrying its probability — which is the whole reason it is
+    // a different kind of claim from the price above it.
+    //
+    // Absent on NEUTRAL, which is the common answer: the caller passes null
+    // rather than a direction, and drawing an arrow anyway would put the one
+    // call nobody has scored in the most prominent place on the page.
     if (direction?.direction) {
-        // The route canonicalises this to UP/DOWN whichever model produced it,
-        // so there is one vocabulary here rather than the Bullish/Bearish the
-        // panels below the chart use for the same fact.
         const up = String(direction.direction).toUpperCase() === "UP";
         const probability = Number(direction.probability_up);
         // The label states the probability of the direction it is claiming, so
@@ -234,45 +265,18 @@ function toMarkers(points, direction) {
             ? `${up ? "UP" : "DOWN"} ${Math.round(claimed * 100)}%`
             : up ? "UP" : "DOWN";
         markers.push({
-            time: points[0].time,
-            position: up ? "belowBar" : "aboveBar",
+            time: target.time,
+            position: rising ? "belowBar" : "aboveBar",
             shape: up ? "arrowUp" : "arrowDown",
-            // A call the walk-forward run refused to ship is drawn muted, so it
-            // cannot be read as the same kind of statement as a gated-through one.
             color: direction.tradeable === false ? COLORS.flat : up ? COLORS.up : COLORS.down,
             text: label,
             size: 2,
         });
     }
 
-    let previous = null;
-    for (const point of points) {
-        if (point.direction === "flat") continue;
-        if (previous && point.direction === previous) continue;
-        // The first bar already carries the direction model's arrow; a second
-        // one on the same bar would stack two claims on top of each other.
-        if (point.time !== points[0].time) {
-            const up = point.direction === "up";
-            markers.push({
-                time: point.time,
-                position: up ? "belowBar" : "aboveBar",
-                shape: up ? "arrowUp" : "arrowDown",
-                color: up ? COLORS.up : COLORS.down,
-                size: 1,
-            });
-        }
-        previous = point.direction;
-    }
     return markers;
 }
 
-/**
- * Empty bars past the last forecast point.
- *
- * `lightweight-charts` will not scroll past its last data point, so without
- * these the forecast ends hard against the right edge of the pane. Whitespace
- * data extends the time scale without drawing anything.
- */
 function futurePadding(lastTime, bars = FUTURE_PADDING_BARS) {
     if (!lastTime) return [];
     const rows = [];
@@ -301,6 +305,7 @@ export default function ForecastOverlayChart({
     const forecastSeriesRef = useRef(null);
     const bandRef = useRef(null);
     const markersRef = useRef(null);
+    const priceLinesRef = useRef([]);
     const [ready, setReady] = useState(false);
 
     const candles = useMemo(() => toCandles(bars), [bars]);
@@ -339,6 +344,11 @@ export default function ForecastOverlayChart({
             },
         });
 
+        // `lastValueVisible` is off on BOTH series. Left on, the candles
+        // printed the last close and the forecast line printed the estimate as
+        // two anonymous numbers stacked on the same few pixels of the price
+        // axis — $230.36 over $230.50 — with nothing saying which was which.
+        // Named price lines replace them below, so each number carries its word.
         const candleSeries = chart.addSeries(CandlestickSeries, {
             upColor: COLORS.up,
             downColor: COLORS.down,
@@ -346,14 +356,15 @@ export default function ForecastOverlayChart({
             wickDownColor: COLORS.down,
             borderVisible: false,
             priceLineVisible: false,
+            lastValueVisible: false,
         });
 
         const forecastSeries = chart.addSeries(LineSeries, {
             color: COLORS.forecast,
-            lineWidth: 2,
+            lineWidth: 3,
             lineStyle: LineStyle.Dashed,
             priceLineVisible: false,
-            lastValueVisible: true,
+            lastValueVisible: false,
             crosshairMarkerVisible: true,
         });
 
@@ -370,6 +381,7 @@ export default function ForecastOverlayChart({
         return () => {
             setReady(false);
             markersRef.current = null;
+            priceLinesRef.current = [];
             bandRef.current = null;
             forecastSeriesRef.current = null;
             candleSeriesRef.current = null;
@@ -399,17 +411,138 @@ export default function ForecastOverlayChart({
             : [];
         forecastSeriesRef.current.setData(padded);
         bandRef.current?.setPoints(toBandPoints(points, anchor));
-        markersRef.current?.setMarkers(toMarkers(points, direction));
+        markersRef.current?.setMarkers(toMarkers(points, direction, anchor));
 
-        // Fit once there is something to fit, so the forecast is in view rather
-        // than off the right edge on first paint.
-        if (padded.length) chartRef.current?.timeScale().fitContent();
+        // ── Named price lines ────────────────────────────────────────────
+        // Rebuilt every update, because a stale line would sit at a price from
+        // the previous symbol. They replace the two unlabelled axis values.
+        for (const line of priceLinesRef.current) {
+            try { forecastSeriesRef.current.removePriceLine(line); } catch { /* series replaced */ }
+        }
+        priceLinesRef.current = [];
+
+        if (anchor) {
+            priceLinesRef.current.push(forecastSeriesRef.current.createPriceLine({
+                price: anchor.value,
+                color: COLORS.flat,
+                lineWidth: 1,
+                lineStyle: LineStyle.Dotted,
+                axisLabelVisible: true,
+                title: "prev close",
+            }));
+        }
+        const target = points[points.length - 1];
+        if (target) {
+            const rising = anchor ? target.predicted >= anchor.value : true;
+            priceLinesRef.current.push(forecastSeriesRef.current.createPriceLine({
+                price: target.predicted,
+                color: rising ? COLORS.up : COLORS.down,
+                lineWidth: 2,
+                lineStyle: LineStyle.Dashed,
+                axisLabelVisible: true,
+                title: "estimate",
+            }));
+        }
+
+        // ── The visible window, set explicitly ───────────────────────────
+        //
+        // `fitContent()` used to do this, and what reached the screen did not
+        // match what was asked for: the 6M button passes 126 sessions and the
+        // pane rendered about thirteen, roughly a fortnight, with the right
+        // half of the plot empty. Whatever the library was fitting, it was not
+        // the data — so the range is now stated rather than inferred, from the
+        // candles this component was actually handed.
+        //
+        // `setVisibleRange` takes the two ends and nothing else can widen or
+        // narrow them, so the range buttons above the chart now govern the
+        // pane directly.
+        const timeScale = chartRef.current?.timeScale();
+        const lastDrawn = padded.length ? padded[padded.length - 1].time : null;
+        if (timeScale && candles.length) {
+            try {
+                timeScale.setVisibleRange({
+                    from: candles[0].time,
+                    to: lastDrawn || candles[candles.length - 1].time,
+                });
+            } catch {
+                // A range the scale rejects (one bar, or a forecast that landed
+                // before the last candle) is not worth failing the render for.
+                timeScale.fitContent();
+            }
+        }
     }, [ready, candles, windowed, direction]);
 
+    // What the pane is actually showing, in words. The chart has three visual
+    // languages on it — candles, a dashed line, a shaded cone — and none of
+    // them is self-evident to someone who has not been told. The session count
+    // is here for a second reason: the range buttons above silently failed once,
+    // drawing a fortnight when six months was selected, and a number on the
+    // chart is what makes that visible instead of merely wrong.
+    const shown = candles.length;
+    const target = windowed.length ? windowed[windowed.length - 1] : null;
+
     return (
-        <div
-            ref={containerRef}
-            style={{ height, width: "100%", position: "relative" }}
-        />
+        <div style={{ position: "relative", width: "100%" }}>
+            <div
+                ref={containerRef}
+                style={{ height, width: "100%", position: "relative" }}
+            />
+
+            <div
+                style={{
+                    position: "absolute",
+                    top: 8,
+                    left: 10,
+                    right: 10,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    pointerEvents: "none",
+                    flexWrap: "wrap",
+                    fontFamily: "'DM Mono',monospace",
+                }}
+            >
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 10.5, color: C.textMid }}>
+                    <LegendKey swatch={<span style={{ display: "inline-flex", gap: 2 }}>
+                        <i style={{ width: 4, height: 11, background: COLORS.up, borderRadius: 1, display: "inline-block" }} />
+                        <i style={{ width: 4, height: 11, background: COLORS.down, borderRadius: 1, display: "inline-block" }} />
+                    </span>}>
+                        actual sessions
+                    </LegendKey>
+                    <LegendKey swatch={
+                        <i style={{
+                            width: 18, height: 0, display: "inline-block",
+                            borderTop: `2px dashed ${COLORS.forecast}`,
+                        }} />
+                    }>
+                        next-session estimate
+                    </LegendKey>
+                    <LegendKey swatch={
+                        <i style={{
+                            width: 14, height: 11, display: "inline-block", borderRadius: 2,
+                            background: "rgba(99,102,241,.22)", border: "1px solid rgba(129,140,248,.55)",
+                        }} />
+                    }>
+                        68% / 90% range
+                    </LegendKey>
+                </div>
+
+                <div style={{ fontSize: 10.5, color: C.textDim, textAlign: "right", whiteSpace: "nowrap" }}>
+                    {shown} session{shown === 1 ? "" : "s"}
+                    {target?.date ? ` · forecast ${String(target.date).slice(0, 10)}` : ""}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+/** One legend entry: a swatch that looks like the thing, and its name. */
+function LegendKey({ swatch, children }) {
+    return (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {swatch}
+            {children}
+        </span>
     );
 }

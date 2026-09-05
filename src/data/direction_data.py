@@ -45,7 +45,7 @@ import numpy as np
 import pandas as pd
 
 from ..utils.logger import get_logger
-from .ohlcv_cache import cached_download
+from .ohlcv_cache import cached_download, YF_DOWNLOAD_LOCK
 
 logger = get_logger(__name__)
 
@@ -92,22 +92,37 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _download_raw(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
-    """One unadjusted, action-carrying pull from Yahoo. Retries live in the cache layer."""
+    """
+    One unadjusted, action-carrying pull from Yahoo. Retries live in the cache layer.
+
+    Walks :func:`ticker_variants` for the same reason the OHLCV layer does: the
+    index prints class shares with a dot and Yahoo indexes them with a dash.
+    Without it this route answered BRK.B with a 404 while the forecast and the
+    chart for the same stock resolved fine — so the tab led with a failed panel
+    over a working price.
+    """
     import yfinance as yf  # lazy so the module imports without the network stack present
 
-    frame = yf.download(
-        ticker,
-        start=start,
-        end=end,
-        interval="1d",
-        auto_adjust=False,   # keep Close raw so the adjustment factor is recoverable
-        actions=True,        # Dividends / Stock Splits, used for the audit counts
-        progress=False,
-    )
-    if frame is None or frame.empty:
-        logger.warning("No rows returned for %s over [%s, %s]", ticker, start, end)
-        return None
-    return _flatten_columns(frame)
+    from .ohlcv_cache import ticker_variants
+
+    for spelling in ticker_variants(ticker):
+        with YF_DOWNLOAD_LOCK:
+            frame = yf.download(
+                spelling,
+                start=start,
+                end=end,
+                interval="1d",
+                auto_adjust=False,   # keep Close raw so the adjustment factor is recoverable
+                actions=True,        # Dividends / Stock Splits, used for the audit counts
+                progress=False,
+            )
+        if frame is not None and not frame.empty:
+            if spelling != str(ticker).upper().strip():
+                logger.info("Resolved %s as %s", ticker, spelling)
+            return _flatten_columns(frame)
+
+    logger.warning("No rows returned for %s over [%s, %s]", ticker, start, end)
+    return None
 
 
 def apply_dividend_adjustment(df: pd.DataFrame) -> pd.DataFrame:
@@ -267,7 +282,9 @@ def load_daily_bars(
     start_str, end_str = _as_date_string(start_ts), _as_date_string(end_ts)
 
     fetch = downloader if downloader is not None else (lambda: _download_raw(symbol, start_str, end_str))
-    raw = cached_download(symbol, start_str, end_str, "1d", fetch, use_cache=use_cache)
+    # Raw closes plus Dividends/Stock Splits: a distinct shape from every other
+    # caller, so it gets its own cache namespace.
+    raw = cached_download(symbol, start_str, end_str, "1d-raw-actions", fetch, use_cache=use_cache)
     if raw is None or raw.empty:
         raise ValueError(f"No daily bars available for {symbol} over [{start_str}, {end_str}]")
 

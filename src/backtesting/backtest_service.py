@@ -15,6 +15,9 @@ import pandas as pd
 
 from src.data.data_loader import download_stock_data
 from src.features.technical_indicators import add_all_technical_indicators
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 SIMPLE_STRATEGIES = {"ta_only", "ml_hybrid", "buy_hold"}
@@ -145,7 +148,7 @@ def _get_ml_predictions(df: pd.DataFrame, symbol: str, model_type: str = "xgboos
             select_feature_columns,
             transform_feature_frame,
         )
-        from src.models.direction_utils import probability_up
+        from src.models.direction_utils import direction_skill_failure, probability_up
         from src.models.model_bundle import load_model_bundle
 
         bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=1)
@@ -154,6 +157,18 @@ def _get_ml_predictions(df: pd.DataFrame, symbol: str, model_type: str = "xgboos
 
         target_type = getattr(bundle, "target_type", bundle.metadata.get("target_type", "direction"))
         if target_type != "direction":
+            return None
+
+        # Returning None here is what makes the caller record `fallback_ta_only`
+        # and the UI say so. A model that failed its skill gate would otherwise
+        # be credited for a run that is really the TA rule's, which is exactly
+        # the claim the fallback banner exists to prevent.
+        skill_failure = direction_skill_failure(bundle.metadata)
+        if skill_failure:
+            logger.info(
+                "Skipping %s %s in the hybrid backtest: the bundle %s",
+                symbol, model_type, skill_failure,
+            )
             return None
 
         feat_df = build_feature_frame(df, feature_config=bundle.feature_config)

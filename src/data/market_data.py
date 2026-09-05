@@ -15,6 +15,7 @@ from cachetools import TTLCache, cached
 from cachetools.keys import hashkey
 
 from ..utils.logger import get_logger
+from .ohlcv_cache import YF_DOWNLOAD_LOCK
 
 logger = get_logger(__name__)
 
@@ -161,12 +162,13 @@ def fetch_batch_quotes(symbols: List[str], period: str = '5d') -> pd.DataFrame:
     
     try:
         # Download all at once - much faster
-        df_prices = yf.download(
-            symbols, 
-            period=period, 
-            progress=False,
-            threads=True
-        )
+        with YF_DOWNLOAD_LOCK:
+            df_prices = yf.download(
+                symbols,
+                period=period,
+                progress=False,
+                threads=True
+            )
         
         if df_prices.empty:
             return pd.DataFrame()
@@ -354,7 +356,8 @@ def calculate_period_returns(symbols: List[str], period: str) -> pd.DataFrame:
     lookback = {'1D': 1, '5D': 5, '1M': 21, '3M': 63, 'YTD': None, '1Y': 252}.get(period, 1)
     
     try:
-        df_prices = yf.download(symbols, period=yf_period, progress=False, threads=True)
+        with YF_DOWNLOAD_LOCK:
+            df_prices = yf.download(symbols, period=yf_period, progress=False, threads=True)
         
         if df_prices.empty:
             return pd.DataFrame()

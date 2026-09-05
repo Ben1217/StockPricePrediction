@@ -34,6 +34,12 @@ export class ApiError extends Error {
         this.status = status;
         this.body = body;
         this.url = url;
+        // The server's own explanation, already unwrapped from FastAPI's
+        // {detail: ...}. Callers that want to show why a request was refused
+        // read this instead of re-parsing the body or restating the reason
+        // themselves — a hardcoded sentence goes stale the moment a status
+        // code starts covering a second cause.
+        this.detail = errorDetail(body);
     }
 }
 
@@ -141,8 +147,16 @@ export async function fetchIndicators(symbol, days = 120, interval = "1d") {
     }
 }
 
+/**
+ * The S&P 500 constituents the server currently reads, with company and sector.
+ *
+ * Returns the `symbols` array directly, because the `count` beside it is just
+ * its length. Callers fall back to the bundled `SP500_LIST` when this throws —
+ * the picker is more useful stale than empty.
+ */
 export async function fetchSP500() {
-    return apiFetch("/data/sp500");
+    const body = await apiFetch("/data/sp500");
+    return Array.isArray(body?.symbols) ? body.symbols : [];
 }
 
 export async function fetchDataSources() {
