@@ -38,6 +38,7 @@ import {
 } from "../utils/api";
 import { useQuotes } from "../hooks/useMarketData";
 import { StatCard, Section, Hint } from "../components/UIComponents";
+import { money, moneyCompact, pct, signedPct as signedFraction } from "../utils/format";
 
 const PIE_COLORS = [C.amber, C.cyan, C.green, C.purple, C.red, "#f97316", "#ec4899", "#8b5cf6"];
 const HOLDINGS_KEY = "qv_holdings";
@@ -108,21 +109,10 @@ function saveHoldings(holdings) {
 
 /* ── Formatting ──────────────────────────────────────────────── */
 
-const money = (value) =>
-    Number.isFinite(value)
-        ? `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-        : "—";
-
-const compactMoney = (value) =>
-    Number.isFinite(value)
-        ? `$${Math.abs(value) >= 1000 ? `${(value / 1000).toFixed(1)}K` : value.toFixed(0)}`
-        : "—";
-
-const pct = (fraction, digits = 1) =>
-    Number.isFinite(fraction) ? `${(fraction * 100).toFixed(digits)}%` : "—";
-
-const signedPct = (fraction, digits = 1) =>
-    Number.isFinite(fraction) ? `${fraction >= 0 ? "+" : ""}${(fraction * 100).toFixed(digits)}%` : "—";
+// Both of these take a FRACTION of one, unlike the same-named helper in
+// OptimizationTab — see src/utils/format.js. The 1-digit default is this tab's.
+const compactMoney = moneyCompact;
+const signedPct = (fraction, digits = 1) => signedFraction(fraction, digits);
 
 /* ── Pieces ──────────────────────────────────────────────────── */
 

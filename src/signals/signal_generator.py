@@ -16,6 +16,62 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# SHARED INDICATOR PREPARATION
+# =============================================================================
+#
+# Every detector below needs some subset of SMA_20 / SMA_200 / ATR / RSI, and each
+# one used to compute them inline. Six copies of the same three formulas is six
+# chances for the windows to drift apart — and they had already started to: two
+# detectors copied the frame before the `if` and two copied it inside, so the same
+# call could mutate the caller's DataFrame or not depending on which detector ran.
+#
+# The maths is unchanged from the copies it replaces: Wilder's true range smoothed
+# by a 14-period simple mean, and the same simple-mean RSI. It is deliberately NOT
+# routed through `src.features.technical_indicators`, which computes both with the
+# `ta` library's Wilder smoothing and would silently move every threshold in this
+# module.
+
+ATR_WINDOW = 14
+RSI_WINDOW = 14
+
+
+def _true_range(df: pd.DataFrame) -> pd.Series:
+    """Wilder's true range: the largest of the three gap-aware ranges."""
+    high_low = df['High'] - df['Low']
+    high_close = (df['High'] - df['Close'].shift()).abs()
+    low_close = (df['Low'] - df['Close'].shift()).abs()
+    return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+
+
+def ensure_indicators(df: pd.DataFrame, *columns: str) -> pd.DataFrame:
+    """
+    A copy of ``df`` with each named indicator present.
+
+    Always copies, so a detector can never write a column back into the frame its
+    caller passed in. Columns already on the frame are left exactly as they are —
+    a caller that has computed SMA_20 its own way keeps its own values.
+    """
+    data = df.copy()
+    for column in columns:
+        if column in data.columns:
+            continue
+        if column == 'SMA_20':
+            data['SMA_20'] = data['Close'].rolling(20).mean()
+        elif column == 'SMA_200':
+            data['SMA_200'] = data['Close'].rolling(200).mean()
+        elif column == 'ATR':
+            data['ATR'] = _true_range(data).rolling(ATR_WINDOW).mean()
+        elif column == 'RSI':
+            delta = data['Close'].diff()
+            gain = delta.where(delta > 0, 0).rolling(RSI_WINDOW).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(RSI_WINDOW).mean()
+            data['RSI'] = 100 - (100 / (1 + gain / loss))
+        else:
+            raise ValueError(f"Unknown indicator {column!r}")
+    return data
+
+
+# =============================================================================
 # PATTERN DETECTION FUNCTIONS - Tier 1 (Highest Priority)
 # =============================================================================
 
@@ -50,19 +106,7 @@ def detect_base_breakout(df: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
     if not all(col in df.columns for col in required_cols):
         return signals
     
-    # Calculate SMA_20 if not present
-    if 'SMA_20' not in df.columns:
-        df = df.copy()
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-    
-    # Calculate ATR if not present
-    if 'ATR' not in df.columns:
-        df = df.copy()
-        high_low = df['High'] - df['Low']
-        high_close = abs(df['High'] - df['Close'].shift())
-        low_close = abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(14).mean()
+    df = ensure_indicators(df, 'SMA_20', 'ATR')
     
     for i in range(lookback + 5, len(df)):
         window = df.iloc[i-lookback:i]
@@ -161,15 +205,7 @@ def detect_pullback_buy(df: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
     signals['confidence'] = 0.0
     
     # Calculate indicators if needed
-    df = df.copy()
-    if 'SMA_20' not in df.columns:
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-    if 'ATR' not in df.columns:
-        high_low = df['High'] - df['Low']
-        high_close = abs(df['High'] - df['Close'].shift())
-        low_close = abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(14).mean()
+    df = ensure_indicators(df, 'SMA_20', 'ATR')
     
     for i in range(lookback + 5, len(df)):
         current = df.iloc[i]
@@ -275,13 +311,7 @@ def detect_123_continuation(df: pd.DataFrame) -> pd.DataFrame:
     signals['confidence'] = 0.0
     
     # Calculate ATR if needed
-    df = df.copy()
-    if 'ATR' not in df.columns:
-        high_low = df['High'] - df['Low']
-        high_close = abs(df['High'] - df['Close'].shift())
-        low_close = abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(14).mean()
+    df = ensure_indicators(df, 'ATR')
     
     for i in range(3, len(df)):
         current = df.iloc[i]  # Potential triggering bar
@@ -360,15 +390,7 @@ def detect_base_breakdown(df: pd.DataFrame, lookback: int = 10) -> pd.DataFrame:
     signals['pattern'] = ''
     signals['confidence'] = 0.0
     
-    df = df.copy()
-    if 'SMA_20' not in df.columns:
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-    if 'ATR' not in df.columns:
-        high_low = df['High'] - df['Low']
-        high_close = abs(df['High'] - df['Close'].shift())
-        low_close = abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(14).mean()
+    df = ensure_indicators(df, 'SMA_20', 'ATR')
     
     for i in range(lookback + 5, len(df)):
         window = df.iloc[i-lookback:i]
@@ -446,17 +468,7 @@ def check_uptrend(df: pd.DataFrame) -> float:
     score = 0.0
     
     # Calculate indicators if needed
-    df = df.copy()
-    if 'SMA_20' not in df.columns:
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-    if 'SMA_200' not in df.columns:
-        df['SMA_200'] = df['Close'].rolling(200).mean()
-    if 'RSI' not in df.columns:
-        delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+    df = ensure_indicators(df, 'SMA_20', 'SMA_200', 'RSI')
     
     current = df.iloc[-1]
     
@@ -515,17 +527,7 @@ def check_downtrend(df: pd.DataFrame) -> float:
     if len(df) < 20:
         return 0.0
     
-    df = df.copy()
-    if 'SMA_20' not in df.columns:
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-    if 'SMA_200' not in df.columns:
-        df['SMA_200'] = df['Close'].rolling(200).mean()
-    if 'RSI' not in df.columns:
-        delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+    df = ensure_indicators(df, 'SMA_20', 'SMA_200', 'RSI')
     
     current = df.iloc[-1]
     score = 0.0

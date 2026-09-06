@@ -29,13 +29,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchDirectionAnalysis } from "../utils/api";
 import { C } from "../utils/data";
 import { Badge, Hint, Section } from "./UIComponents";
+import { money, pct as sharedPct } from "../utils/format";
 
-const pct = (value, digits = 0) =>
-    typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
-const money = (value) =>
-    typeof value === "number" && Number.isFinite(value)
-        ? `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-        : "—";
+// Whole percentages by default: this panel shows evidence contributions, where a
+// decimal place implies a precision the weights do not have.
+const pct = (value, digits = 0) => sharedPct(value, digits);
 const signedPp = (value) =>
     typeof value === "number" && Number.isFinite(value)
         ? `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(1)}pp`

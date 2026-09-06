@@ -54,6 +54,7 @@ import { fetchDirectionAnalysis, fetchSimpleForecast } from "../utils/api";
 import { eachLimited } from "../utils/concurrency";
 import { useQuotes, usePortfolioMetrics, useCorrelation } from "../hooks/useMarketData";
 import { Hint, Section } from "../components/UIComponents";
+import { moneyPlain, num, pct, signedPct as signedFraction, signedPctPoints } from "../utils/format";
 
 /* ═══════════════════════════════════════════════════════════════════════════
    COLOUR SCALES
@@ -189,16 +190,13 @@ function tileFill(mode, row) {
    as a fraction (0.32 meaning 32%).
    ═══════════════════════════════════════════════════════════════════════════ */
 
-const money = (v) => (Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : "—");
-/** For values that are already a percentage. */
-const signedPct = (v, d = 2) =>
-    (Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(d)}%` : "—");
-/** For values that are a fraction of one. */
-const fracPct = (v, d = 1) =>
-    (Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(d)}%` : "—");
-const signedFracPct = (v, d = 1) =>
-    (Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? "+" : ""}${(Number(v) * 100).toFixed(d)}%` : "—");
-const num = (v, d = 2) => (Number.isFinite(Number(v)) ? Number(v).toFixed(d) : "—");
+// Local names kept, implementations shared — see src/utils/format.js for why the
+// unit belongs in the name. `signedFracPct` keeps its 1-digit default, which is
+// tighter than the shared function's, because these are dense grid tiles.
+const money = moneyPlain;
+const signedPct = signedPctPoints;
+const fracPct = pct;
+const signedFracPct = (v, d = 1) => signedFraction(v, d);
 
 /**
  * How far a level sits from the price, in words.

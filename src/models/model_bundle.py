@@ -432,6 +432,15 @@ def save_model_bundle(
     return bundle_meta
 
 
+def _bundle_artifact_paths(bundle: "LoadedModelBundle") -> List[Optional[Path]]:
+    """The files a loaded bundle was built from, for cache validation."""
+    paths: List[Optional[Path]] = [bundle.model_path, bundle.scaler_path]
+    metadata_path = bundle.metadata.get("bundle_dir") or bundle.metadata.get("artifact_dir")
+    if metadata_path:
+        paths.append(Path(metadata_path) / "metadata.json")
+    return paths
+
+
 def load_model_bundle(
     *,
     metadata: Optional[Dict[str, Any]] = None,
@@ -440,8 +449,45 @@ def load_model_bundle(
     horizon: Optional[int] = None,
     bundles_dir: Path = BUNDLES_DIR,
     metadata_dir: Path = LEGACY_METADATA_DIR,
+    use_cache: bool = False,
 ) -> Optional[LoadedModelBundle]:
-    """Load a saved model bundle."""
+    """
+    Load a saved model bundle.
+
+    ``use_cache`` serves a previously loaded bundle when its artifacts are
+    unchanged on disk, which turns a repeat request from a model deserialisation
+    into three ``stat`` calls. It is **off by default** so nothing changes for
+    callers that were written against a fresh object each time -- training and
+    evaluation code among them, which legitimately wants to observe what is on
+    disk right now. Serving paths opt in; see :mod:`src.models.bundle_cache` for
+    what a shared bundle requires of the model.
+
+    An explicit ``metadata`` argument bypasses the cache: the caller has already
+    resolved which artifact it wants, so there is no lookup to save.
+    """
+    if use_cache and metadata is None:
+        from .bundle_cache import bundle_cache
+
+        key = (
+            str(model_type),
+            str(symbol).upper() if symbol else None,
+            int(horizon) if horizon is not None else None,
+            str(bundles_dir),
+            str(metadata_dir),
+        )
+        return bundle_cache.get_or_load(
+            key,
+            lambda: load_model_bundle(
+                model_type=model_type,
+                symbol=symbol,
+                horizon=horizon,
+                bundles_dir=bundles_dir,
+                metadata_dir=metadata_dir,
+                use_cache=False,
+            ),
+            _bundle_artifact_paths,
+        )
+
     meta = metadata or select_model_metadata(
         model_type=str(model_type),
         symbol=symbol,

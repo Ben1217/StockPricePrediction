@@ -47,23 +47,103 @@ export class ApiError extends Error {
 const TRANSIENT_STATUSES = new Set([502, 503, 504]);
 const isTransient = (err) => err instanceof ApiError && TRANSIENT_STATUSES.has(err.status);
 
-const INTERVAL_LIMITS = {
+/**
+ * Per-interval request limits.
+ *
+ * This is a **fallback**, not the rule. The server owns these numbers in
+ * `src/api/limits.py` and serves them from `GET /api/data/limits`; whatever it
+ * returns replaces this table for the rest of the session. The bundled copy is
+ * only what the app clamps to before that call lands, or if it never does.
+ *
+ * It used to be the only copy, and its comment claimed to mirror "the server's
+ * own clamps" — which was true for three of the four buckets. `sentimentDays`
+ * had no server counterpart at all, so this table was the sole thing enforcing
+ * it and nothing in either codebase said so.
+ *
+ * `priceDays`, `indicatorDays` and `sentimentDays` are calendar days. `lookback`
+ * is **bars of that interval** — the support/resistance route's unit, where 240
+ * on `1mo` means twenty years of monthly candles rather than eight months of
+ * calendar. Mixing the two is what left the monthly panel empty: a bar count
+ * spent as days fetched fifteen candles for an algorithm that reads a hundred.
+ */
+const FALLBACK_INTERVAL_LIMITS = {
     "1m": { priceDays: [7, 7], indicatorDays: [60, 120], lookback: [60, 90], sentimentDays: [120, 120] },
     "5m": { priceDays: [30, 60], indicatorDays: [60, 120], lookback: [60, 120], sentimentDays: [120, 180] },
     "15m": { priceDays: [30, 60], indicatorDays: [60, 120], lookback: [60, 120], sentimentDays: [120, 180] },
     "1h": { priceDays: [180, 730], indicatorDays: [120, 240], lookback: [120, 365], sentimentDays: [240, 730] },
     "4h": { priceDays: [180, 730], indicatorDays: [120, 240], lookback: [120, 365], sentimentDays: [240, 730] },
     "1d": { priceDays: [30, 420], indicatorDays: [120, 320], lookback: [120, 420], sentimentDays: [240, 420] },
-    "1wk": { priceDays: [730, 3650], indicatorDays: [120, 300], lookback: [180, 500], sentimentDays: [800, 2600] },
-    "1mo": { priceDays: [1825, 3650], indicatorDays: [120, 180], lookback: [180, 500], sentimentDays: [1200, 3650] },
+    "1wk": { priceDays: [730, 3650], indicatorDays: [120, 300], lookback: [120, 300], sentimentDays: [800, 2600] },
+    "1mo": { priceDays: [1825, 3650], indicatorDays: [120, 180], lookback: [120, 240], sentimentDays: [1200, 3650] },
 };
+
+/** Server bucket name -> the key this module has always used for it. */
+const LIMIT_KEY_BY_BUCKET = {
+    prices: "priceDays",
+    indicators: "indicatorDays",
+    sentiment: "sentimentDays",
+    lookback: "lookback",
+};
+
+/** Replaced wholesale by `loadRequestLimits()`; never mutated in place. */
+let intervalLimits = FALLBACK_INTERVAL_LIMITS;
+
+/** Reshape `GET /api/data/limits` into this module's table, or null if unusable. */
+function toIntervalLimits(payload) {
+    const limits = payload?.limits;
+    if (!limits || typeof limits !== "object") return null;
+
+    const table = {};
+    for (const [interval, buckets] of Object.entries(limits)) {
+        const row = {};
+        for (const [bucket, range] of Object.entries(buckets || {})) {
+            const key = LIMIT_KEY_BY_BUCKET[bucket];
+            // A bucket this client does not know about is not an error — the
+            // server is free to add one before the frontend uses it.
+            if (!key || !Array.isArray(range) || range.length !== 2) continue;
+            const [min, max] = range.map(Number);
+            if (Number.isFinite(min) && Number.isFinite(max) && min <= max) row[key] = [min, max];
+        }
+        if (Object.keys(row).length) table[interval] = row;
+    }
+    // The daily row is the fallback every unknown interval resolves through, so
+    // a payload without it cannot replace the bundled table.
+    return table["1d"] ? table : null;
+}
+
+/**
+ * Adopt the server's request limits for the rest of the session.
+ *
+ * Safe to call more than once and safe to ignore: on any failure the bundled
+ * table stays in place, which is the same behaviour the app had before this
+ * endpoint existed. Resolves to true when the server's table was adopted.
+ */
+export async function loadRequestLimits() {
+    try {
+        const table = toIntervalLimits(await apiFetch("/data/limits"));
+        if (!table) return false;
+        intervalLimits = table;
+        return true;
+    } catch {
+        // Offline, an older server without the endpoint, or a malformed payload.
+        // Clamping to slightly stale numbers beats not clamping at all.
+        return false;
+    }
+}
+
+/** Test seam: drop back to the bundled table. */
+export function resetRequestLimits() {
+    intervalLimits = FALLBACK_INTERVAL_LIMITS;
+}
 
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
 }
 
 function getIntervalLimit(interval, key) {
-    return INTERVAL_LIMITS[interval]?.[key] || INTERVAL_LIMITS["1d"][key];
+    return intervalLimits[interval]?.[key]
+        || intervalLimits["1d"]?.[key]
+        || FALLBACK_INTERVAL_LIMITS["1d"][key];
 }
 
 function encodeSymbol(symbol) {
@@ -268,11 +348,19 @@ export async function fetchBestModelForecast(symbol, horizon = 30) {
  * OHLCV download in milliseconds; the forecast is seconds of transformer
  * sampling. Asking for them together is what made the chart wait on the box.
  *
- * Same server-side download the models read, so the bars are the bars the
- * forecast was built on rather than a differently-adjusted series.
+ * Same server-side download AND the same aggregation the models read, so the
+ * candles are the candles the forecast was built on rather than a
+ * differently-adjusted or differently-binned series. `timeframe` must match the
+ * one passed to `fetchSimpleForecast`: weekly candles under a daily forecast is
+ * a chart whose last bar and whose estimate are about different things.
+ *
+ * `bars` counts candles of the selected timeframe — 60 on the monthly view is
+ * five years.
  */
-export async function fetchForecastHistory(symbol, days = 252) {
-    return apiFetch(`/predict/history/${encodeSymbol(symbol)}?days=${days}`);
+export async function fetchForecastHistory(symbol, bars = 252, timeframe = "day") {
+    return apiFetch(
+        `/predict/history/${encodeSymbol(symbol)}?bars=${bars}&timeframe=${encodeURIComponent(timeframe)}`
+    );
 }
 
 /**
@@ -283,11 +371,19 @@ export async function fetchForecastHistory(symbol, days = 252) {
  * only what is shown. There is deliberately nothing here to reconcile
  * client-side.
  *
+ * `timeframe` selects the bar being forecast, and it is a real horizon change
+ * rather than a label: the server aggregates its download to weekly or monthly
+ * candles and the one-step models then answer about the next week or the next
+ * month. The response echoes `timeframe` and `horizon_label`, so a caller
+ * renders the server's own wording instead of deriving it from the request.
+ *
  * A 200 with `status: "unavailable"` is a normal answer, and the chart is
  * unaffected by it: the candles arrive from their own request.
  */
-export async function fetchSimpleForecast(symbol) {
-    return apiFetch(`/predict/forecast/${encodeSymbol(symbol)}`);
+export async function fetchSimpleForecast(symbol, timeframe = "day") {
+    return apiFetch(
+        `/predict/forecast/${encodeSymbol(symbol)}?timeframe=${encodeURIComponent(timeframe)}`
+    );
 }
 
 // ── Next-day direction ───────────────────────────────────────
@@ -323,10 +419,21 @@ export async function listDirectionReports() {
  * It answers whether or not a walk-forward report exists, so the panel is never
  * blocked on training; `blend.classifier.weight` is 0 and `classifier_note`
  * explains why when the classifier is not yet part of the answer.
+ *
+ * `timeframe` re-runs the whole stack on weekly or monthly candles — a weekly
+ * label, weekly indicators, a weekly walk-forward. On those frames the stored
+ * classifier is deliberately excluded (it was scored against a next-day label,
+ * so its measured skill says nothing about next month) and `classifier_note`
+ * carries that sentence. A `status: "unavailable"` on the monthly frame is a
+ * common, correct answer: most tickers have too few monthly bars to measure.
  */
-export async function fetchDirectionAnalysis(symbol, { model = "logistic", refresh = false } = {}) {
+export async function fetchDirectionAnalysis(
+    symbol,
+    { model = "logistic", refresh = false, timeframe = "day" } = {},
+) {
     return apiFetch(
         `/direction/${encodeSymbol(symbol)}/analysis?model=${encodeURIComponent(model)}` +
+        `&timeframe=${encodeURIComponent(timeframe)}` +
         (refresh ? "&refresh=true" : "")
     );
 }
@@ -359,6 +466,13 @@ export async function fetchConfluence(symbol) {
     return apiFetch(`/patterns/confluence/${encodeSymbol(symbol)}`);
 }
 
+/**
+ * Confirmed pivot levels for one interval.
+ *
+ * `lookback` is in **bars of `interval`**, and the response reports
+ * `bars_analysed` — the detector reads the last 100 candles however long a
+ * lookback is sent, so a caption belongs on that number rather than this one.
+ */
 export async function fetchSupportResistance(symbol, interval = "1d", lookback = 180) {
     const [minLookback, maxLookback] = getIntervalLimit(interval, "lookback");
     const safeLookback = clamp(lookback, minLookback, maxLookback);

@@ -34,9 +34,14 @@ export const qk = {
     prices: (symbol, source, days, interval) => ["data", "prices", symbol, source, days, interval],
     indicators: (symbol, days, interval) => ["data", "indicators", symbol, days, interval],
     bestForecast: (symbol, horizon, readyVersion) => ["predict", "best", symbol, horizon, readyVersion],
-    forecastHistory: (symbol, days) => ["predict", "history", symbol, days],
-    simpleForecast: (symbol) => ["predict", "forecast", symbol],
-    directionAnalysis: (symbol, model) => ["direction", "analysis", symbol, model],
+    // The timeframe is part of every prediction key, not a suffix on the label.
+    // A weekly forecast and a daily one for the same symbol are different
+    // numbers about different bars, and a shared key would serve whichever
+    // landed first under both — invisibly on a Friday, when the two frames end
+    // on the same date.
+    forecastHistory: (symbol, bars, timeframe) => ["predict", "history", symbol, bars, timeframe],
+    simpleForecast: (symbol, timeframe) => ["predict", "forecast", symbol, timeframe],
+    directionAnalysis: (symbol, model, timeframe) => ["direction", "analysis", symbol, model, timeframe],
     supportResistance: (symbol, interval, lookback) =>
         ["patterns", "support-resistance", symbol, interval, lookback],
     historicalSignals: (symbol, days, modelType) => ["predict", "historical-signals", symbol, days, modelType],
@@ -152,9 +157,11 @@ export function useBestModelForecast(symbol, { horizon = 30, readyVersion = 0, e
 /**
  * The forecast for one symbol. The candles are `useForecastHistory`.
  *
- * The symbol alone is the key: the forecast is always the next bar, so no
- * control on the tab varies it. The chart range in particular must not — it
- * would re-run three models to redraw candles the client already holds.
+ * Symbol and timeframe are the key. The forecast is always the *next bar*, so
+ * the one control that varies it is the one that changes what a bar is: DAY,
+ * WEEK and MONTH each re-run the three models on their own candles. A zoom or
+ * pan over the chart must not be in this key — it would re-run three models to
+ * redraw candles the client already holds.
  *
  * Retries transport failures only, and nothing the server answered.
  * -----------------------------------------------------------------
@@ -180,23 +187,25 @@ const reachedTheServer = (error) => error instanceof ApiError;
 /**
  * The candles, on their own query so the chart renders without the forecast.
  *
- * Kept generous and constant (`days`) so the range buttons slice a frame that
- * is already in the cache instead of issuing a request per range.
+ * `bars` counts candles of the selected timeframe, and is kept generous and
+ * constant so a zoom control could slice a frame already in the cache rather
+ * than issue a request per width. `timeframe` is not that kind of control: it
+ * changes which candles exist, so it belongs in the key and in the request.
  */
-export function useForecastHistory(symbol, { days = 252, enabled = true } = {}) {
+export function useForecastHistory(symbol, { bars = 252, timeframe = "day", enabled = true } = {}) {
     return useQuery({
-        queryKey: qk.forecastHistory(symbol, days),
-        queryFn: () => fetchForecastHistory(symbol, days),
+        queryKey: qk.forecastHistory(symbol, bars, timeframe),
+        queryFn: () => fetchForecastHistory(symbol, bars, timeframe),
         enabled: enabled && Boolean(symbol),
         staleTime: 5 * 60_000,
         retry: (failureCount, error) => !reachedTheServer(error) && failureCount < 2,
     });
 }
 
-export function useSimpleForecast(symbol, { enabled = true } = {}) {
+export function useSimpleForecast(symbol, { timeframe = "day", enabled = true } = {}) {
     return useQuery({
-        queryKey: qk.simpleForecast(symbol),
-        queryFn: () => fetchSimpleForecast(symbol),
+        queryKey: qk.simpleForecast(symbol, timeframe),
+        queryFn: () => fetchSimpleForecast(symbol, timeframe),
         enabled: enabled && Boolean(symbol),
         staleTime: 5 * 60_000,
         retry: (failureCount, error) => !reachedTheServer(error) && failureCount < 2,
@@ -233,10 +242,13 @@ export function useSimpleForecast(symbol, { enabled = true } = {}) {
  * Not retried against the server: the walk-forward is deterministic on a given
  * last bar and costs seconds, so a repeat asks for the identical number twice.
  */
-export function useDirectionAnalysis(symbol, { model = "logistic", enabled = true } = {}) {
+export function useDirectionAnalysis(
+    symbol,
+    { model = "logistic", timeframe = "day", enabled = true } = {},
+) {
     return useQuery({
-        queryKey: qk.directionAnalysis(symbol, model),
-        queryFn: () => fetchDirectionAnalysis(symbol, { model }),
+        queryKey: qk.directionAnalysis(symbol, model, timeframe),
+        queryFn: () => fetchDirectionAnalysis(symbol, { model, timeframe }),
         enabled: enabled && Boolean(symbol),
         staleTime: 10 * 60_000,
         retry: (failureCount, error) => !reachedTheServer(error) && failureCount < 2,

@@ -6,6 +6,8 @@ rebalancing, correlation, Monte Carlo simulation, sectors, alerts, drift.
 import json
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -97,6 +99,45 @@ def _parse_json_param(raw: Optional[str], name: str) -> Optional[dict]:
     return value
 
 
+#: Concurrency for the per-symbol price fetch in :func:`_fetch_returns`. Small on
+#: purpose: the ceiling that matters is the provider's, and anything past a handful
+#: of workers just queues on ``YF_DOWNLOAD_LOCK`` while holding a thread.
+_FETCH_WORKERS = 8
+
+
+def _close_series(symbol: str, start: str, end: str) -> Optional[pd.Series]:
+    """
+    One symbol's usable closing prices, or None when there are none.
+
+    Every failure mode here is a dropped symbol rather than a raised request: a
+    basket is still worth scoring when one of its members has no data, and the
+    caller reports which were dropped.
+    """
+    def _download():
+        return safe_yf_download(symbol, start=start, end=end)
+
+    try:
+        # "1d-adj" namespaces these adjusted closes away from the raw bars
+        # training caches under the same ticker and window. The key covers
+        # ticker/range/interval only, so sharing a tag across callers with
+        # different auto_adjust settings serves one caller the other's prices.
+        df = cached_download(symbol, start, end, "1d-adj", _download)
+        # Cache entries predate the normalizer, so clean on the way out too.
+        df = normalize_ohlcv_frame(df, symbol)
+    except Exception:  # noqa: BLE001 - provider raises many shapes
+        logger.exception("Price download failed for %s", symbol)
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+    # A non-positive price makes pct_change return inf, and FastAPI renders with
+    # allow_nan=False, so a single bad tick would 500 the whole response.
+    close = close[close > 0]
+    return None if close.empty else close
+
+
 def _fetch_returns(symbols, lookback_days):
     """
     Fetch aligned daily returns for `symbols`.
@@ -134,35 +175,25 @@ def _fetch_returns(symbols, lookback_days):
     if not ordered:
         raise HTTPException(400, "No symbols given.")
 
-    frames, failed = {}, []
-    for sym in ordered:
-        def _download(symbol=sym):
-            return safe_yf_download(symbol, start=start, end=end)
+    # Fetched concurrently rather than one after another. A 30-name basket was 30
+    # sequential round trips, and the tail of that is what the Optimization and
+    # Portfolio tabs spend their time in. Concurrency does not defeat the download
+    # lock or the provider's patience: a cache hit is a local Parquet read that
+    # never takes the lock at all, and the misses that do still serialise on
+    # ``YF_DOWNLOAD_LOCK`` exactly as before. What changes is that the hits — the
+    # common case, since these four endpoints ask for the same tickers over the
+    # same window — no longer queue behind each other.
+    close_by_symbol: dict[str, pd.Series] = {}
+    with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+        for sym, close in zip(ordered, pool.map(lambda s: _close_series(s, start, end), ordered)):
+            if close is not None:
+                close_by_symbol[sym] = close
 
-        try:
-            # "1d-adj" namespaces these adjusted closes away from the raw bars
-            # training caches under the same ticker and window. The key covers
-            # ticker/range/interval only, so sharing a tag across callers with
-            # different auto_adjust settings serves one caller the other's prices.
-            df = cached_download(sym, start, end, "1d-adj", _download)
-            # Cache entries predate the normalizer, so clean on the way out too.
-            df = normalize_ohlcv_frame(df, sym)
-        except Exception:  # noqa: BLE001 - provider raises many shapes
-            logger.exception("Price download failed for %s", sym)
-            df = None
-
-        if df is None or df.empty:
-            failed.append(sym)
-            continue
-
-        close = pd.to_numeric(df["Close"], errors="coerce").dropna()
-        # A non-positive price makes pct_change return inf, and FastAPI renders with
-        # allow_nan=False, so a single bad tick would 500 the whole response.
-        close = close[close > 0]
-        if close.empty:
-            failed.append(sym)
-            continue
-        frames[sym] = close
+    # Rebuilt in request order, not completion order: the caller's symbol order is
+    # the column order of the returns frame and therefore of every weight, metric
+    # and correlation cell derived from it.
+    frames = {sym: close_by_symbol[sym] for sym in ordered if sym in close_by_symbol}
+    failed = [sym for sym in ordered if sym not in close_by_symbol]
 
     if not frames:
         raise HTTPException(

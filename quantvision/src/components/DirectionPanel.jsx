@@ -37,19 +37,10 @@ import { ApiError, fetchDirection } from "../utils/api";
 import { C } from "../utils/data";
 import { Badge, Section } from "./UIComponents";
 import ModelPreparation from "./ModelPreparation";
+import { money, num as sharedNum, pct, signedPct } from "../utils/format";
 
-const pct = (value, digits = 1) =>
-    typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
-const num = (value, digits = 3) =>
-    typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
-const money = (value) =>
-    typeof value === "number" && Number.isFinite(value)
-        ? `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-        : "—";
-const signedPct = (value, digits = 2) =>
-    typeof value === "number" && Number.isFinite(value)
-        ? `${value >= 0 ? "+" : ""}${(value * 100).toFixed(digits)}%`
-        : "—";
+// 3 digits by default here: these are model metrics (AUC, Brier), not prices.
+const num = (value, digits = 3) => sharedNum(value, digits);
 
 /* ─── P(up tomorrow) gauge ───────────────────────────────────── */
 /**

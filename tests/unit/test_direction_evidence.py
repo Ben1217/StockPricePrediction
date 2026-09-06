@@ -139,7 +139,7 @@ def test_blend_weights_are_the_measured_skill_numbers(random_walk_bars):
 
 def _fixed_evaluation(brier_skill_score: float):
     """A stand-in walk-forward result, so blend arithmetic can be checked exactly."""
-    def _evaluate(stack, *, seed=42):
+    def _evaluate(stack, *, seed=42, **floors):
         return {
             "available": True, "n_folds": 5, "n_test_rows": 400,
             "test_range": ["2021-01-04", "2022-12-30"],
@@ -201,7 +201,7 @@ def test_no_measured_skill_anywhere_falls_back_to_the_base_rate(random_walk_bars
     """
     import src.models.direction_evidence as evidence_module
 
-    def _no_skill(stack, *, seed=42):
+    def _no_skill(stack, *, seed=42, **floors):
         return {
             "available": True, "n_folds": 1, "n_test_rows": 200,
             "test_range": ["2020-01-01", "2020-12-31"],
@@ -355,3 +355,57 @@ def test_a_proven_classifier_produces_a_directional_call(random_walk_bars, proba
         assert "ship criteria" in analysis["neutral_reason"]
     else:
         assert analysis["neutral_reason"] is None
+
+
+def test_a_long_trend_leg_the_history_cannot_fill_is_dropped_not_carried():
+    """
+    ``_mean_of`` nulls a category on any missing sub-score, which is right for a
+    warm-up and wrong for a leg whose warm-up outlasts the history. The 200-bar
+    moving average on a short frame fills only its last rows, so admitting it
+    truncates the trend category — and therefore the whole stack — to those
+    rows: a sixth trend input bought with five-sixths of the evidence.
+
+    Pinned on a frame where that column is the binding constraint, and on both
+    halves of the trade: the leg is in when it is affordable, out when it is
+    not, and the rows come back when it goes.
+    """
+    from src.models.direction_evidence import (
+        _category_scores,
+        build_evidence_frame,
+        long_trend_leg_available,
+    )
+
+    index = pd.bdate_range("2010-01-04", periods=520)
+    rng = np.random.default_rng(17)
+    close = pd.Series(40 * np.exp(np.cumsum(rng.normal(0.0004, 0.013, 520))), index=index)
+    bars = pd.DataFrame(
+        {
+            "Open": close.shift(1).fillna(close.iloc[0]),
+            "High": close * 1.01,
+            "Low": close * 0.99,
+            "Close": close,
+            "Volume": rng.integers(1_000_000, 5_000_000, 520).astype(float),
+        },
+        index=index,
+    )
+    frame = build_evidence_frame(bars)
+    filled = int(frame["Close_SMA200_Ratio"].notna().sum())
+    assert 0 < filled < len(frame), "the fixture needs a partially-filled 200-bar column"
+
+    # A floor the column clears, and one it cannot.
+    assert long_trend_leg_available(frame, min_rows=filled) is True
+    assert long_trend_leg_available(frame, min_rows=filled + 1) is False
+
+    with_leg = _category_scores(frame, min_optional_leg_rows=filled)
+    without_leg = _category_scores(frame, min_optional_leg_rows=filled + 1)
+
+    assert without_leg["trend"].notna().sum() > with_leg["trend"].notna().sum(), (
+        "dropping the leg returns the rows its warm-up was costing the category"
+    )
+    # And it is the trend category alone that moves: the others are unrelated to
+    # this column and must be untouched by the decision. (`historical_analogs`
+    # is attached later, by build_evidence_stack, so it is not in this frame.)
+    for category in with_leg.columns:
+        if category == "trend":
+            continue
+        pd.testing.assert_series_equal(with_leg[category], without_leg[category])

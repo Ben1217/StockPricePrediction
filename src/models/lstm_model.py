@@ -4,6 +4,8 @@ Replaces TensorFlow LSTM with PyTorch for stock price prediction.
 Supports MC Dropout for uncertainty estimation.
 """
 
+import threading
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -81,6 +83,18 @@ class LSTMModel(BaseModel):
         self.history = {'train_loss': [], 'val_loss': []}
         self.scaler = None
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Guards the train()/eval() mode switch around inference. `predict_proba`
+        # needs the module in eval mode and `predict_with_uncertainty` needs it in
+        # train mode (that is what keeps dropout live for the MC samples), so the
+        # two cannot overlap on one instance: whichever set the mode last wins for
+        # both, and the loser silently returns the wrong kind of answer -- a
+        # deterministic prediction perturbed by dropout, or an uncertainty band
+        # sampled without it and therefore of zero width.
+        #
+        # This never came up while every request loaded its own instance. It
+        # becomes reachable the moment a bundle is shared, which is exactly what
+        # the bundle cache in src/models/bundle_cache.py now does.
+        self._inference_lock = threading.RLock()
 
     def build(self, input_shape: Tuple[int, int] = None) -> None:
         """
@@ -206,6 +220,28 @@ class LSTMModel(BaseModel):
         self.is_fitted = True
         logger.info(f"LSTM fitted: {len(self.history['train_loss'])} epochs completed")
 
+    def _lock(self) -> threading.RLock:
+        """The inference lock, created on demand.
+
+        Instances restored by joblib/pickle skip ``__init__``, so the attribute
+        can legitimately be missing on a model loaded from disk.
+        """
+        lock = getattr(self, "_inference_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._inference_lock = lock
+        return lock
+
+    def __getstate__(self):
+        # An RLock cannot be pickled, and a restored model gets a fresh one.
+        state = dict(self.__dict__)
+        state.pop("_inference_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._inference_lock = threading.RLock()
+
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions."""
         if not self.is_fitted:
@@ -221,11 +257,12 @@ class LSTMModel(BaseModel):
         if len(X.shape) == 2:
             X = X.reshape((X.shape[0], X.shape[1], 1))
 
-        self.model.eval()
-        with torch.no_grad():
-            X_t = torch.FloatTensor(X).to(self.device)
-            logits = self.model(X_t)
-            probs = torch.sigmoid(logits).cpu().numpy().reshape(-1)
+        with self._lock():
+            self.model.eval()
+            with torch.no_grad():
+                X_t = torch.FloatTensor(X).to(self.device)
+                logits = self.model(X_t)
+                probs = torch.sigmoid(logits).cpu().numpy().reshape(-1)
 
         return np.column_stack([1.0 - probs, probs])
 
@@ -255,16 +292,24 @@ class LSTMModel(BaseModel):
 
         X_t = torch.FloatTensor(X).to(self.device)
 
-        # Enable dropout at inference time (MC Dropout)
-        self.model.train()  # Keep dropout active
-        all_preds = []
-        with torch.no_grad():
-            for _ in range(n_samples):
-                logits = self.model(X_t)
-                preds = torch.sigmoid(logits).cpu().numpy()
-                all_preds.append(preds)
+        # Held across the whole sample loop, not just the mode switch: a
+        # concurrent predict_proba calling eval() midway would finish these draws
+        # with dropout off and collapse the band it is measuring.
+        with self._lock():
+            # Enable dropout at inference time (MC Dropout)
+            self.model.train()  # Keep dropout active
+            all_preds = []
+            try:
+                with torch.no_grad():
+                    for _ in range(n_samples):
+                        logits = self.model(X_t)
+                        preds = torch.sigmoid(logits).cpu().numpy()
+                        all_preds.append(preds)
+            finally:
+                # Restored even if a forward pass raises, so a failed call cannot
+                # leave the module in train mode for every later predict_proba.
+                self.model.eval()
 
-        self.model.eval()
         all_preds = np.array(all_preds)  # (n_samples, n_points)
         mean_pred = np.mean(all_preds, axis=0)
         std_pred = np.std(all_preds, axis=0)

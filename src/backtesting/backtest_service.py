@@ -151,7 +151,7 @@ def _get_ml_predictions(df: pd.DataFrame, symbol: str, model_type: str = "xgboos
         from src.models.direction_utils import direction_skill_failure, probability_up
         from src.models.model_bundle import load_model_bundle
 
-        bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=1)
+        bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=1, use_cache=True)
         if bundle is None:
             return None
 

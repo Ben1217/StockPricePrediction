@@ -46,6 +46,13 @@ from src.api.security import (
     parse_origins,
     security_middleware,
 )
+from src.api.workers import enforce_single_worker
+
+# Before anything else binds a port. Job registries, uploaded datasets, stored
+# backtest results and the rate limiter are all per-process, so a multi-worker
+# start does not fail -- it serves intermittent 404s that read as a client bug.
+# See src/api/workers.py for the full list and how to lift the restriction.
+enforce_single_worker()
 
 
 app = FastAPI(

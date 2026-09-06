@@ -815,7 +815,12 @@ export default function TradingViewDetail({ symbol, onClose }) {
             try {
                 const priceDays = { "1m": 5, "15m": 30, "1h": 180, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 120;
                 const indicatorDays = { "1m": 120, "15m": 120, "1h": 240, "1d": 320, "1wk": 300, "1mo": 180 }[timeframe] || 120;
-                const lookback = { "1m": 90, "15m": 120, "1h": 365, "1d": 420, "1wk": 2500, "1mo": 5600 }[timeframe] || 180;
+                // Bars of `timeframe`, not calendar days — the unit the
+                // support/resistance route takes. The weekly and monthly entries
+                // read 2500 and 5600 when those were days; as bar counts they
+                // are 300 weeks and 240 months, which is the same span asked for
+                // in the unit the route actually applies.
+                const lookback = { "1m": 90, "15m": 120, "1h": 365, "1d": 420, "1wk": 300, "1mo": 240 }[timeframe] || 180;
 
                 const [priceRes, indRes, patRes, srRes] = await Promise.all([
                     fetchPrices(symbol, "yfinance", priceDays, timeframe),

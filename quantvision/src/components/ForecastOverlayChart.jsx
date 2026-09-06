@@ -298,6 +298,12 @@ export default function ForecastOverlayChart({
     direction,
     horizon,
     height = 520,
+    // What one candle is, in words. The pane draws whatever bars it is handed
+    // and cannot tell a week from a day by looking at them, so the noun is
+    // passed in rather than assumed -- a weekly chart legended "actual
+    // sessions" is a caption that contradicts the picture above it.
+    barNoun = "session",
+    barNounPlural = "sessions",
 }) {
     const containerRef = useRef(null);
     const chartRef = useRef(null);
@@ -508,7 +514,7 @@ export default function ForecastOverlayChart({
                         <i style={{ width: 4, height: 11, background: COLORS.up, borderRadius: 1, display: "inline-block" }} />
                         <i style={{ width: 4, height: 11, background: COLORS.down, borderRadius: 1, display: "inline-block" }} />
                     </span>}>
-                        actual sessions
+                        actual {barNounPlural}
                     </LegendKey>
                     <LegendKey swatch={
                         <i style={{
@@ -516,7 +522,7 @@ export default function ForecastOverlayChart({
                             borderTop: `2px dashed ${COLORS.forecast}`,
                         }} />
                     }>
-                        next-session estimate
+                        next-{barNoun} estimate
                     </LegendKey>
                     <LegendKey swatch={
                         <i style={{
@@ -529,7 +535,7 @@ export default function ForecastOverlayChart({
                 </div>
 
                 <div style={{ fontSize: 10.5, color: C.textDim, textAlign: "right", whiteSpace: "nowrap" }}>
-                    {shown} session{shown === 1 ? "" : "s"}
+                    {shown} {shown === 1 ? barNoun : barNounPlural}
                     {target?.date ? ` · forecast ${String(target.date).slice(0, 10)}` : ""}
                 </div>
             </div>

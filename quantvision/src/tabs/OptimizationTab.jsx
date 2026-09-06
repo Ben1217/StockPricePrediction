@@ -10,6 +10,7 @@ import {
 } from "../utils/api";
 import { eachLimited } from "../utils/concurrency";
 import { StatCard, Section, Hint, Badge } from "../components/UIComponents";
+import { moneyPlain, num, pct, signedPctPoints } from "../utils/format";
 
 /* ══════════════════════════════════════════════════════════════════════════
    This tab is the last stage of the project's pipeline:
@@ -100,14 +101,10 @@ const MAX_POSITION = 0.4;
 const MIN_POSITION = 0.02;
 
 /* ── formatting ─────────────────────────────────────────────────────────── */
-const pct = (v, digits = 1) =>
-    Number.isFinite(Number(v)) ? `${(Number(v) * 100).toFixed(digits)}%` : "—";
-const signedPct = (v, digits = 2) =>
-    Number.isFinite(Number(v)) ? `${Number(v) >= 0 ? "+" : ""}${Number(v).toFixed(digits)}%` : "—";
-const money = (v) =>
-    Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : "—";
-const num = (v, digits = 2) =>
-    Number.isFinite(Number(v)) ? Number(v).toFixed(digits) : "—";
+// `signedPct` here takes a value that is ALREADY a percentage, unlike the one in
+// PortfolioTab that takes a fraction — see src/utils/format.js.
+const signedPct = signedPctPoints;
+const money = moneyPlain;
 
 const DIRECTION_COLOR = { UP: C.green, DOWN: C.red, NEUTRAL: C.textDim };
 

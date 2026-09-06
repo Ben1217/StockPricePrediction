@@ -166,12 +166,44 @@ def _solve_risk_parity(
     return {name: float(w) for name, w in zip(asset_names, weights)}
 
 
+#: Solve options for the parametrised frontier below.
+#:
+#: Re-solving one compiled problem is ~4x faster than rebuilding it per point, but
+#: CVXPY's DPP path reaches the solver through a different canonicalisation and
+#: Clarabel's *default* tolerances then return a visibly looser answer: weights that
+#: should be zero come back at -1e-5 rather than -1e-15, which is a "-0.00%" in a
+#: holdings table. Asking for the accuracy the rebuild path was getting anyway costs
+#: nothing measurable (the compile was the expense, not the solve) and puts the
+#: results back within 1e-10 of it.
+#:
+#: Empty when Clarabel is absent, so the frontier still solves on whatever CVXPY
+#: picks by default rather than raising on an unknown solver name.
+_FRONTIER_SOLVE_KWARGS: Dict = (
+    {
+        "solver": cp.CLARABEL,
+        "tol_gap_abs": 1e-12,
+        "tol_gap_rel": 1e-12,
+        "tol_feas": 1e-12,
+    }
+    if "CLARABEL" in cp.installed_solvers()
+    else {}
+)
+
+
 def calculate_efficient_frontier(
     returns: pd.DataFrame,
     n_points: int = 100
 ) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
     """
     Calculate efficient frontier points
+
+    The target return is a ``cp.Parameter`` rather than a constant, so the QP is
+    built and canonicalised **once** and then re-solved ``n_points`` times with a
+    new value. Constructing the problem inside the loop made CVXPY re-run its
+    whole compilation chain — DCP verification, canonicalisation, and the
+    conversion to the solver's matrix form — for every point, and on a problem
+    this small that compile step dominates the solve it precedes. The maths is
+    unchanged: same objective, same constraints, same solutions.
 
     Parameters
     ----------
@@ -191,32 +223,42 @@ def calculate_efficient_frontier(
 
     target_returns = np.linspace(mean_returns.min(), mean_returns.max(), n_points)
 
+    weights = cp.Variable(n_assets)
+    # DPP requires the parameter to enter affinely, which a bare `>= target` does.
+    target = cp.Parameter()
+    portfolio_variance = cp.quad_form(weights, cov_matrix.values)
+    problem = cp.Problem(
+        cp.Minimize(portfolio_variance),
+        [
+            cp.sum(weights) == 1,
+            weights >= 0,
+            mean_returns.values @ weights >= target,
+        ],
+    )
+
     volatilities = []
     expected_returns = []
     weights_list = []
 
-    for target in target_returns:
-        weights = cp.Variable(n_assets)
-        portfolio_variance = cp.quad_form(weights, cov_matrix.values)
-
-        constraints = [
-            cp.sum(weights) == 1,
-            weights >= 0,
-            mean_returns.values @ weights >= target
-        ]
-
-        problem = cp.Problem(cp.Minimize(portfolio_variance), constraints)
+    for target_value in target_returns:
+        target.value = float(target_value)
         try:
-            problem.solve()
-            if weights.value is not None:
-                vol = np.sqrt(portfolio_variance.value)
-                ret = mean_returns.values @ weights.value
-
-                volatilities.append(vol)
-                expected_returns.append(ret)
-                weights_list.append({col: w for col, w in zip(returns.columns, weights.value)})
-        except:
+            problem.solve(**_FRONTIER_SOLVE_KWARGS)
+        except cp.error.SolverError as exc:
+            # An infeasible or numerically awkward target is a point that does not
+            # exist on this frontier, not a failed request. Logged rather than
+            # swallowed, because a frontier that is quietly short is misleading.
+            logger.debug("Frontier point at target %.4f did not solve: %s", target_value, exc)
             continue
+
+        if weights.value is None:
+            continue
+        vol = np.sqrt(portfolio_variance.value)
+        ret = mean_returns.values @ weights.value
+
+        volatilities.append(vol)
+        expected_returns.append(ret)
+        weights_list.append({col: w for col, w in zip(returns.columns, weights.value)})
 
     return np.array(volatilities), np.array(expected_returns), weights_list
 

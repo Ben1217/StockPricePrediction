@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import './index.css'
 import App from './App.jsx'
-import { ApiError } from './utils/api'
+import { ApiError, loadRequestLimits } from './utils/api'
 
 const queryClient = new QueryClient({
     defaultOptions: {
@@ -21,6 +21,12 @@ const queryClient = new QueryClient({
         },
     },
 })
+
+// Adopt the server's per-interval request windows, replacing the bundled fallback
+// table in utils/api.js. Deliberately not awaited: the app renders immediately and
+// the first few requests clamp with the bundled numbers, which is exactly what they
+// did before this endpoint existed. It never rejects, so there is nothing to catch.
+loadRequestLimits()
 
 createRoot(document.getElementById('root')).render(
     <StrictMode>

@@ -41,14 +41,24 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query
 
 from src.data.direction_data import load_daily_bars
+from src.data.timeframe import (
+    TIMEFRAME_KEYS,
+    Timeframe,
+    describe_timeframe,
+    last_bar_is_forming,
+    next_bar_date,
+    period_end,
+    resample_ohlcv,
+    resolve_timeframe,
+)
 from src.features.direction_features import build_direction_dataset
 from src.models.direction_evidence import analyse_direction
 from src.models.direction_models import MODEL_FACTORIES
@@ -75,6 +85,10 @@ GAUGE_LOOKBACK_DAYS = 365 * 6
 # nearest-neighbour read is only as good as the number of past setups it has to
 # choose from, and the stack's own walk-forward wants test folds on top of a
 # training window.
+#
+# The daily figure. A weekly or monthly analysis takes its own, much longer
+# window from the timeframe table -- ten years is 520 weekly bars and 120
+# monthly ones, and the monthly walk-forward alone wants most of that.
 ANALYSIS_LOOKBACK_DAYS = 365 * 10
 
 # The analysis is roughly a second of feature building and model fitting on a
@@ -83,9 +97,21 @@ ANALYSIS_LOOKBACK_DAYS = 365 * 10
 # than recomputes, and a new session's close invalidates the entry by changing
 # the key. Bounded so a long-lived process cannot accumulate every symbol a user
 # has ever typed.
+#
+# The timeframe is part of the key. Same symbol, same last bar, different
+# question: on a Friday the daily and weekly frames end on the same date, and a
+# key without the timeframe would have served whichever was computed first
+# under both labels.
 ANALYSIS_CACHE_TTL_SECONDS = 15 * 60
 ANALYSIS_CACHE_MAX_ENTRIES = 64
-_analysis_cache: "Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]]" = {}
+#: TTLCache rather than the hand-rolled dict this used to be. That version paired
+#: every entry with its own expiry timestamp and evicted by scanning the whole map
+#: for the soonest one — an O(n) `min()` on every insert to reimplement, less well,
+#: the expiry-plus-LRU that cachetools already provides and that eight other caches
+#: in this codebase already use. cachetools is not thread-safe, hence the lock.
+_analysis_cache: TTLCache = TTLCache(
+    maxsize=ANALYSIS_CACHE_MAX_ENTRIES, ttl=ANALYSIS_CACHE_TTL_SECONDS
+)
 _analysis_cache_lock = threading.Lock()
 
 
@@ -409,24 +435,15 @@ def get_direction(
 
 def _cached_analysis(key: "Tuple[str, str]") -> Optional[Dict[str, Any]]:
     with _analysis_cache_lock:
-        entry = _analysis_cache.get(key)
-        if entry is None:
-            return None
-        expires_at, payload = entry
-        if expires_at < time.monotonic():
-            _analysis_cache.pop(key, None)
-            return None
-        return payload
+        return _analysis_cache.get(key)
 
 
 def _store_analysis(key: "Tuple[str, str]", payload: Dict[str, Any]) -> None:
+    # Eviction is the cache's own: expired entries go first, then least-recently
+    # used — which keeps the symbols a user is actively switching between, the
+    # property the previous soonest-to-expire scan was reaching for.
     with _analysis_cache_lock:
-        if len(_analysis_cache) >= ANALYSIS_CACHE_MAX_ENTRIES:
-            # Drop whatever expires soonest rather than an arbitrary entry, so
-            # the symbols a user is actively switching between survive.
-            oldest = min(_analysis_cache, key=lambda name: _analysis_cache[name][0])
-            _analysis_cache.pop(oldest, None)
-        _analysis_cache[key] = (time.monotonic() + ANALYSIS_CACHE_TTL_SECONDS, payload)
+        _analysis_cache[key] = payload
 
 
 def clear_analysis_cache() -> None:
@@ -490,11 +507,52 @@ def _classifier_contribution(
     }
 
 
+def _timeframe_classifier_contribution(
+    symbol: str,
+    model: str,
+    bars: pd.DataFrame,
+    timeframe: Timeframe,
+) -> Dict[str, Any]:
+    """
+    The classifier leg, but only where the classifier is answering the question.
+
+    Every stored walk-forward report in ``data/direction_backtests`` was fitted
+    and scored on *daily* bars against a next-*day* label. Its Brier skill is
+    therefore a measurement about tomorrow, and this module's whole blending
+    rule is that a source is weighted by its measured skill at the question
+    being asked. Carrying that number into a weekly or monthly blend would give
+    it a weight it earned somewhere else — the one thing
+    :func:`analyse_direction` is built to refuse — so on those timeframes the
+    classifier contributes nothing and says why.
+
+    This is not a gap waiting to be filled by pointing the same code at weekly
+    bars: it would need its own walk-forward, its own report and its own gate.
+    Until one exists, the weekly and monthly answers rest on the evidence stack
+    alone, which runs its own walk-forward on the bars it was handed.
+    """
+    if timeframe.resample_rule is not None:
+        return {
+            "included": False,
+            "reason": (
+                f"the stored {model} classifier is fitted and scored on daily bars against a "
+                f"next-day label, so it has no measured skill at the {timeframe.bar_noun} "
+                f"horizon and is left out of the blend rather than weighted by a number it "
+                f"earned on a different question"
+            ),
+        }
+    return _classifier_contribution(symbol, model, bars)
+
+
 @router.get("/{symbol}/analysis")
 def get_direction_analysis(
     symbol: str,
     model: str = Query("logistic", enum=sorted(MODEL_FACTORIES)),
     refresh: bool = Query(False, description="Recompute instead of serving the cached analysis"),
+    timeframe: str = Query(
+        "day",
+        enum=list(TIMEFRAME_KEYS),
+        description="Bar size to analyse: day | week | month.",
+    ),
 ) -> Dict[str, Any]:
     """
     Direction, probability, confidence and the evidence that produced them.
@@ -509,40 +567,79 @@ def get_direction_analysis(
     report. The evidence stack runs its own walk-forward, so the answer stands
     on a measured record either way; the classifier simply joins the blend once
     its report exists.
+
+    ``timeframe`` changes what is being predicted, not how it is worded. The
+    daily bars are aggregated to weekly or monthly candles and every part of the
+    stack re-runs on them: the label becomes the next week's move, the seven
+    evidence scores are read off weekly indicators, and the walk-forward scores
+    weekly predictions. The classifier drops out on those frames — see
+    :func:`_timeframe_classifier_contribution` — and the answer says so.
+
+    A symbol without the history for a weekly or monthly walk-forward gets
+    ``status: "unavailable"`` with the row count, which on the monthly frame is
+    a common and correct outcome rather than an error: a call needs a measured
+    record behind it, and thirty bars is not one.
     """
     if model not in MODEL_FACTORIES:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown model '{model}'. Available: {sorted(MODEL_FACTORIES)}",
         )
+    try:
+        resolved = resolve_timeframe(timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     symbol = symbol.upper().strip()
+    # The timeframe's own window, not the daily one: ten years is 120 monthly
+    # bars, and the monthly walk-forward wants more than that before it will
+    # report anything.
+    lookback_days = max(ANALYSIS_LOOKBACK_DAYS, resolved.lookback_days)
     try:
         bars = load_daily_bars(
             symbol,
-            start=(pd.Timestamp.today().normalize() - pd.Timedelta(days=ANALYSIS_LOOKBACK_DAYS)),
+            start=(pd.Timestamp.today().normalize() - pd.Timedelta(days=lookback_days)),
             require_min_rows=False,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    last_bar = str(pd.Timestamp(bars.frame.index[-1]).date()) if len(bars.frame) else "none"
-    cache_key = (f"{symbol}:{model}", last_bar)
+    # One aggregation, from the same helper the forecast route uses, so the
+    # analysis and the forecast are reading the same candles.
+    frame = resample_ohlcv(bars.frame, resolved)
+
+    last_bar = str(pd.Timestamp(frame.index[-1]).date()) if len(frame) else "none"
+    cache_key = (f"{symbol}:{model}:{resolved.key}", last_bar)
     if not refresh:
         cached = _cached_analysis(cache_key)
         if cached is not None:
             return {**cached, "cached": True}
 
-    classifier = _classifier_contribution(symbol, model, bars.frame)
+    timeframe_meta = {
+        **describe_timeframe(resolved),
+        "bars_analysed": int(len(frame)),
+        "last_bar_complete": not last_bar_is_forming(frame, resolved),
+        "forecast_bar": (
+            next_bar_date(period_end(frame, resolved), resolved) if len(frame) else None
+        ),
+    }
+
+    classifier = _timeframe_classifier_contribution(symbol, model, bars.frame, resolved)
     try:
         analysis = analyse_direction(
-            bars.frame,
+            frame,
             symbol=symbol,
             model_name=model if classifier.get("included") else None,
             model_probability=classifier.get("probability_up"),
             model_skill=classifier.get("skill"),
             model_tradeable=classifier.get("tradeable"),
             model_gate_reason=classifier.get("gate_reason"),
+            bar_noun=resolved.bar_noun,
+            scale_window=resolved.scale_window,
+            min_scale_observations=resolved.min_scale_observations,
+            stack_train_rows=resolved.stack_train_rows,
+            stack_test_rows=resolved.stack_test_rows,
+            min_analog_history=resolved.analog_min_history,
         )
     except ValueError as exc:
         # Too little history for a structure read, a nearest-neighbour sample or
@@ -552,6 +649,7 @@ def get_direction_analysis(
             "model": model,
             "status": "unavailable",
             "message": str(exc),
+            **timeframe_meta,
             "data": {key: bars.meta.get(key) for key in ("first_bar", "last_bar", "clean_rows", "price_basis")},
             # Read-only. Starting a training run for a symbol that does not have
             # enough history to analyse would queue work already known to fail.
@@ -564,6 +662,7 @@ def get_direction_analysis(
         "status": "ok",
         "cached": False,
         "classifier_note": classifier.get("reason"),
+        **timeframe_meta,
         "data": {
             key: bars.meta.get(key)
             for key in ("first_bar", "last_bar", "clean_rows", "price_basis", "content_sha256")
@@ -577,10 +676,18 @@ def get_direction_analysis(
         # that is, when the classifier is missing its walk-forward report and so
         # contributes nothing to the blend. On the path where the classifier is
         # already in, this is a read of whatever job happens to exist.
+        #
+        # And only on the daily frame. The classifier is out of the weekly and
+        # monthly blends because it answers a different question, not because
+        # its report is missing, so training one would not change those answers
+        # by a single digit -- it would just queue a walk-forward every time
+        # someone looked at a weekly chart.
         "preparation": preparation_state(
             symbol,
             direction_model=model,
-            auto_start=not classifier.get("included", False),
+            auto_start=(
+                resolved.resample_rule is None and not classifier.get("included", False)
+            ),
         ),
     }
     _store_analysis(cache_key, payload)

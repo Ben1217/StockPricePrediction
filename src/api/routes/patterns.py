@@ -4,6 +4,7 @@ Pattern Detection API routes — multi-timeframe chart patterns.
 
 import logging
 import asyncio
+import math
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 
@@ -11,6 +12,7 @@ import pandas as pd
 from cachetools import LRUCache
 from fastapi import APIRouter, Query, HTTPException, BackgroundTasks
 
+from src.api.limits import clamp as clamp_interval
 from src.data.ohlcv import fetch_ohlcv
 
 from src.api.schemas.schemas import (
@@ -41,21 +43,57 @@ TF_CONFIG = {
     "1mo": {"yf_interval": "1mo", "weight": 5, "period": "max", "pattern_lookback": 180, "min_candles": 150, "analysis_days": 5600},
 }
 
-_SR_LOOKBACK_LIMITS = {
-    "1m": (60, 90),
-    "5m": (60, 120),
-    "15m": (60, 120),
-    "1h": (120, 365),
-    "4h": (120, 365),
-    "1d": (120, 420),
-    "1wk": (180, 500),
-    "1mo": (180, 500),
+#: Candles :func:`detect_support_resistance` actually reads. It slices
+#: ``df.iloc[-100:]`` and ignores everything before that, so this is the real
+#: analysis window on every interval and the number the response reports.
+#: ``lookback`` only decides how much is *fetched*; anything past this is
+#: downloaded and discarded, and anything short of it is a thinner read than
+#: the algorithm was designed for.
+SR_ANALYSIS_BARS = 100
+
+#: ``lookback`` is a count of BARS OF THE REQUESTED INTERVAL, not calendar days.
+#:
+#: It was read as calendar days here while the callers meant bars, and on the
+#: long intervals the two are not close: `lookback=240` on `1mo` asked for 240
+#: months and fetched 440 days, which is 15 candles. The detector then had 15
+#: bars where it wants 100 and returned no levels at all -- a monthly panel that
+#: was empty for every symbol, for a reason nothing in the response mentioned.
+#:
+#: Bars is the reading that makes the number mean the same thing on all three
+#: intervals, and the one the UI copy ("the last N weeks") already assumed.
+#: The numbers themselves live in :mod:`src.api.limits` under the ``lookback``
+#: bucket, alongside the calendar-day windows the other routes clamp with, so the
+#: two units are declared side by side and served together. The floors there sit
+#: above :data:`SR_ANALYSIS_BARS` so a clamped request still fills the detector's
+#: window; the ceilings are what the data reliably supports -- 300 weeks is six
+#: years, 240 months is twenty.
+
+#: Calendar days one bar of each interval spans, for turning a bar count into a
+#: download window. The daily figure is 365/252: weekends and holidays mean 100
+#: sessions need about 145 days of calendar to fit in.
+_SR_CALENDAR_DAYS_PER_BAR = {
+    "1d": 365.0 / 252.0,
+    "1wk": 7.0,
+    "1mo": 30.5,
 }
+
+#: Slack on that conversion. The per-bar figures are averages, and a window
+#: sized to the average comes up short about half the time -- which costs the
+#: detector bars off the far end of the frame it was promised. Cheap insurance:
+#: the extra candles are trimmed by the 100-bar slice anyway.
+_SR_WINDOW_SAFETY = 1.15
+_SR_WINDOW_MARGIN_DAYS = 30
 
 
 def _clamp_sr_lookback(interval: str, lookback: int) -> int:
-    lower, upper = _SR_LOOKBACK_LIMITS.get(interval, _SR_LOOKBACK_LIMITS["1d"])
-    return min(max(lookback, lower), upper)
+    """Bars of ``interval``, clamped to this interval's window."""
+    return clamp_interval(interval, lookback, "lookback")
+
+
+def _sr_window_days(interval: str, bars: int) -> int:
+    """Calendar days to download to come away with ``bars`` bars of ``interval``."""
+    per_bar = _SR_CALENDAR_DAYS_PER_BAR.get(interval, _SR_CALENDAR_DAYS_PER_BAR["1d"])
+    return int(math.ceil(bars * per_bar * _SR_WINDOW_SAFETY)) + _SR_WINDOW_MARGIN_DAYS
 
 
 def _fetch_yf_data(symbol: str, interval: str, period: str, days_lookback: int) -> pd.DataFrame:
@@ -130,18 +168,41 @@ def get_confluence(symbol: str):
 def get_support_resistance(
     symbol: str,
     interval: str = Query("1d", enum=["1m", "5m", "15m", "1h", "4h", "1d", "1wk", "1mo"]),
-    lookback: int = Query(180, ge=20, le=20000),
+    lookback: int = Query(
+        180,
+        ge=20,
+        le=20000,
+        description="History to read, in BARS of `interval` — 240 on 1mo is twenty years.",
+    ),
 ):
-    """Detect dynamic Support and Resistance levels based on patterns, MAs, and pivots."""
+    """
+    Confirmed pivot support and resistance, on the bars of one interval.
+
+    ``lookback`` counts **bars of** ``interval``, not calendar days. That
+    distinction is the whole of this route's history: it was read as days while
+    its callers passed bars, so a Predictions tab asking for 240 monthly candles
+    was served a 440-day window holding 15 of them, and
+    :func:`detect_support_resistance` -- which reads the last
+    :data:`SR_ANALYSIS_BARS` candles and nothing else -- found no level that
+    cleared two touches on any symbol. An empty monthly panel, from a request
+    that looked satisfied.
+
+    The response says what was actually read rather than echoing what was asked
+    for. ``bars_analysed`` is the detector's own window, which is capped at 100
+    however long a lookback is sent; a caller that captions its panel from
+    ``lookback`` is describing a download, not an analysis.
+    """
     from src.features.support_resistance import detect_support_resistance
-    
+
     symbol = symbol.upper()
     lookback = _clamp_sr_lookback(interval, lookback)
-    
+
     try:
         if interval in ("1d", "1wk", "1mo"):
             end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=lookback + 200)).strftime("%Y-%m-%d")
+            start = (
+                datetime.now() - timedelta(days=_sr_window_days(interval, lookback))
+            ).strftime("%Y-%m-%d")
             df = fetch_ohlcv(symbol, interval, start=start, end=end)
         else:
             df = fetch_ohlcv(symbol, interval)
@@ -166,6 +227,14 @@ def get_support_resistance(
         "levels": sr_data["levels"],
         "trendlines": sr_data["trendlines"],
         "dynamic_levels": sr_data["dynamic_levels"],
+        # What was read, in the bars it was read on, so a caller can caption the
+        # panel truthfully without knowing this route's internals. `lookback`
+        # sizes the download; `bars_analysed` is what reached the detector, and
+        # on a short history it is the smaller of the two.
+        "interval": interval,
+        "lookback_bars": int(lookback),
+        "bars_available": int(len(df)),
+        "bars_analysed": int(min(len(df), SR_ANALYSIS_BARS)),
     }
 
 

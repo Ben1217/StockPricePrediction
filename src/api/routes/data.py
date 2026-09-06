@@ -33,6 +33,7 @@ from src.data.live_data import (
     is_market_open, get_market_session,
     validate_freshness, fetch_live_quote, fetch_extended_quote
 )
+from src.api.limits import as_payload as limits_payload, clamp as clamp_interval
 from src.data.ohlcv import cache_get, cache_set, cache_stats, download_lock, fetch_ohlcv
 from src.data.timescale_store import (
     load_daily_prices,
@@ -74,17 +75,6 @@ def _safe_upload_name(filename: Optional[str]) -> str:
         raise HTTPException(400, "Invalid filename")
     return cleaned[:120]
 
-_INTERVAL_DAY_LIMITS = {
-    "1m": {"prices": (7, 7), "indicators": (60, 120)},
-    "5m": {"prices": (30, 60), "indicators": (60, 120)},
-    "15m": {"prices": (30, 60), "indicators": (60, 120)},
-    "1h": {"prices": (180, 730), "indicators": (120, 240)},
-    "4h": {"prices": (180, 730), "indicators": (120, 240)},
-    "1d": {"prices": (30, 420), "indicators": (120, 320)},
-    "1wk": {"prices": (730, 3650), "indicators": (120, 300)},
-    "1mo": {"prices": (1825, 3650), "indicators": (120, 180)},
-}
-
 
 def _cache_get(key: str) -> Optional[pd.DataFrame]:
     """Thin alias kept so existing call sites read naturally."""
@@ -96,8 +86,8 @@ def _cache_set(key: str, df: pd.DataFrame) -> None:
 
 
 def _clamp_interval_days(interval: str, value: int, bucket: str) -> int:
-    lower, upper = _INTERVAL_DAY_LIMITS.get(interval, _INTERVAL_DAY_LIMITS["1d"])[bucket]
-    return min(max(value, lower), upper)
+    """Calendar days, clamped to this interval's window. See src.api.limits."""
+    return clamp_interval(interval, value, bucket)
 
 
 # ── Internal fetchers ─────────────────────────────────────────────────────────
@@ -228,6 +218,23 @@ def get_cache_stats():
     stats = cache_stats()
     stats["uploaded_datasets"] = len(_uploaded_datasets)
     return stats
+
+
+@router.get("/limits")
+def get_request_limits():
+    """
+    The per-interval request windows this server clamps to.
+
+    Served so the frontend can size its requests from the server's real numbers
+    rather than a hardcoded copy. It keeps a bundled fallback for when the API is
+    unreachable, but a copy that nothing reconciles is a copy that goes stale
+    silently -- which is what this endpoint exists to prevent.
+
+    `units` says what each bucket measures, because they are not all the same:
+    `prices`, `indicators` and `sentiment` are calendar days, `lookback` is bars
+    of the requested interval.
+    """
+    return limits_payload()
 
 
 @router.get("/sources")

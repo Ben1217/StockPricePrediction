@@ -167,7 +167,9 @@ def _load_feature_columns(feat_df: pd.DataFrame, bundle=None) -> List[str]:
 
 def _load_trained_model(model_type: str, symbol: str, horizon: int = 1):
     try:
-        bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=horizon)
+        bundle = load_model_bundle(
+            model_type=model_type, symbol=symbol, horizon=horizon, use_cache=True
+        )
     except Exception as exc:  # pragma: no cover - best effort loading
         return None, None, f"Failed to load {model_type} model bundle: {exc}"
 
@@ -666,7 +668,7 @@ def _build_price_series(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
 
 def _run_walk_forward_validation(symbol: str, df: pd.DataFrame, model_type: str, n_splits: int, gap: int) -> Dict[str, Any]:
-    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=1)
+    bundle = load_model_bundle(model_type=model_type, symbol=symbol, horizon=1, use_cache=True)
     feature_config = bundle.feature_config if bundle is not None else None
     preferred_feature_cols = bundle.feature_columns if bundle is not None else None
 

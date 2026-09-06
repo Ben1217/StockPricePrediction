@@ -105,12 +105,27 @@ CATEGORY_LABELS: Dict[str, str] = {
 
 # Trailing window for the scale each unbounded column is squashed against. One
 # trading year is long enough to be stable and short enough to track a regime.
+#
+# These are the DAILY defaults, and every function below takes them as
+# arguments rather than reading them directly. The evidence engine is run on
+# weekly and monthly bars too, where "one year" is 52 bars and 12 -- and a
+# 252-bar window on monthly candles is twenty-one years of scale, which no
+# ticker can fill and which would leave every score NaN. The per-timeframe
+# values live in :data:`src.data.timeframe.TIMEFRAMES`; these are what a caller
+# that has not heard of timeframes gets, which is the daily behaviour unchanged.
 SCALE_WINDOW = 252
 MIN_SCALE_OBSERVATIONS = 60
 
 # Walk-forward settings for the stack's own evaluation. Seven features need far
 # less training data than the 46-column model, so a shorter minimum is honest
 # here; the folds still never train on a row that follows their test block.
+#
+# Also daily defaults, and also overridable per timeframe -- 440 monthly bars is
+# thirty-six years, so holding this floor on the monthly frame would refuse
+# every symbol rather than measure any. What does not move is the requirement
+# that the answer carries its own out-of-sample interval: a thinner sample
+# widens that interval and the stack declines the call, which is the mechanism
+# that keeps a lower floor honest instead of merely permissive.
 MIN_STACK_TRAIN_ROWS = 400
 STACK_TEST_FOLDS = 5
 MIN_STACK_TEST_ROWS = 40
@@ -131,7 +146,11 @@ _HORIZON_SPECS: Tuple[Tuple[str, str, int, str, str], ...] = (
 # ─────────────────────────────────────────────────────────────────────────────
 # Evidence construction
 # ─────────────────────────────────────────────────────────────────────────────
-def _bounded(series: pd.Series) -> pd.Series:
+def _bounded(
+    series: pd.Series,
+    scale_window: int = SCALE_WINDOW,
+    min_observations: int = MIN_SCALE_OBSERVATIONS,
+) -> pd.Series:
     """
     Squash an unbounded, naturally zero-centred column into [-1, 1].
 
@@ -141,10 +160,13 @@ def _bounded(series: pd.Series) -> pd.Series:
     "MACD equals its signal" stops being directional - which subtracting a
     trailing mean would move. The window is trailing, so row ``t`` is never
     scaled by a spread that includes ``t+1``.
+
+    ``scale_window`` is in bars, so it means roughly a year on whichever frame
+    it is handed: 252 daily bars, 52 weekly, 36 monthly.
     """
     values = pd.to_numeric(series, errors="coerce")
     rms = np.sqrt(
-        (values ** 2).rolling(SCALE_WINDOW, min_periods=MIN_SCALE_OBSERVATIONS).mean()
+        (values ** 2).rolling(scale_window, min_periods=min_observations).mean()
     )
     return np.tanh(values / rms.where(rms > 0))
 
@@ -195,7 +217,57 @@ def build_evidence_frame(bars: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def _category_scores(frame: pd.DataFrame) -> pd.DataFrame:
+def _usable(series: pd.Series, minimum: int) -> bool:
+    """
+    True when a column covers enough of the frame to be worth the rows it costs.
+
+    ``_mean_of`` nulls a whole category on any missing sub-score. That is the
+    right rule for a warm-up -- a category assembled from six inputs in one era
+    and two in another is two features wearing one name -- and the wrong one for
+    a leg whose own warm-up is longer than the history: ``SMA_200`` on 240
+    monthly bars fills on the last 41 of them, so including it truncates the
+    trend category to 41 rows and the whole stack to 24, and there is no
+    walk-forward to be had from 24 rows.
+
+    So the test is not "does this column exist" but "does it leave a measurable
+    sample behind". ``minimum`` is the walk-forward's own floor, which is what
+    makes the trade explicit: a sixth trend leg is worth having only if the
+    answer can still be evaluated with it in.
+    """
+    if series is None:
+        return False
+    return int(pd.to_numeric(series, errors="coerce").notna().sum()) >= minimum
+
+
+def long_trend_leg_available(
+    frame: pd.DataFrame,
+    min_rows: int = MIN_STACK_TRAIN_ROWS + MIN_STACK_TEST_ROWS,
+) -> bool:
+    """
+    Whether the 200-bar trend read can be afforded on this frame.
+
+    Its own warm-up is 200 bars, and ``_mean_of`` nulls the whole trend category
+    wherever any sub-score is missing -- so admitting this leg truncates every
+    row before bar 200 out of the stack entirely. On a long daily history that
+    costs nothing; on 240 monthly bars it fills 41 rows and takes the stack down
+    to 24, which is a sixth trend input bought with the measurement that
+    licenses using any of them.
+
+    Public because the answer is reported: it is a difference in what the trend
+    category *is*, and a reader comparing a monthly call against a daily one is
+    entitled to know the two are not assembled from the same inputs.
+    """
+    return "Close_SMA200_Ratio" in frame.columns and _usable(
+        frame["Close_SMA200_Ratio"], min_rows
+    )
+
+
+def _category_scores(
+    frame: pd.DataFrame,
+    scale_window: int = SCALE_WINDOW,
+    min_observations: int = MIN_SCALE_OBSERVATIONS,
+    min_optional_leg_rows: int = MIN_STACK_TRAIN_ROWS + MIN_STACK_TEST_ROWS,
+) -> pd.DataFrame:
     """
     The seven evidence scores per bar, each in [-1, 1], positive = bullish.
 
@@ -204,37 +276,47 @@ def _category_scores(frame: pd.DataFrame) -> pd.DataFrame:
     fit is free to reject*: ``volatility``, for instance, is oriented negative
     for expanding range because equity vol and returns are negatively correlated
     on average, but a symbol where that is untrue gets a coefficient near zero.
+
+    The window arguments are the timeframe's, and they scale only the *scale*:
+    the indicator windows behind these columns stay bar counts, because RSI_14
+    on weekly candles is the weekly RSI(14) a chart reader means by the name.
     """
     scores: Dict[str, pd.Series] = {}
 
-    # These three are already zero-centred deviations (`close / sma - 1`), so
-    # they are squashed as they stand. Subtracting another 1 would put "price at
-    # its moving average" at -1 and invert the whole category.
+    def squash(column: pd.Series) -> pd.Series:
+        return _bounded(column, scale_window, min_observations)
+
+    # These are already zero-centred deviations (`close / sma - 1`), so they are
+    # squashed as they stand. Subtracting another 1 would put "price at its
+    # moving average" at -1 and invert the whole category.
     trend_parts = [
-        _bounded(frame["Close_SMA20_Ratio"]),
-        _bounded(frame["Close_SMA50_Ratio"]),
-        _bounded(frame["SMA20_SMA50_Ratio"]),
-        _bounded(frame["Trend_Slope_20"]),
-        _bounded(frame["Trend_Slope_60"]),
+        squash(frame["Close_SMA20_Ratio"]),
+        squash(frame["Close_SMA50_Ratio"]),
+        squash(frame["SMA20_SMA50_Ratio"]),
+        squash(frame["Trend_Slope_20"]),
+        squash(frame["Trend_Slope_60"]),
     ]
-    # The 200-day read is the "above the long-term trend" line the panel prints.
-    # It is appended only when it exists: a column of NaN would make the whole
-    # trend category missing for every bar rather than for the warm-up.
-    if "Close_SMA200_Ratio" in frame.columns:
-        trend_parts.append(_bounded(frame["Close_SMA200_Ratio"]))
+    # The 200-bar read is the "above the long-term trend" line the panel prints.
+    # Appended only when the frame can support it: present as a column AND
+    # filled on enough rows to leave a walk-forward behind. On monthly bars it
+    # is two hundred months, which on a 240-bar frame fills 41 rows and drags
+    # the whole stack down to 24 -- a sixth trend leg bought at the cost of the
+    # measurement that licenses using any of them.
+    if long_trend_leg_available(frame, min_optional_leg_rows):
+        trend_parts.append(squash(frame["Close_SMA200_Ratio"]))
     scores["trend"] = _mean_of(trend_parts)
 
     scores["momentum"] = _mean_of([
         _centred(frame["RSI_14"], centre=50.0, half_range=50.0),
-        _bounded(frame["MACD_Norm"]),
-        _bounded(frame["Return_5d"]),
-        _bounded(frame["Return_20d"]),
+        squash(frame["MACD_Norm"]),
+        squash(frame["Return_5d"]),
+        squash(frame["Return_20d"]),
     ])
 
     scores["volume"] = _mean_of([
         _centred(frame["Up_Volume_Ratio_20"], centre=0.5, half_range=0.5),
-        _bounded(frame["OBV_Slope_20"]),
-        _bounded(frame["Volume_Price_Confirm"]),
+        squash(frame["OBV_Slope_20"]),
+        squash(frame["Volume_Price_Confirm"]),
     ])
 
     # Structure and closing strength: what the candles themselves are doing.
@@ -258,9 +340,12 @@ def _category_scores(frame: pd.DataFrame) -> pd.DataFrame:
     # and Parkinson_Vol_Ratio *are* true ratios centred on one, unlike the trend
     # columns above, so these do subtract it.
     scores["volatility"] = _mean_of([
-        -_bounded(frame["Volatility_Ratio"] - 1.0),
-        -_bounded(frame["ATR_Ratio"] - frame["ATR_Ratio"].rolling(SCALE_WINDOW, min_periods=MIN_SCALE_OBSERVATIONS).mean()),
-        -_bounded(frame["Parkinson_Vol_Ratio"] - 1.0),
+        -squash(frame["Volatility_Ratio"] - 1.0),
+        -squash(
+            frame["ATR_Ratio"]
+            - frame["ATR_Ratio"].rolling(scale_window, min_periods=min_observations).mean()
+        ),
+        -squash(frame["Parkinson_Vol_Ratio"] - 1.0),
     ])
 
     return pd.DataFrame(scores, index=frame.index)
@@ -291,13 +376,19 @@ def build_evidence_stack(
     horizon: int = 1,
     analog_k: int = DEFAULT_K,
     min_analog_history: int = MIN_ANALOG_HISTORY,
+    scale_window: int = SCALE_WINDOW,
+    min_scale_observations: int = MIN_SCALE_OBSERVATIONS,
+    min_optional_leg_rows: int = MIN_STACK_TRAIN_ROWS + MIN_STACK_TEST_ROWS,
 ) -> EvidenceStack:
     """
     Turn a feature frame into labelled evidence rows plus the unlabelled latest one.
 
     The label is the sign of the ``horizon``-bar forward return, exactly as
     :func:`src.features.direction_features.build_direction_dataset` defines it,
-    so the stack and the classifier are answering the same question.
+    so the stack and the classifier are answering the same question. On a
+    resampled frame that forward return is a week or a month ahead, because the
+    bar is -- which is the whole mechanism by which this answers a different
+    question on a different timeframe without a second implementation.
 
     The ``historical_analogs`` column is filled from a causal k-NN pass, whose
     up-rate at row ``t`` reads only bars whose outcome had printed by ``t``.
@@ -305,7 +396,9 @@ def build_evidence_stack(
     close = pd.to_numeric(frame["Close"], errors="coerce")
     forward_return = close.shift(-horizon) / close.replace(0, np.nan) - 1.0
 
-    scores = _category_scores(frame)
+    scores = _category_scores(
+        frame, scale_window, min_scale_observations, min_optional_leg_rows
+    )
 
     # The analog column needs its descriptor and its outcomes on the same index,
     # so it is computed over the rows where the descriptor is complete.
@@ -331,14 +424,27 @@ def build_evidence_stack(
 
     complete = scores.dropna()
     if complete.empty:
-        raise ValueError("No bar has a complete evidence vector")
+        # Name the frame, because on a longer timeframe this is the ordinary
+        # answer rather than a defect: seven categories built from windows of
+        # 20, 50 and 60 bars need well over 60 bars before any single row has
+        # all seven, and a 93-bar monthly frame is genuinely short of that.
+        # "No bar has a complete evidence vector" alone leaves a reader unable
+        # to tell a data problem from a history problem.
+        raise ValueError(
+            f"No bar has a complete evidence vector: {len(scores)} bars is too "
+            f"short a history for all seven evidence categories to be read at once"
+        )
 
     # The latest complete row has no resolved outcome yet; it is the one the
     # question is actually about, so it is held out rather than dropped.
     latest_as_of = complete.index[-1]
     labelled_index = complete.index.intersection(forward_return.dropna().index).difference([latest_as_of])
     if len(labelled_index) == 0:
-        raise ValueError("No evidence row has a resolved outcome to train on")
+        raise ValueError(
+            f"No evidence row has a resolved outcome to train on: {len(complete)} "
+            f"bars carry a complete evidence vector, none of them {horizon} bar(s) "
+            f"before the end of the history"
+        )
 
     labels = (forward_return.loc[labelled_index] > 0).astype(np.int8)
     labels.name = "direction_up"
@@ -354,6 +460,11 @@ def build_evidence_stack(
             "n_rows": int(len(labelled_index)),
             "analog_k": int(analog_k),
             "analog_rows": int(analog_rate.notna().sum()),
+            "scale_window": int(scale_window),
+            # False when the frame could not support the 200-bar trend leg, so
+            # the trend category was built from five inputs rather than six.
+            # Routinely False on the monthly frame and on a recent listing.
+            "long_trend_leg": bool(long_trend_leg_available(frame, min_optional_leg_rows)),
             "first_date": str(pd.Timestamp(labelled_index[0]).date()),
             "last_date": str(pd.Timestamp(labelled_index[-1]).date()),
         },
@@ -372,7 +483,13 @@ def _sigmoid(value: float) -> float:
     return float(1.0 / (1.0 + np.exp(-float(value))))
 
 
-def evaluate_evidence_stack(stack: EvidenceStack, *, seed: int = 42) -> Dict[str, Any]:
+def evaluate_evidence_stack(
+    stack: EvidenceStack,
+    *,
+    seed: int = 42,
+    train_rows: int = MIN_STACK_TRAIN_ROWS,
+    test_rows: int = MIN_STACK_TEST_ROWS,
+) -> Dict[str, Any]:
     """
     Expanding-window walk-forward over the evidence stack.
 
@@ -382,20 +499,27 @@ def evaluate_evidence_stack(stack: EvidenceStack, *, seed: int = 42) -> Dict[str
     interval printed beside the answer. Nothing here is fitted on its own test
     rows, and nothing downstream is allowed to use the in-sample probabilities
     in their place.
+
+    ``train_rows`` and ``test_rows`` are the timeframe's floors, in bars.
+    Lowering them for weekly and monthly frames buys a measurement where the
+    daily numbers would have refused one; it does not buy a *confident*
+    measurement, and nothing here pretends otherwise -- ``accuracy_ci`` is a
+    Wilson interval on the actual test count, so a 12-bar block reports a band
+    wide enough that the caller's own skill gate declines the call.
     """
     n = len(stack)
-    if n < MIN_STACK_TRAIN_ROWS + MIN_STACK_TEST_ROWS:
+    if n < train_rows + test_rows:
         return {
             "available": False,
             "reason": f"{n} labelled rows, below the "
-                      f"{MIN_STACK_TRAIN_ROWS + MIN_STACK_TEST_ROWS}-row floor for a "
+                      f"{train_rows + test_rows}-row floor for a "
                       "walk-forward evaluation",
             "n_test_rows": 0,
             "brier_skill_score": 0.0,
         }
 
-    testable = n - MIN_STACK_TRAIN_ROWS
-    fold_size = max(MIN_STACK_TEST_ROWS, testable // STACK_TEST_FOLDS)
+    testable = n - train_rows
+    fold_size = max(test_rows, testable // STACK_TEST_FOLDS)
 
     probabilities: List[float] = []
     outcomes: List[int] = []
@@ -403,10 +527,10 @@ def evaluate_evidence_stack(stack: EvidenceStack, *, seed: int = 42) -> Dict[str
     dates: List[pd.Timestamp] = []
     folds = 0
 
-    start = MIN_STACK_TRAIN_ROWS
+    start = train_rows
     while start < n:
         stop = min(start + fold_size, n)
-        if stop - start < MIN_STACK_TEST_ROWS and folds > 0:
+        if stop - start < test_rows and folds > 0:
             break
         train_y = stack.labels.iloc[:start]
         if train_y.nunique() < 2:
@@ -486,7 +610,12 @@ def _contributions(
     }
 
 
-def _horizon_reads(frame: pd.DataFrame) -> Dict[str, Any]:
+def _horizon_reads(
+    frame: pd.DataFrame,
+    scale_window: int = SCALE_WINDOW,
+    min_observations: int = MIN_SCALE_OBSERVATIONS,
+    min_optional_leg_rows: int = MIN_STACK_TRAIN_ROWS + MIN_STACK_TEST_ROWS,
+) -> Dict[str, Any]:
     """
     A separate directional read at three lookbacks, plus how well they agree.
 
@@ -494,24 +623,29 @@ def _horizon_reads(frame: pd.DataFrame) -> Dict[str, Any]:
     ratio at its own scale. The dead zone that turns a score into UP / DOWN /
     NEUTRAL is this symbol's own trailing standard deviation of that score, so a
     quiet name is not read as directional on a move a volatile one would ignore.
+
+    The three lookbacks are in bars, so on a weekly frame "short" is a handful
+    of weeks rather than of days. The long read leans on ``Close_SMA200_Ratio``,
+    which a short frame cannot fill; it is skipped rather than allowed to null
+    the read, for the same reason it is skipped in the trend category.
     """
     reads: Dict[str, Any] = {}
     directions: List[str] = []
 
     for key, description, window, return_column, ratio_column in _HORIZON_SPECS:
         parts: List[pd.Series] = [frame[f"PA_Structure_{window}"]]
-        if return_column in frame.columns:
-            parts.append(_bounded(frame[return_column]))
-        if ratio_column in frame.columns:
+        if return_column in frame.columns and _usable(frame[return_column], min_optional_leg_rows):
+            parts.append(_bounded(frame[return_column], scale_window, min_observations))
+        if ratio_column in frame.columns and _usable(frame[ratio_column], min_optional_leg_rows):
             # Deviation columns, already centred on zero - see _category_scores.
-            parts.append(_bounded(frame[ratio_column]))
+            parts.append(_bounded(frame[ratio_column], scale_window, min_observations))
         series = _mean_of(parts).dropna()
         if series.empty:
             reads[key] = {"available": False, "window": window, "description": description}
             continue
 
         value = float(series.iloc[-1])
-        spread = float(series.tail(SCALE_WINDOW).std())
+        spread = float(series.tail(scale_window).std())
         # Half a standard deviation of its own history: below that the read is
         # not distinguishable from this score's normal wandering.
         dead_zone = 0.5 * spread if np.isfinite(spread) and spread > 0 else 0.0
@@ -595,6 +729,7 @@ def _evidence_rows(
     logit_total: float,
     price_action: Dict[str, Any],
     analogs: Dict[str, Any],
+    bar_noun: str = "session",
 ) -> List[Dict[str, Any]]:
     """
     One row per category: its state, its fitted pull, and what it is reading.
@@ -620,7 +755,7 @@ def _evidence_rows(
             "state": _state_label(category, score),
             "leans": "up" if term > 0 else "down" if term < 0 else "neutral",
             "contribution_pp": round(contribution_pp, 4),
-            "detail": _category_detail(category, score, price_action, analogs),
+            "detail": _category_detail(category, score, price_action, analogs, bar_noun),
         })
 
     rows.sort(key=lambda row: abs(row["contribution_pp"]), reverse=True)
@@ -655,8 +790,16 @@ def _category_detail(
     score: Optional[float],
     price_action: Dict[str, Any],
     analogs: Dict[str, Any],
+    bar_noun: str = "session",
 ) -> Optional[str]:
-    """The one concrete fact behind a category, where there is one to give."""
+    """
+    The one concrete fact behind a category, where there is one to give.
+
+    ``bar_noun`` labels the pivot window, which is counted in bars: a 20-bar
+    range is twenty sessions on the daily frame and twenty weeks on the weekly
+    one, and printing "20-day range" over the second is a factual error about
+    what the level was drawn from.
+    """
     if category == "price_action" and price_action.get("available"):
         events = price_action.get("events") or []
         structure = price_action.get("structure_label")
@@ -670,7 +813,7 @@ def _category_detail(
             # worth printing without them.
             above = levels.get("support_distance_pct")
             below = levels.get("resistance_distance_pct")
-            detail = f"{levels.get('window')}-day range {support:,.2f} - {resistance:,.2f}"
+            detail = f"{levels.get('window')}-{bar_noun} range {support:,.2f} - {resistance:,.2f}"
             if above is not None and below is not None:
                 detail += f"; {above:+.1f}% above support, {below:.1f}% below resistance"
             return detail
@@ -740,6 +883,12 @@ def analyse_direction(
     model_name: Optional[str] = None,
     model_tradeable: Optional[bool] = None,
     model_gate_reason: Optional[str] = None,
+    bar_noun: str = "session",
+    scale_window: int = SCALE_WINDOW,
+    min_scale_observations: int = MIN_SCALE_OBSERVATIONS,
+    stack_train_rows: int = MIN_STACK_TRAIN_ROWS,
+    stack_test_rows: int = MIN_STACK_TEST_ROWS,
+    min_analog_history: int = MIN_ANALOG_HISTORY,
 ) -> Dict[str, Any]:
     """
     Direction, probability, confidence and the evidence behind them.
@@ -747,8 +896,12 @@ def analyse_direction(
     Parameters
     ----------
     bars : DataFrame
-        Adjusted daily OHLCV, ideally from
-        :func:`src.data.direction_data.load_daily_bars`.
+        Adjusted OHLCV on the timeframe being analysed -- daily from
+        :func:`src.data.direction_data.load_daily_bars`, or the weekly/monthly
+        aggregation of it from :func:`src.data.timeframe.resample_ohlcv`.
+        Everything below is measured in *bars* of whatever is handed in, so a
+        weekly frame produces a weekly answer with no second code path: the
+        label becomes next week's move because the next bar is a week.
     model_probability, model_skill : float, optional
         The existing classifier's live P(up) and its **measured** out-of-sample
         Brier skill from the walk-forward report. Both or neither: a probability
@@ -756,6 +909,18 @@ def analyse_direction(
         weighting it by anything other than its measured skill is the guess this
         function exists to avoid. When omitted the answer rests on the evidence
         stack alone and says so.
+
+        The stored classifiers are fitted on daily bars, so a caller analysing a
+        weekly or monthly frame must leave these unset: that model's measured
+        skill is a statement about tomorrow and carries no weight for next
+        month.
+    bar_noun : str
+        What one bar is called, for the sentences this returns ("session",
+        "week", "month"). It labels prose only; nothing is computed from it.
+    scale_window, min_scale_observations, stack_train_rows, stack_test_rows,
+    min_analog_history : int
+        The timeframe's floors, all in bars. Defaults are the daily ones, so a
+        caller that passes none gets exactly today's behaviour.
 
     Returns
     -------
@@ -766,9 +931,21 @@ def analyse_direction(
         blend that produced the number.
     """
     frame = build_evidence_frame(bars)
-    stack = build_evidence_stack(frame, horizon=horizon)
+    stack = build_evidence_stack(
+        frame,
+        horizon=horizon,
+        min_analog_history=min_analog_history,
+        scale_window=scale_window,
+        min_scale_observations=min_scale_observations,
+        min_optional_leg_rows=stack_train_rows + stack_test_rows,
+    )
 
-    evaluation = evaluate_evidence_stack(stack, seed=seed)
+    evaluation = evaluate_evidence_stack(
+        stack,
+        seed=seed,
+        train_rows=stack_train_rows,
+        test_rows=stack_test_rows,
+    )
 
     # The live fit uses every labelled row. That is correct here and only here:
     # this is the served call, not an evaluation, and the evaluation above is
@@ -794,6 +971,7 @@ def analyse_direction(
             forward_return.reindex(labelled_descriptor.index),
             query=descriptor.loc[stack.latest_as_of],
             horizon=horizon,
+            min_history=min_analog_history,
         )
     else:
         analogs = {"available": False, "reason": "the current bar has an incomplete setup descriptor", "n_matches": 0}
@@ -826,7 +1004,9 @@ def analyse_direction(
             "falls back to the historical base rate and is reported as uncertain"
         )
 
-    horizons = _horizon_reads(frame)
+    horizons = _horizon_reads(
+        frame, scale_window, min_scale_observations, stack_train_rows + stack_test_rows
+    )
     confidence = _confidence(
         probability_up,
         evaluation.get("conviction_terciles"),
@@ -873,7 +1053,7 @@ def analyse_direction(
             "today's conviction is in the bottom third of this model's own historical range"
         )
 
-    rows = _evidence_rows(stack, contributions, logit_evidence, price_action, analogs)
+    rows = _evidence_rows(stack, contributions, logit_evidence, price_action, analogs, bar_noun)
 
     expected_range = _expected_range(close, stack.latest_as_of, analogs)
 
@@ -882,7 +1062,13 @@ def analyse_direction(
     return {
         "symbol": symbol,
         "as_of": str(pd.Timestamp(stack.latest_as_of).date()),
+        # Named "days" from when there was only one bar size. It has always
+        # been a count of bars, and on a weekly frame `horizon_bars: 1` is one
+        # week -- which is why `bar_noun` is served beside it rather than
+        # leaving a reader to assume the older reading of the name.
         "horizon_days": int(horizon),
+        "horizon_bars": int(horizon),
+        "bar_noun": bar_noun,
         "direction": direction,
         # Why a direction was withheld, when it was. A NEUTRAL with no reason
         # beside it reads as a model with no opinion rather than one that has

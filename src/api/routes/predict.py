@@ -9,53 +9,50 @@ fans rather than a single straight-line extrapolation.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+import threading
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException, Query
 
+from src.api.jobs import JobRegistry
 from src.api.schemas.schemas import (
+    SUPPORTED_FORECAST_HORIZONS,
+    BestModelForecastResponse,
+    ChartForecastPoint,
+    DirectionCall,
+    EnsembleForecastPoint,
+    EnsemblePredictRequest,
+    EnsemblePredictResponse,
+    EnsembleSummary,
+    EnsembleTrainRequest,
+    ForecastHistoryResponse,
     ForecastPoint,
     HistoricalSignal,
     PredictRequest,
     PredictResponse,
-    EnsemblePredictRequest,
-    EnsemblePredictResponse,
-    EnsembleTrainRequest,
-    EnsembleSummary,
-    EnsembleForecastPoint,
-    BestModelForecastResponse,
-    ChartForecastPoint,
-    DirectionCall,
-    ForecastHistoryResponse,
     PriceBar,
     SelectedModel,
     SimpleForecastPoint,
     SimpleForecastResponse,
-    SUPPORTED_FORECAST_HORIZONS,
+    TrainStatus,
 )
 from src.data.ohlcv_cache import cached_download
-from src.defaults import DEFAULT_INDEX_SYMBOL
-from src.models.ensemble_predictor import (
-    EnsemblePricePredictor,
-    ensemble_availability,
-    ensemble_bundle_status,
-    regression_bundle_status,
+from src.data.timeframe import (
+    TIMEFRAME_KEYS,
+    Timeframe,
+    describe_timeframe,
+    last_bar_is_forming,
+    next_bar_date,
+    period_bounds,
+    period_end,
+    period_sessions,
+    resample_ohlcv,
+    resolve_timeframe,
 )
-from src.api.schemas.schemas import BaseModel
-class TrainStatus(BaseModel):
-    job_id: str
-    status: str
-    error: Optional[str] = None
-    progress: float = 0.0
-    metrics: Optional[Dict] = None
-
-import threading
-import uuid
-# Bounded: unbounded job dicts retained every job for the process lifetime.
-_ensemble_jobs: TTLCache = TTLCache(maxsize=200, ttl=24 * 3600)
+from src.defaults import DEFAULT_INDEX_SYMBOL
 from src.features.feature_engineering import build_feature_frame, transform_feature_frame
 from src.models.direction_utils import (
     BUY_PROBABILITY_THRESHOLD,
@@ -67,6 +64,10 @@ from src.models.direction_utils import (
     expected_move_from_probability,
     probability_up,
     signal_from_probability,
+)
+from src.models.ensemble_predictor import (
+    EnsemblePricePredictor,
+    regression_bundle_status,
 )
 from src.models.model_bundle import StaleBundleError, load_model_bundle
 from src.models.model_selection import (
@@ -110,7 +111,16 @@ MIN_FORECAST_HISTORY_ROWS = 40
 #: forecast comes from two members instead of three. Not an error -- the
 #: response names the members that ran -- but the caller is told, because
 #: "thin history" is a real qualifier on the number.
+#:
+#: Counted in whatever bar the models were handed, which is why the timeframe
+#: table carries its own copy (``Timeframe.full_stack_bars``): 128 is 128 bars
+#: on every frame, and this constant is the daily-path name for it.
 FULL_STACK_HISTORY_ROWS = 128
+#: Ensemble training jobs. Shares its implementation with /api/training so the
+#: two trackers cannot drift apart again — this one had neither the lock nor the
+#: eviction handling that one had. See src.api.jobs.
+_ensemble_jobs: JobRegistry[TrainStatus] = JobRegistry()
+
 N_SCENARIOS = 50       # Monte Carlo paths
 N_DISPLAY_PATHS = 12   # scenario lines sent to the frontend
 
@@ -122,6 +132,7 @@ N_DISPLAY_PATHS = 12   # scenario lines sent to the frontend
 def _download_prediction_data(
     symbol: str,
     min_rows: int = MIN_LONG_WINDOW_HISTORY_ROWS,
+    lookback_days: int = LOOKBACK_DAYS,
 ) -> pd.DataFrame:
     """
     The bars every prediction route reads, gated on ``min_rows``.
@@ -131,9 +142,18 @@ def _download_prediction_data(
     long-window indicators, while the foundation stack needs only
     :data:`MIN_FORECAST_HISTORY_ROWS`. Sharing one number meant the stricter
     requirement silently governed a path that does not have it.
+
+    ``lookback_days`` is a parameter for the same kind of reason. Five years of
+    daily bars is a thousand-plus candles and two hundred-odd weekly ones, so a
+    weekly or monthly request served off this default would hand the models a
+    frame far shorter than the one they need -- and 60 monthly bars is under
+    Kronos's context window, which is a silently thinner forecast rather than a
+    failure. Each timeframe names its own window in
+    :data:`src.data.timeframe.TIMEFRAMES`; the default is the daily one, so
+    every existing caller is unaffected.
     """
     end = pd.Timestamp.utcnow().tz_localize(None).normalize()
-    start = end - pd.Timedelta(days=LOOKBACK_DAYS)
+    start = end - pd.Timedelta(days=int(lookback_days))
 
     def _fetch() -> Optional[pd.DataFrame]:
         from src.data.ohlcv_cache import safe_yf_download
@@ -174,6 +194,88 @@ def _download_prediction_data(
             f"this forecast needs at least {min_rows}.",
         )
     return df
+
+
+def _resolve_timeframe_or_422(value: Optional[str]) -> Timeframe:
+    """The requested timeframe, or a 422 naming the three that exist."""
+    try:
+        return resolve_timeframe(value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+class TimeframeFrames(NamedTuple):
+    """The daily download and the aggregation of it the models actually read."""
+
+    daily: pd.DataFrame
+    bars: pd.DataFrame
+    timeframe: Timeframe
+
+
+def _timeframe_bars(symbol: str, timeframe: Timeframe) -> TimeframeFrames:
+    """
+    The bars the models read for ``symbol`` at ``timeframe``, and their source.
+
+    One function so the chart and the forecast cannot end up on different
+    frames. The daily download is fetched over this timeframe's own window and
+    then aggregated by :func:`src.data.timeframe.resample_ohlcv`; on DAY the
+    resample is the identity, so that path is the frame this route has always
+    served, from the same five-year window it has always used.
+
+    Both frames come back because both are still true. The models read ``bars``
+    and every horizon claim belongs to it; ``daily`` is what "1,204 trading
+    days of history" counts, and dropping it would leave the response reporting
+    240 where it means 1,204.
+
+    Two floors, gating different things. The daily floor is deliberately loose
+    -- it only has to be enough to aggregate from -- while ``min_bars`` decides
+    whether a forecast is servable, because 40 weekly bars and 40 daily bars
+    are the same row count and completely different amounts of evidence.
+    Reporting the daily number in that error would tell a reader their monthly
+    forecast failed for want of 40 rows while the frame held 900.
+    """
+    daily = _download_prediction_data(
+        symbol,
+        min_rows=MIN_FORECAST_HISTORY_ROWS,
+        lookback_days=timeframe.lookback_days,
+    )
+    bars = resample_ohlcv(daily, timeframe)
+    if len(bars) < timeframe.min_bars:
+        raise HTTPException(
+            422,
+            f"{symbol} has only {len(bars)} {timeframe.bar_noun_plural} of history "
+            f"({len(daily)} trading days); a {timeframe.label.lower()} forecast needs "
+            f"at least {timeframe.min_bars}.",
+        )
+    return TimeframeFrames(daily=daily, bars=bars, timeframe=timeframe)
+
+
+def _timeframe_meta(frames: "TimeframeFrames") -> Dict[str, object]:
+    """
+    What the client has to be told about the bar it is looking at.
+
+    The forming bar is the reason this exists. A weekly candle read on a
+    Wednesday holds two sessions, not five, and its volume and range are
+    correspondingly small -- which is visible in the features the models read
+    and invisible in a price. Rather than drop that bar (which would anchor the
+    forecast to last week's close and throw away the newest information there
+    is) it is served and labelled, with the session count behind the label.
+    """
+    bars, timeframe = frames.bars, frames.timeframe
+    # The period the last bar covers, which is not the date it is indexed by:
+    # a forming September bar is indexed on its most recent session and spans
+    # the whole month.
+    closes_on = period_end(bars, timeframe)
+    period_start, period_stop = period_bounds(closes_on, timeframe)
+    sessions = period_sessions(frames.daily, timeframe)
+    return {
+        **describe_timeframe(timeframe),
+        "bars_available": int(len(bars)),
+        "last_bar_complete": not last_bar_is_forming(bars, timeframe),
+        "last_bar_start": period_start,
+        "last_bar_end": period_stop,
+        "last_bar_sessions": int(sessions.iloc[-1]) if len(sessions) else None,
+    }
 
 
 def _valid_price(value) -> Optional[float]:
@@ -284,7 +386,17 @@ def _load_next_day_bundle(model_type: str, symbol: str):
     response; without this guard the load raises first and the request 500s.
     """
     try:
-        return load_model_bundle(model_type=model_type, symbol=symbol, horizon=NEXT_DAY_HORIZON)
+        # Cached: this is the hottest bundle load in the app — every forecast and
+        # every ranked candidate hits it — and the route only ever calls predict
+        # methods on what comes back. The cache re-validates against artifact
+        # mtimes, so a retrain is picked up on the next request rather than after
+        # a restart.
+        return load_model_bundle(
+            model_type=model_type,
+            symbol=symbol,
+            horizon=NEXT_DAY_HORIZON,
+            use_cache=True,
+        )
     except StaleBundleError as exc:
         logger.warning("Ignoring stale %s bundle for %s: %s", model_type, symbol, exc)
         return None
@@ -1840,9 +1952,15 @@ def predict_best_model(
 # GET /api/predict/forecast/{symbol}  — the Predictions tab, in one request
 # ---------------------------------------------------------------------------
 
-def _history_bars(raw_df: pd.DataFrame, days: int) -> List[PriceBar]:
-    """The tail of the download, as candles the chart can draw."""
-    window = raw_df.tail(max(int(days), 1))
+def _history_bars(raw_df: pd.DataFrame, count: int) -> List[PriceBar]:
+    """
+    The tail of the frame, as candles the chart can draw.
+
+    ``count`` is in bars of whatever frame it is handed -- daily rows on the
+    daily path, weekly candles on the weekly one -- because the caller has
+    already aggregated. It was named ``days`` when only one of those existed.
+    """
+    window = raw_df.tail(max(int(count), 1))
     bars: List[PriceBar] = []
     for index, row in window.iterrows():
         values = [row.get(column) for column in ("Open", "High", "Low", "Close")]
@@ -1866,7 +1984,21 @@ def _history_bars(raw_df: pd.DataFrame, days: int) -> List[PriceBar]:
 @router.get("/history/{symbol}", response_model=ForecastHistoryResponse)
 def forecast_history(
     symbol: str,
-    days: int = Query(252, ge=30, le=1260, description="Historical candles to return."),
+    bars: int = Query(
+        252, ge=10, le=1260, description="Candles of the selected timeframe to return."
+    ),
+    days: Optional[int] = Query(
+        None,
+        ge=10,
+        le=1260,
+        deprecated=True,
+        description="Former name of `bars`, from when this route only served daily candles.",
+    ),
+    timeframe: str = Query(
+        "day",
+        enum=list(TIMEFRAME_KEYS),
+        description="Bar size: day | week | month.",
+    ),
 ):
     """
     Just the candles, off the model path entirely.
@@ -1878,31 +2010,49 @@ def forecast_history(
     handler -- which is what this route was split out of -- meant the chart sat
     blank for seven seconds waiting on numbers that go in a box underneath it.
 
-    It reads the SAME `_download_prediction_data` the forecast does, so the bars
-    here are the bars the models saw rather than a differently-adjusted series
-    from the generic price route. The 6-hour OHLCV cache keeps the two calls on
-    one frame; if they ever disagree, the chart drops a forecast point that is
-    not strictly after its last candle rather than anchoring it to the wrong bar.
+    It reads the SAME `_timeframe_bars` the forecast does, so the candles here
+    are the candles the models saw -- same download, same aggregation -- rather
+    than a differently-adjusted series from the generic price route. The 6-hour
+    OHLCV cache keeps the two calls on one frame; if they ever disagree, the
+    chart drops a forecast point that is not strictly after its last candle
+    rather than anchoring it to the wrong bar.
+
+    `bars` counts candles of the *selected* timeframe: 60 on the monthly view is
+    five years, not two months. `days` is the name it had when this route only
+    served daily candles and is still accepted, because a caller sending it was
+    asking for exactly this and there is no reason to fail them over the noun.
 
     No live quote is fetched here. `_latest_available_price` costs ~1.25s in
     yfinance `get_info` calls and the candles do not need it.
     """
     symbol = symbol.upper()
-    # Matched to the forecast route's floor so the chart and the box are drawn
-    # from one frame. A stricter gate here would blank the chart for a symbol
-    # whose forecast is served, which is the worse half of the pair to lose.
-    raw_df = _download_prediction_data(symbol, min_rows=MIN_FORECAST_HISTORY_ROWS)
+    resolved = _resolve_timeframe_or_422(timeframe)
+    frames = _timeframe_bars(symbol, resolved)
+    meta = _timeframe_meta(frames)
     return ForecastHistoryResponse(
         symbol=symbol,
-        as_of=str(pd.Timestamp(raw_df.index[-1]).date()),
-        bars=_history_bars(raw_df, days),
+        as_of=str(pd.Timestamp(frames.bars.index[-1]).date()),
+        bars=_history_bars(frames.bars, days if days is not None else bars),
+        timeframe=meta["timeframe"],
+        timeframe_label=meta["timeframe_label"],
+        bar_noun=meta["bar_noun"],
+        bar_noun_plural=meta["bar_noun_plural"],
+        interval=meta["interval"],
+        last_bar_complete=meta["last_bar_complete"],
+        last_bar_sessions=meta["last_bar_sessions"],
     )
 
 
-#: Model output by (symbol, last bar date). The forecast depends only on the
-#: bars, so it cannot change until a new one prints -- but it costs ~7s to
-#: produce, and re-selecting a symbol used to pay that again. Keyed on the bar
-#: rather than on a clock, so a new session invalidates it exactly.
+#: Model output by (symbol, timeframe, last bar date). The forecast depends
+#: only on the bars, so it cannot change until a new one prints -- but it costs
+#: ~7s to produce, and re-selecting a symbol used to pay that again. Keyed on
+#: the bar rather than on a clock, so a new session invalidates it exactly.
+#:
+#: The timeframe is in the key because it changes the answer, not the
+#: presentation: the same symbol on the same date has a different next bar on
+#: the daily and weekly frames. Without it, switching DAY -> WEEK would have
+#: been served the daily forecast under a weekly label -- and on a Friday, when
+#: both frames end on the same date, silently and every time.
 #:
 #: Only the FoundationForecast is cached, and it holds nothing quote-derived:
 #: the price, the direction and the anchor all come off the bars. The current
@@ -1913,25 +2063,37 @@ _FORECAST_CACHE: TTLCache = TTLCache(maxsize=256, ttl=6 * 3600)
 _FORECAST_CACHE_LOCK = threading.Lock()
 
 
-def _cached_foundation_forecast(symbol: str, raw_df: pd.DataFrame, as_of: str):
+def _cached_foundation_forecast(
+    symbol: str,
+    raw_df: pd.DataFrame,
+    as_of: str,
+    timeframe: Timeframe,
+):
     """
     The model output for ``symbol`` on the bar ``as_of``, computed at most once.
 
     The forecast is a pure function of the bars, so it cannot change until a new
-    session prints -- and it costs ~7s to produce, almost all of it Kronos
-    sampling 128 transformer paths. Without this, re-selecting a symbol paid
-    that again for a number that could not have moved.
+    bar prints -- and it costs ~7s to produce, almost all of it Kronos sampling
+    128 transformer paths. Without this, re-selecting a symbol paid that again
+    for a number that could not have moved.
+
+    ``timeframe`` is part of the key rather than a label on the result. The
+    bars handed in *are* the horizon here -- a weekly frame makes this next
+    week's close -- so a daily and a weekly forecast for the same symbol are
+    two different numbers that can share an ``as_of``.
 
     No live quote reaches this function, and none can: the forecast is anchored
-    to the last close and nothing else, which is what makes (symbol, bar) a
-    complete key. Everything that depends on a quote -- the change measured
-    against it, and the "quote" split -- is recomputed by the caller per request.
+    to the last close and nothing else, which is what makes (symbol, timeframe,
+    bar) a complete key. Everything that depends on a quote -- the change
+    measured against it, and the "quote" split -- is recomputed per request.
     """
-    key = (symbol, as_of)
+    key = (symbol, timeframe.key, as_of)
     with _FORECAST_CACHE_LOCK:
         hit = _FORECAST_CACHE.get(key)
     if hit is not None:
-        logger.debug("%s: forecast served from cache for bar %s", symbol, as_of)
+        logger.debug(
+            "%s: %s forecast served from cache for bar %s", symbol, timeframe.key, as_of
+        )
         return hit
 
     # Deliberately computed outside the lock. This takes seconds, and holding a
@@ -1951,7 +2113,14 @@ def _cached_foundation_forecast(symbol: str, raw_df: pd.DataFrame, as_of: str):
 
 
 @router.get("/forecast/{symbol}", response_model=SimpleForecastResponse)
-def simple_forecast(symbol: str):
+def simple_forecast(
+    symbol: str,
+    timeframe: str = Query(
+        "day",
+        enum=list(TIMEFRAME_KEYS),
+        description="Bar size to forecast: day | week | month.",
+    ),
+):
     """
     The forecast alone. The candles come from ``GET /predict/history/{symbol}``.
 
@@ -1959,6 +2128,15 @@ def simple_forecast(symbol: str):
     families, Kronos, Chronos-2 and TimesFM 2.5, then inverse-variance
     aggregation — and none of it is in the response. What comes back is the next
     bar the models predict and the direction they call.
+
+    **``timeframe`` changes the horizon, not the wording.** All three members
+    are one-step models, so the bar they are handed is the bar they answer
+    about; handing them a weekly frame built from the same downloads makes
+    ``forecast_price`` next week's close rather than tomorrow's. Nothing is
+    renamed and nothing is extrapolated — the aggregation, the interval and the
+    probability are all computed on weekly bars, against a weekly anchor.
+    The response carries the timeframe so a client cannot show one bar size's
+    number under another's label.
 
     This used to return the candles too, which made the chart wait on the
     models: the bars are a cached download and the forecast is ~7s of transformer
@@ -1968,14 +2146,23 @@ def simple_forecast(symbol: str):
     windows (SMA_200 among them) that a short request would silently truncate.
     """
     symbol = symbol.upper()
+    resolved = _resolve_timeframe_or_422(timeframe)
     # The foundation floor, not the legacy one: this route runs Kronos,
     # Chronos-2 and TimesFM 2.5 and none of them reads a 200-bar indicator.
-    raw_df = _download_prediction_data(symbol, min_rows=MIN_FORECAST_HISTORY_ROWS)
+    # On DAY the resample is the identity, so this is the frame the route has
+    # always read.
+    frames = _timeframe_bars(symbol, resolved)
+    raw_df = frames.bars
+    meta = _timeframe_meta(frames)
     as_of = str(pd.Timestamp(raw_df.index[-1]).date())
-    current_price, current_price_source = _latest_available_price(symbol, raw_df)
+    # The quote is a live daily price whatever bar size is selected -- there is
+    # no such thing as an intra-week quote -- so it is read off the daily frame
+    # and reported for what it is: where the stock trades now, against a
+    # forecast anchored on the last close of the selected bar.
+    current_price, current_price_source = _latest_available_price(symbol, frames.daily)
 
     try:
-        result = _cached_foundation_forecast(symbol, raw_df, as_of)
+        result = _cached_foundation_forecast(symbol, raw_df, as_of, resolved)
     except ForecastUnavailable as exc:
         logger.info("%s: no foundation forecast — %s (%s)", symbol, exc.message, exc.members_failed)
         # A 200 with status "unavailable": the chart is drawn from its own
@@ -1990,8 +2177,14 @@ def simple_forecast(symbol: str):
             anchor_price=round(float(raw_df["Close"].iloc[-1]), 2),
             current_price=round(float(current_price), 2),
             current_price_source=current_price_source,
-            history_days=len(raw_df),
-            thin_history=len(raw_df) < FULL_STACK_HISTORY_ROWS,
+            history_days=len(frames.daily),
+            # Measured in bars of the selected timeframe, which is the frame
+            # Kronos's 128-bar context is actually counted against. On the
+            # monthly view the daily count clears 128 for almost everything
+            # while the monthly one rarely does, and it is the monthly one that
+            # decides whether Kronos ran.
+            thin_history=len(raw_df) < resolved.full_stack_bars,
+            **meta,
         )
 
     # Two reference prices, and the response has to keep them apart.
@@ -2026,7 +2219,12 @@ def simple_forecast(symbol: str):
     else:
         split_reason = None
 
-    forecast_date = _next_business_date(raw_df.index[-1])
+    # The label the forecast bar will print under: the next business day on the
+    # daily frame, the following Friday on the weekly one, the last day of next
+    # month on the monthly one. Derived from the same offset that built the
+    # index, so the point lands on the candle it is about rather than a day
+    # near it.
+    forecast_date = next_bar_date(period_end(raw_df, resolved), resolved)
     point = SimpleForecastPoint(
         date=forecast_date,
         predicted=round(result.price, 2),
@@ -2058,14 +2256,18 @@ def simple_forecast(symbol: str):
         probability_is_calibrated=False,
         forecast_date=forecast_date,
         models=result.members_used,
-        history_days=len(raw_df),
+        history_days=len(frames.daily),
         # Reported off the frame rather than off len(members_used): a member can
         # also drop out for reasons that have nothing to do with history, and
-        # those two causes need different sentences.
-        thin_history=len(raw_df) < FULL_STACK_HISTORY_ROWS,
+        # those two causes need different sentences. Counted in bars of the
+        # selected timeframe, because that is the frame Kronos's 128-bar
+        # context is measured against -- a monthly view with 1,204 daily rows
+        # behind it still has only 57 bars to give it.
+        thin_history=len(raw_df) < resolved.full_stack_bars,
         split=split_reason is not None,
         split_reason=split_reason,
         forecast=[point],
+        **meta,
     )
 
 
@@ -2263,7 +2465,10 @@ def ensemble_predict(req: EnsemblePredictRequest):
 
 def _run_ensemble_training(job_id: str, req: EnsembleTrainRequest):
     from src.models.ensemble_training import train_ensemble_for_symbol
-    job = _ensemble_jobs[job_id]
+
+    job = _ensemble_jobs.get(job_id)
+    if job is None:  # evicted before the worker started
+        return
     job.status = "running"
     job.progress = 0.05
     try:
@@ -2287,8 +2492,8 @@ def _run_ensemble_training(job_id: str, req: EnsembleTrainRequest):
 
 @router.post("/ensemble/train")
 def train_ensemble(req: EnsembleTrainRequest):
-    job_id = str(uuid.uuid4())
-    _ensemble_jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
+    job_id = _ensemble_jobs.new_id()
+    _ensemble_jobs.create(job_id, TrainStatus(job_id=job_id, status="pending"))
     thread = threading.Thread(target=_run_ensemble_training, args=(job_id, req), daemon=True)
     thread.start()
     return {
@@ -2301,6 +2506,9 @@ def train_ensemble(req: EnsembleTrainRequest):
 
 @router.get("/ensemble/train/status/{job_id}")
 def get_ensemble_training_status(job_id: str):
-    if job_id not in _ensemble_jobs:
+    # One lookup, not a `in` followed by a `[]`: the entry can expire between the
+    # two, and the second raises KeyError where the caller expects a 404.
+    job = _ensemble_jobs.get(job_id)
+    if job is None:
         raise HTTPException(404, f"Ensemble job {job_id} not found")
-    return _ensemble_jobs[job_id]
+    return job

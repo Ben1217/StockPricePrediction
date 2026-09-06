@@ -1,14 +1,37 @@
 /**
- * Predictions — what the models say about the next session, and what that is worth.
+ * Predictions — what the models say about the next bar, and what that is worth.
  *
  * The page answers one question in a fixed order, and the order is the design:
  *
+ *     Which stock, which bar? the symbol and the DAY / WEEK / MONTH timeframe
  *     Is there a call?        the measured direction, or an honest refusal
  *     What is the number?     the next-bar price estimate and its interval
  *     What does it look like? candles with the forecast continuing them
  *     Why?                    the seven evidence categories, with weights
  *     Where are the levels?   support and resistance around the estimate
  *     Can I trust it?         the out-of-sample record, on demand
+ *
+ * The timeframe is a horizon, not a zoom
+ * --------------------------------------
+ * This control used to read 3M / 6M / 1Y and changed only how many daily
+ * candles were drawn; the forecast underneath it was the same number under all
+ * three. It now reads DAY / WEEK / MONTH and it changes the question. The
+ * server aggregates its daily download into weekly or monthly candles and runs
+ * the identical one-step pipeline on those, so "the next bar" becomes the next
+ * week or the next month — a real horizon change with no extrapolation
+ * anywhere, because a one-step model on weekly bars is a one-week model.
+ *
+ * All four requests on this page take the timeframe, and that is a correctness
+ * requirement rather than tidiness: candles, forecast, direction call and
+ * support/resistance must describe the same bar, or the page shows a daily
+ * support level under a monthly estimate and reads as a level just broken.
+ * The timeframe is likewise part of every query key, because a weekly and a
+ * daily forecast for the same symbol are different numbers that share an
+ * `as_of` on any Friday.
+ *
+ * The wording comes from the server's own `bar_noun` and `horizon_label`
+ * rather than from the button that was pressed, so a caption can never
+ * describe a different bar from the numbers beside it.
  *
  * Two models, and they are not interchangeable
  * --------------------------------------------
@@ -24,7 +47,14 @@
  * TimesFM 2.5 produce a next-bar price, a 90% interval and a probability. It has
  * never been walk-forwarded — `probability_is_calibrated` is hardcoded false in
  * the payload — so nothing has checked whether its 0.7 comes up more often than
- * its 0.6.
+ * its 0.6. That is true on every timeframe; changing the bar size does not
+ * validate anything, and the NOT YET VALIDATED badge stays on all three.
+ *
+ * One asymmetry the timeframe introduces: the stored classifier that joins the
+ * measured stack's blend was fitted and scored against a next-*day* label, so
+ * on WEEK and MONTH the server leaves it out and says so in `classifier_note`.
+ * Those answers rest on the evidence stack alone — which runs its own
+ * walk-forward on the bars it was handed, so they are still measured.
  *
  * They disagree constantly, and that is not a bug to smooth over: across AAPL,
  * MSFT, NVDA, JPM, XOM, KO, TSLA and PLTR the measured stack returned NEUTRAL
@@ -53,6 +83,7 @@ import {
 } from "../hooks/useMarketData";
 import ForecastOverlayChart from "../components/ForecastOverlayChart";
 import { Badge, Hint, Section, StatCard } from "../components/UIComponents";
+import { money, signedPctPoints } from "../utils/format";
 
 /**
  * Where "Current Price" came from, in words.
@@ -70,17 +101,80 @@ const QUOTE_SOURCE = {
 };
 
 /**
- * How much history the chart draws. Not a forecast horizon: all three
- * foundation members are built for one step, so the forecast is always the next
- * bar. A 30D button here would promise a number the models never produce.
+ * The three timeframes, and everything on the page that depends on which is
+ * chosen.
+ *
+ * This selector used to read 3M / 6M / 1Y and it only ever changed how many
+ * daily candles were drawn — the forecast, the direction call and the levels
+ * were the same numbers under all three. It is now the horizon control, and the
+ * horizon change is real: `key` goes to the server, which aggregates its daily
+ * download to weekly or monthly candles and runs the one-step models on those.
+ * The next bar is then a week or a month, so "next bar" means what the button
+ * says.
+ *
+ * Everything else here follows from that and exists so no panel can be left
+ * describing a different bar size from its neighbour:
+ *
+ *   `noun`/`nouns`   what one candle is called, everywhere it is named in prose
+ *   `chartBars`      how much history to draw — a comparable span in each case
+ *                    (six months, two years, ten years), not a comparable count
+ *   `interval`       how the support/resistance route spells this bar size, so
+ *                    the levels are drawn from the same candles as the chart
+ *   `srLookback`     that route's window, in BARS of this timeframe, inside the
+ *                    limits it clamps to. The detector reads the last 100
+ *                    candles of whatever it is given, so this only has to be
+ *                    comfortably above that; the panel captions itself from the
+ *                    `bars_analysed` the response reports back.
+ *
+ * The server is the authority on all of it and echoes `timeframe`, `bar_noun`
+ * and `horizon_label` in every response; this table is what the client needs
+ * *before* the first response lands.
  */
-const RANGES = [
-    { label: "3M", bars: 63 },
-    { label: "6M", bars: 126 },
-    { label: "1Y", bars: 252 },
+const TIMEFRAMES = [
+    {
+        key: "day",
+        label: "Day",
+        noun: "session",
+        nouns: "sessions",
+        adjective: "daily",
+        headline: "Next-session prediction",
+        chartBars: 126,
+        interval: "1d",
+        srLookback: 180,
+        describes: "Daily candles. The models forecast tomorrow's close.",
+    },
+    {
+        key: "week",
+        label: "Week",
+        noun: "week",
+        nouns: "weeks",
+        adjective: "weekly",
+        headline: "Next-week prediction",
+        chartBars: 104,
+        interval: "1wk",
+        srLookback: 260,
+        describes: "Weekly candles. The models forecast next week's close.",
+    },
+    {
+        key: "month",
+        label: "Month",
+        noun: "month",
+        nouns: "months",
+        adjective: "monthly",
+        headline: "Next-month prediction",
+        chartBars: 120,
+        interval: "1mo",
+        srLookback: 240,
+        describes: "Monthly candles. The models forecast next month's close.",
+    },
 ];
 
-const HISTORY_BARS = RANGES[RANGES.length - 1].bars;
+const DEFAULT_TIMEFRAME = TIMEFRAMES[0];
+
+function timeframeByKey(key) {
+    return TIMEFRAMES.find((entry) => entry.key === key) || DEFAULT_TIMEFRAME;
+}
+
 const CHART_HEIGHT = 420;
 
 /** Category order for the evidence table: as the backend lists them, by weight. */
@@ -89,19 +183,9 @@ const EVIDENCE_HINT =
     "that category has actually predicted this stock's next day. A category can read " +
     "bullish and still pull the answer down if its history here says it should.";
 
-function formatPrice(value) {
-    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
-    return `$${Number(value).toLocaleString(undefined, {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-    })}`;
-}
-
-function formatPct(value, digits = 2) {
-    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
-    const number = Number(value);
-    return `${number >= 0 ? "+" : ""}${number.toFixed(digits)}%`;
-}
+// `formatPct` takes a value that is ALREADY a percentage — see src/utils/format.js.
+const formatPrice = money;
+const formatPct = signedPctPoints;
 
 function formatProbability(value) {
     if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
@@ -135,6 +219,88 @@ const controlStyle = {
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   THE TIMEFRAME — the one control that changes the answer
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * DAY / WEEK / MONTH, as one segmented control.
+ *
+ * Deliberately the most prominent control on the page. It is not a view option:
+ * pressing it re-runs three transformers, a seven-category evidence stack and a
+ * walk-forward on a different set of candles, and every number below changes
+ * meaning with it. The control it replaced (3M / 6M / 1Y) changed nothing but
+ * the width of the chart, and sat in the corner accordingly — which is the
+ * wrong place for a switch that decides what is being predicted.
+ *
+ * `aria-pressed` rather than a radio group: three buttons where one is active
+ * is what this is, and a screen reader is told which by the same attribute the
+ * highlight is drawn from, so the two cannot disagree.
+ */
+function TimeframeSelector({ value, onChange, busy }) {
+    return (
+        <div style={{ display: "grid", gap: 7 }}>
+            <div
+                style={{
+                    color: C.textDim,
+                    fontSize: 10,
+                    fontWeight: 700,
+                    letterSpacing: 1.5,
+                    textTransform: "uppercase",
+                    fontFamily: "'Syne',sans-serif",
+                }}
+            >
+                Timeframe
+            </div>
+            <div
+                role="group"
+                aria-label="Prediction timeframe"
+                style={{
+                    display: "inline-flex",
+                    background: C.bg2,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 10,
+                    padding: 4,
+                    gap: 4,
+                }}
+            >
+                {TIMEFRAMES.map((entry) => {
+                    const active = entry.key === value;
+                    return (
+                        <button
+                            key={entry.key}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => onChange(entry.key)}
+                            title={entry.describes}
+                            style={{
+                                background: active ? C.amber : "transparent",
+                                color: active ? "#10131A" : C.textMid,
+                                border: "none",
+                                borderRadius: 7,
+                                padding: "9px 20px",
+                                fontSize: 12.5,
+                                fontWeight: 800,
+                                letterSpacing: 1.2,
+                                textTransform: "uppercase",
+                                cursor: "pointer",
+                                fontFamily: "'DM Mono',monospace",
+                                // The one moving part: a press starts seconds of
+                                // model time, and a control that looks inert
+                                // until the first panel lands gets pressed twice.
+                                opacity: busy && !active ? 0.55 : 1,
+                                transition: "background 120ms ease, color 120ms ease",
+                            }}
+                        >
+                            {entry.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    THE VERDICT — the measured call, or the measured refusal
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -147,7 +313,7 @@ const controlStyle = {
  * that treats it as an empty state would be empty most of the time, for the
  * most informative thing the system has to say.
  */
-function VerdictCard({ analysis, loading, error, symbol }) {
+function VerdictCard({ analysis, loading, error, symbol, nouns }) {
     if (loading) {
         return (
             <Section title="Direction call">
@@ -190,7 +356,7 @@ function VerdictCard({ analysis, loading, error, symbol }) {
     return (
         <Section
             title="Direction call"
-            hint="The only direction on this page that has been scored out of sample."
+            hint={`The only direction on this page that has been scored out of sample — measured on ${nouns.plural}, for the next ${nouns.noun}.`}
             right={<Badge color={neutral ? C.textDim : tone}>{neutral ? "NO CALL" : "CALL MADE"}</Badge>}
         >
             <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -210,7 +376,10 @@ function VerdictCard({ analysis, loading, error, symbol }) {
 
                     <div style={{ color: C.textMid, fontSize: 12.5, lineHeight: 1.6, marginTop: 10 }}>
                         {neutral ? (
-                            <>The model declines to call {symbol} for the next session — {analysis.neutral_reason}.</>
+                            <>
+                                The model declines to call {symbol} for the next {nouns.noun} —{" "}
+                                {analysis.neutral_reason}.
+                            </>
                         ) : (
                             <>
                                 P(up) {formatProbability(analysis.probability_up)} · confidence{" "}
@@ -231,14 +400,14 @@ function VerdictCard({ analysis, loading, error, symbol }) {
                         value={stack.accuracy != null ? `${(stack.accuracy * 100).toFixed(1)}%` : "—"}
                         sub={ci ? `95% CI ${(ci[0] * 100).toFixed(1)}–${(ci[1] * 100).toFixed(1)}%` : "no interval"}
                         color={C.cyan}
-                        hint="Out-of-sample accuracy of the evidence stack on this symbol's own history."
+                        hint={`Out-of-sample accuracy of the evidence stack at predicting this symbol's next ${nouns.noun}.`}
                     />
                     <StatCard
                         label="Base rate"
                         value={analysis.base_rate != null ? formatProbability(analysis.base_rate) : "—"}
-                        sub={stack.n_test_rows ? `${stack.n_test_rows.toLocaleString()} test days` : "—"}
+                        sub={stack.n_test_rows ? `${stack.n_test_rows.toLocaleString()} test ${nouns.plural}` : "—"}
                         color={C.purple}
-                        hint="How often this stock rose, unconditionally. A model must beat this to be worth anything."
+                        hint={`How often this stock rose over one ${nouns.noun}, unconditionally. A model must beat this to be worth anything.`}
                     />
                 </div>
             </div>
@@ -259,7 +428,7 @@ function VerdictCard({ analysis, loading, error, symbol }) {
  * the bar they read, and dividing by the live quote instead printed +3.8%
  * beside a DOWN arrow.
  */
-function ForecastPanel({ forecast }) {
+function ForecastPanel({ forecast, nouns }) {
     const point = forecast.forecast?.[0] || null;
     const anchor = Number(forecast.anchor_price);
     const quote = Number(forecast.current_price);
@@ -272,15 +441,22 @@ function ForecastPanel({ forecast }) {
 
     return (
         <Section
-            title="Next-session price estimate"
-            hint="Kronos + Chronos-2 + TimesFM 2.5, combined by inverse variance. A price, not a recommendation."
+            title={`Next-${nouns.noun} price estimate`}
+            hint={
+                `Kronos + Chronos-2 + TimesFM 2.5, combined by inverse variance and run on ` +
+                `${nouns.adjective} candles. A price, not a recommendation.`
+            }
             right={<Badge color={C.amber}>NOT YET VALIDATED</Badge>}
         >
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <StatCard
-                    label={`Prev close · ${forecast.as_of || "—"}`}
+                    label={`Last ${nouns.noun} close · ${forecast.as_of || "—"}`}
                     value={formatPrice(forecast.anchor_price)}
-                    sub="the bar the models read"
+                    sub={
+                        forecast.last_bar_complete === false
+                            ? `the forming ${nouns.noun}, so far`
+                            : `the ${nouns.noun} the models read`
+                    }
                     color={C.textDim}
                 />
                 <StatCard
@@ -290,9 +466,12 @@ function ForecastPanel({ forecast }) {
                     color={C.textMid}
                 />
                 <StatCard
-                    label="Estimate"
+                    label={forecast.horizon_label ? `Estimate · ${forecast.horizon_label}` : "Estimate"}
                     value={formatPrice(forecast.forecast_price)}
-                    sub={`${formatPct(forecast.expected_change_pct)} from prev close`}
+                    sub={
+                        `${formatPct(forecast.expected_change_pct)} from last close` +
+                        (forecast.forecast_date ? ` · ${forecast.forecast_date}` : "")
+                    }
                     positive={rises}
                     color={C.amber}
                 />
@@ -301,7 +480,7 @@ function ForecastPanel({ forecast }) {
                     value={point ? `${formatPrice(point.lower_90)} – ${formatPrice(point.upper_90)}` : "—"}
                     sub={point ? `68%: ${formatPrice(point.lower_68)} – ${formatPrice(point.upper_68)}` : "no interval"}
                     color={C.cyan}
-                    hint="Where the combined models put 90% (and 68%) of the probability for the next close."
+                    hint={`Where the combined models put 90% (and 68%) of the probability for the next ${nouns.noun}'s close.`}
                 />
             </div>
 
@@ -319,8 +498,8 @@ function ForecastPanel({ forecast }) {
             >
                 These three models have <strong style={{ color: C.textMid }}>not been backtested</strong> on{" "}
                 {forecast.symbol}. They report P(up){" "}
-                {formatProbability(forecast.probability_up)} for the next bar, but nothing has yet checked
-                whether that number is reliable — so it is shown as the model's own output, not as a
+                {formatProbability(forecast.probability_up)} for the next {nouns.noun}, but nothing has yet
+                checked whether that number is reliable — so it is shown as the model's own output, not as a
                 confidence. The scored call is the one above.
                 {forecast.split && forecast.split_reason === "quote" && (
                     <>
@@ -339,8 +518,13 @@ function ForecastPanel({ forecast }) {
                     <>
                         {" "}
                         <span style={{ color: C.amber }}>
-                            {forecast.symbol} has only {forecast.history_days} trading days on record, so this
-                            estimate comes from {(forecast.models || []).length} of the 3 models.
+                            {forecast.symbol} has only {forecast.bars_available ?? forecast.history_days}{" "}
+                            {nouns.plural} on record
+                            {forecast.bars_available && forecast.history_days
+                                ? ` (${forecast.history_days.toLocaleString()} trading days)`
+                                : ""}
+                            , short of the 128 Kronos needs for its context — so this estimate comes from{" "}
+                            {(forecast.models || []).length} of the 3 models.
                         </span>
                     </>
                 )}
@@ -459,7 +643,16 @@ function EvidencePanel({ analysis }) {
  * stock mid-range with no confirmed pivot above it has a support and no
  * resistance — so this renders what came back rather than assuming a pair.
  */
-function LevelsPanel({ levels, forecastPrice, loading, error }) {
+/**
+ * The confirmed pivot zones around the estimate, on the selected timeframe.
+ *
+ * `analysed` is the server's own `bars_analysed`, not the lookback that was
+ * requested: the detector reads the last 100 candles however much history is
+ * downloaded, so captioning this panel from the request would advertise a
+ * twenty-year monthly window for an eight-year read. Falling back to the
+ * requested figure only matters before the first response lands.
+ */
+function LevelsPanel({ levels, forecastPrice, loading, error, nouns, analysed }) {
     if (loading) {
         return (
             <Section title="Support & resistance">
@@ -480,9 +673,9 @@ function LevelsPanel({ levels, forecastPrice, loading, error }) {
         return (
             <Section title="Support & resistance">
                 <div style={{ color: C.textMid, fontSize: 12.5, lineHeight: 1.6 }}>
-                    No pivot level cleared the confirmation threshold in the last 180 sessions. That is a
-                    reading, not a gap in the data — this stock has no level the algorithm considers
-                    confirmed right now.
+                    No pivot level cleared the confirmation threshold in the last {analysed} {nouns.plural}.
+                    That is a reading, not a gap in the data — this stock has no level the algorithm
+                    considers confirmed on this timeframe right now.
                 </div>
             </Section>
         );
@@ -491,7 +684,7 @@ function LevelsPanel({ levels, forecastPrice, loading, error }) {
     return (
         <Section
             title="Support & resistance"
-            hint="Confirmed pivot zones from the last 180 sessions, and where the estimate falls against them."
+            hint={`Confirmed pivot zones from the last ${analysed} ${nouns.plural}, and where the estimate falls against them.`}
         >
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {rows.map((level) => {
@@ -553,9 +746,10 @@ function StatusRow({ label, children }) {
  * as the number, because a track record kept on a different screen from the
  * claim it qualifies is not really disclosed.
  */
-function ModelStatusPanel({ forecast, analysis }) {
+function ModelStatusPanel({ forecast, analysis, nouns, selectedTicker }) {
     const [open, setOpen] = useState(false);
     const stack = analysis?.blend?.evidence_stack || {};
+    const stackMeta = analysis?.stack?.meta || {};
     const classifier = analysis?.blend?.classifier || {};
 
     return (
@@ -576,13 +770,24 @@ function ModelStatusPanel({ forecast, analysis }) {
                     Data through {forecast?.as_of || "—"} ·{" "}
                     {(forecast?.models || []).length} forecast models ·{" "}
                     {analysis?.status === "ok"
-                        ? `direction stack scored on ${(stack.n_test_rows || 0).toLocaleString()} out-of-sample days`
+                        ? `direction stack scored on ${(stack.n_test_rows || 0).toLocaleString()} out-of-sample ${nouns.plural}`
                         : "direction stack unavailable"}
                 </div>
             ) : (
                 <div>
+                    <StatusRow label="Timeframe">
+                        {forecast?.timeframe_label || "—"} candles · the models forecast the next{" "}
+                        {nouns.noun}
+                        {forecast?.forecast_date ? `, ending ${forecast.forecast_date}` : ""}
+                        {forecast?.last_bar_complete === false && (
+                            <span style={{ color: C.amber }}>
+                                {" "}· anchored on a {nouns.noun} that is still forming
+                            </span>
+                        )}
+                    </StatusRow>
                     <StatusRow label="Data through">
-                        {forecast?.as_of || "—"} · {forecast?.history_days ?? "—"} trading days downloaded
+                        {forecast?.as_of || "—"} · {forecast?.bars_available ?? "—"} {nouns.plural} aggregated
+                        from {forecast?.history_days?.toLocaleString() ?? "—"} trading days
                         {forecast?.thin_history && (
                             <span style={{ color: C.amber }}> · short history</span>
                         )}
@@ -602,7 +807,22 @@ function ModelStatusPanel({ forecast, analysis }) {
                         Brier skill {stack.brier_skill_score != null ? stack.brier_skill_score.toFixed(4) : "—"} ·
                         accuracy {stack.accuracy != null ? `${(stack.accuracy * 100).toFixed(1)}%` : "—"} ·
                         weight in blend {stack.weight != null ? stack.weight.toFixed(3) : "—"}
+                        {stackMeta.scale_window != null && (
+                            <> · scores scaled against {stackMeta.scale_window} {nouns.plural}</>
+                        )}
                     </StatusRow>
+                    {/* A difference in what the trend category *is* — six inputs
+                        or five — so it is stated rather than left for a reader
+                        to discover by comparing two timeframes. Routinely
+                        dropped on the monthly frame and on a recent listing,
+                        where 200 bars of history do not exist to average. */}
+                    {stackMeta.long_trend_leg === false && (
+                        <StatusRow label="Trend category">
+                            Built from five inputs, not six: {selectedTicker} has too few{" "}
+                            {nouns.plural} for a 200-{nouns.noun} moving average to be read on
+                            enough of them.
+                        </StatusRow>
+                    )}
                     <StatusRow label="Classifier">
                         {classifier.model || "—"} ·{" "}
                         {classifier.tradeable === true
@@ -660,20 +880,37 @@ export default function PredictionsTab({
     onBacktest,
     onOptimize,
 }) {
-    const [bars, setBars] = useState(RANGES[1].bars);
+    const [timeframeKey, setTimeframeKey] = useState(DEFAULT_TIMEFRAME.key);
+    const timeframe = timeframeByKey(timeframeKey);
 
     // Four requests, deliberately separate, because they cost orders of
     // magnitude apart and each section is worth showing the moment it lands.
     // The candles are a cached download (~0.08s); the forecast is seconds of
     // transformer sampling; the direction analysis is a walk-forward. Bundling
     // them would hold the chart behind the slowest of the three.
+    //
+    // All four take the timeframe, and they have to: the candles, the forecast,
+    // the direction call and the levels must all describe the same bar. Leaving
+    // one on daily would put a daily support level under a monthly estimate and
+    // read as a level the estimate had just broken.
     const historyQuery = useForecastHistory(selectedTicker, {
-        days: HISTORY_BARS,
+        bars: timeframe.chartBars,
+        timeframe: timeframe.key,
         enabled: apiConnected,
     });
-    const query = useSimpleForecast(selectedTicker, { enabled: apiConnected });
-    const analysisQuery = useDirectionAnalysis(selectedTicker, { enabled: apiConnected });
-    const levelsQuery = useSupportResistance(selectedTicker, { enabled: apiConnected });
+    const query = useSimpleForecast(selectedTicker, {
+        timeframe: timeframe.key,
+        enabled: apiConnected,
+    });
+    const analysisQuery = useDirectionAnalysis(selectedTicker, {
+        timeframe: timeframe.key,
+        enabled: apiConnected,
+    });
+    const levelsQuery = useSupportResistance(selectedTicker, {
+        interval: timeframe.interval,
+        lookback: timeframe.srLookback,
+        enabled: apiConnected,
+    });
 
     const data = query.data ?? null;
     const analysis = analysisQuery.data ?? null;
@@ -683,9 +920,28 @@ export default function PredictionsTab({
     const history = historyQuery.data?.bars ?? [];
     const historyLoading = historyQuery.isPending;
     const historyError = errorText(historyQuery.error, "The price history could not be loaded.");
-    const windowed = useMemo(() => history.slice(-bars), [history, bars]);
     const points = data?.forecast ?? [];
     const servable = data?.status === "ok" && points.length > 0;
+
+    // The wording comes from the payload, not from the button.
+    //
+    // Each timeframe is its own query key, so a switch leaves `data` undefined
+    // until the new response lands — the panels show their loading states and
+    // the local table fills the gap. Reading the noun off the payload rather
+    // than off `timeframeKey` therefore does not change what is on screen
+    // today; it guarantees that if it ever does, the caption is the one that
+    // belongs to the numbers underneath it. The server is the authority on
+    // what bar it answered about, and this is the client agreeing to that.
+    const served = timeframeByKey(data?.timeframe || historyQuery.data?.timeframe || timeframe.key);
+    const nouns = {
+        noun: data?.bar_noun || historyQuery.data?.bar_noun || timeframe.noun,
+        plural: data?.bar_noun_plural || historyQuery.data?.bar_noun_plural || timeframe.nouns,
+        // "daily"/"weekly"/"monthly" is not derivable from the noun -- the
+        // daily one is "session" -- so it is looked up rather than suffixed.
+        adjective: served.adjective,
+    };
+    const switching =
+        query.isFetching || historyQuery.isFetching || analysisQuery.isFetching;
 
     // The arrow on the chart carries the SCORED call when there is one, and the
     // probability that belongs to it. When the measured stack returns NEUTRAL
@@ -738,7 +994,7 @@ export default function PredictionsTab({
                             fontFamily: "'Syne',sans-serif",
                         }}
                     >
-                        Next-session prediction
+                        {timeframe.headline}
                     </div>
                     <div
                         style={{
@@ -758,54 +1014,70 @@ export default function PredictionsTab({
                     </div>
                 </div>
 
-                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                {/* Stock, then timeframe: the order of the flow the page
+                    describes — pick the instrument, pick the bar, read the
+                    forecast for that bar. */}
+                <div style={{ display: "flex", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
                     {typeof setSelectedTicker === "function" && symbols.length > 1 && (
-                        <select
-                            value={selectedTicker}
-                            onChange={(event) => setSelectedTicker(event.target.value)}
-                            style={controlStyle}
-                            aria-label="Stock"
-                        >
-                            {symbols.map((symbol) => (
-                                <option key={symbol} value={symbol}>
-                                    {symbol}
-                                </option>
-                            ))}
-                        </select>
-                    )}
-                    <div
-                        style={{
-                            display: "inline-flex",
-                            background: C.bg2,
-                            border: `1px solid ${C.border}`,
-                            borderRadius: 8,
-                            padding: 3,
-                            gap: 3,
-                        }}
-                    >
-                        {RANGES.map((range) => (
-                            <button
-                                key={range.label}
-                                type="button"
-                                onClick={() => setBars(range.bars)}
-                                title={`Show ${range.label} of candles`}
+                        <div style={{ display: "grid", gap: 7 }}>
+                            <label
+                                htmlFor="prediction-symbol"
                                 style={{
-                                    background: bars === range.bars ? C.amber : "transparent",
-                                    color: bars === range.bars ? "#10131A" : C.textMid,
-                                    border: "none",
-                                    borderRadius: 6,
-                                    padding: "7px 13px",
-                                    fontSize: 12,
-                                    fontWeight: 800,
-                                    cursor: "pointer",
-                                    fontFamily: "'DM Mono',monospace",
+                                    color: C.textDim,
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    letterSpacing: 1.5,
+                                    textTransform: "uppercase",
+                                    fontFamily: "'Syne',sans-serif",
                                 }}
                             >
-                                {range.label}
-                            </button>
-                        ))}
-                    </div>
+                                Stock
+                            </label>
+                            <select
+                                id="prediction-symbol"
+                                value={selectedTicker}
+                                onChange={(event) => setSelectedTicker(event.target.value)}
+                                style={{ ...controlStyle, padding: "10px 12px" }}
+                            >
+                                {symbols.map((symbol) => (
+                                    <option key={symbol} value={symbol}>
+                                        {symbol}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+                    <TimeframeSelector
+                        value={timeframe.key}
+                        onChange={setTimeframeKey}
+                        busy={switching}
+                    />
                 </div>
+            </div>
+
+            {/* What the selection means, in one line, above every panel that
+                depends on it. The panels each say which bar they are about, but
+                a reader who has just pressed MONTH deserves to be told once,
+                plainly, rather than inferring it from four separate captions. */}
+            <div
+                style={{
+                    color: C.textDim,
+                    fontSize: 11.5,
+                    lineHeight: 1.6,
+                    marginTop: -6,
+                }}
+            >
+                {timeframe.describes}
+                {data?.status === "ok" && data.last_bar_complete === false && (
+                    <span style={{ color: C.amber }}>
+                        {" "}The current {nouns.noun} is still forming
+                        {data.last_bar_sessions
+                            ? ` (${data.last_bar_sessions} session${data.last_bar_sessions === 1 ? "" : "s"} so far)`
+                            : ""}
+                        , so the estimate is for the {nouns.noun} after it
+                        {data.forecast_date ? `, ending ${data.forecast_date}` : ""}.
+                    </span>
+                )}
             </div>
 
             {/* ── 1. The scored call, first ── */}
@@ -814,6 +1086,7 @@ export default function PredictionsTab({
                 loading={analysisQuery.isPending}
                 error={errorText(analysisQuery.error, null)}
                 symbol={selectedTicker}
+                nouns={nouns}
             />
 
             {/* ── 2. The number ── */}
@@ -853,22 +1126,25 @@ export default function PredictionsTab({
             )}
 
             {!error && loading && (
-                <Section title="Next-session price estimate">
+                <Section title={`Next-${timeframe.noun} price estimate`}>
                     <div style={{ color: C.textDim, fontSize: 13, padding: "20px 0" }}>
-                        Running the forecast models for {selectedTicker}…
+                        Running the forecast models for {selectedTicker} on {timeframe.adjective} candles…
                     </div>
                 </Section>
             )}
 
             {!error && data && !servable && (
-                <Notice>{data.message || `No forecast is available for ${selectedTicker} right now.`}</Notice>
+                <Notice>
+                    {data.message ||
+                        `No ${timeframe.adjective} forecast is available for ${selectedTicker} right now.`}
+                </Notice>
             )}
 
-            {!error && servable && <ForecastPanel forecast={data} />}
+            {!error && servable && <ForecastPanel forecast={data} nouns={nouns} />}
 
             {/* ── 3. The picture ── */}
-            <Section title={`Price & forecast — ${selectedTicker}`}>
-                {historyLoading && !windowed.length ? (
+            <Section title={`Price & forecast — ${selectedTicker} · ${timeframe.label.toUpperCase()}`}>
+                {historyLoading && !history.length ? (
                     <div
                         style={{
                             height: CHART_HEIGHT,
@@ -878,9 +1154,9 @@ export default function PredictionsTab({
                             fontSize: 13,
                         }}
                     >
-                        Loading {selectedTicker}…
+                        Loading {timeframe.adjective} candles for {selectedTicker}…
                     </div>
-                ) : historyError && !windowed.length ? (
+                ) : historyError && !history.length ? (
                     <div
                         style={{
                             height: CHART_HEIGHT,
@@ -894,11 +1170,13 @@ export default function PredictionsTab({
                     </div>
                 ) : (
                     <ForecastOverlayChart
-                        bars={windowed}
+                        bars={history}
                         forecast={points}
                         direction={direction}
                         horizon={1}
                         height={CHART_HEIGHT}
+                        barNoun={nouns.noun}
+                        barNounPlural={nouns.plural}
                     />
                 )}
             </Section>
@@ -912,10 +1190,17 @@ export default function PredictionsTab({
                 forecastPrice={Number(data?.forecast_price)}
                 loading={levelsQuery.isPending}
                 error={errorText(levelsQuery.error, null)}
+                nouns={nouns}
+                analysed={levelsQuery.data?.bars_analysed ?? timeframe.srLookback}
             />
 
             {/* ── 6. The audit trail ── */}
-            <ModelStatusPanel forecast={data} analysis={analysis} />
+            <ModelStatusPanel
+                forecast={data}
+                analysis={analysis}
+                nouns={nouns}
+                selectedTicker={selectedTicker}
+            />
 
             {/* ── 7. Where this goes next ──
                 Two exits, matching the two things a reader can do with a
@@ -934,7 +1219,11 @@ export default function PredictionsTab({
                                     anchorPrice: data.anchor_price,
                                     expectedChangePct: data.expected_change_pct,
                                     asOf: data.as_of,
+                                    // The server's own label, so a monthly
+                                    // estimate cannot be carried into the
+                                    // Backtest tab as a next-day call.
                                     horizonLabel: data.horizon_label || "Next 1 Day",
+                                    timeframe: data.timeframe || timeframe.key,
                                     models: data.models || [],
                                 })
                             }

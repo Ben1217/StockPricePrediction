@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
+from src.models.bundle_cache import bundle_cache
 from src.models.model_manager import AUTO_PREPARE_ENV
 from src.models.preparation import registry as preparation_registry
 
@@ -69,8 +70,14 @@ def _no_automatic_training(monkeypatch):
     """
     monkeypatch.setenv(AUTO_PREPARE_ENV, "false")
     preparation_registry.reset()
+    # The bundle cache is a module-level singleton keyed on symbol/model. A test
+    # that writes a bundle into a tmp_path and loads it would otherwise be served
+    # a previous test's object under the same key, and the failure would surface
+    # in whichever test happened to run second.
+    bundle_cache.clear()
     yield
     preparation_registry.reset()
+    bundle_cache.clear()
 
 
 @pytest.fixture

@@ -19,16 +19,12 @@ import { fetchDirection, fetchEnsemblePrediction } from "../utils/api";
 import { C } from "../utils/data";
 import { Badge, Section, StatCard } from "./UIComponents";
 import ModelPreparation from "./ModelPreparation";
+import { money, pct } from "../utils/format";
 
 /** Horizon the Analysis summary reports. Matches the Predictions tab default. */
 const SUMMARY_HORIZON = 30;
 
-const pct = (value, digits = 1) =>
-    typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
-const money = (value) =>
-    typeof value === "number" && Number.isFinite(value)
-        ? `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-        : "—";
+
 const signed = (value, digits = 2) =>
     typeof value === "number" && Number.isFinite(value)
         ? `${value >= 0 ? "+" : ""}${value.toFixed(digits)}%`

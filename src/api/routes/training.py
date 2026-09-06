@@ -5,11 +5,10 @@ Training API routes — trigger model training, check status, list models.
 import logging
 import math
 import threading
-import uuid
 
-from cachetools import TTLCache
 from fastapi import APIRouter, HTTPException
 
+from src.api.jobs import JobRegistry
 from src.api.schemas.schemas import (
     TRAINABLE_MODEL_TYPES,
     BootstrapTrainRequest,
@@ -31,24 +30,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# In-memory job tracker. Bounded and time-limited: an unbounded dict retained every
-# job ever submitted for the lifetime of the process. Jobs outlive a long training run
-# (24h) but are not kept forever.
-#
-# Note this is per-process — with more than one uvicorn worker a job created on one
-# worker is invisible to the others. Moving to Redis or the SQLite database is the
-# prerequisite for running this API with --workers > 1.
-MAX_TRACKED_JOBS = 200
-JOB_TTL_SECONDS = 24 * 3600
-_jobs: TTLCache = TTLCache(maxsize=MAX_TRACKED_JOBS, ttl=JOB_TTL_SECONDS)
-# cachetools caches are not thread-safe and these are touched from worker threads.
-_jobs_lock = threading.Lock()
+# Bounded, TTL'd and thread-safe; see src.api.jobs for why the locking is not
+# optional and why this per-process scope is what stops the API running with
+# --workers > 1.
+_jobs: JobRegistry[TrainStatus] = JobRegistry()
 
 
 def _run_training(job_id: str, req: TrainRequest):
     """Background training worker for one symbol/model pair."""
-    with _jobs_lock:
-        job = _jobs.get(job_id)
+    job = _jobs.get(job_id)
     if job is None:  # evicted before the worker started
         return
     try:
@@ -81,8 +71,7 @@ def _run_training(job_id: str, req: TrainRequest):
 
 def _run_bootstrap_training(job_id: str, req: BootstrapTrainRequest):
     """Background training worker for multiple symbols and model types."""
-    with _jobs_lock:
-        job = _jobs.get(job_id)
+    job = _jobs.get(job_id)
     if job is None:  # evicted before the worker started
         return
     job.status = "running"
@@ -130,14 +119,12 @@ def train_model(req: TrainRequest):
             f"{', '.join(sorted(m.value for m in TRAINABLE_MODEL_TYPES))}.",
         )
 
-    job_id = str(uuid.uuid4())
-    with _jobs_lock:
-        _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
+    job_id = _jobs.new_id()
+    _jobs.create(job_id, TrainStatus(job_id=job_id, status="pending"))
 
     thread = threading.Thread(target=_run_training, args=(job_id, req), daemon=True)
     thread.start()
 
-    horizons = normalize_horizons(req.horizons)
     return TrainResponse(
         job_id=job_id,
         status="pending",
@@ -152,9 +139,8 @@ def train_model(req: TrainRequest):
 @router.post("/bootstrap", response_model=BootstrapTrainResponse)
 def bootstrap_training(req: BootstrapTrainRequest):
     """Trigger background training for the supported stock/model grid."""
-    job_id = str(uuid.uuid4())
-    with _jobs_lock:
-        _jobs[job_id] = TrainStatus(job_id=job_id, status="pending")
+    job_id = _jobs.new_id()
+    _jobs.create(job_id, TrainStatus(job_id=job_id, status="pending"))
 
     thread = threading.Thread(target=_run_bootstrap_training, args=(job_id, req), daemon=True)
     thread.start()
@@ -177,8 +163,7 @@ def bootstrap_training(req: BootstrapTrainRequest):
 @router.get("/status/{job_id}", response_model=TrainStatus)
 def get_training_status(job_id: str):
     """Poll training job status."""
-    with _jobs_lock:
-        job = _jobs.get(job_id)
+    job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(404, f"Job {job_id} not found or expired")
     return job

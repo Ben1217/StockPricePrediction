@@ -376,6 +376,27 @@ class ForecastHistoryResponse(BaseModel):
     as_of: Optional[str] = None
     bars: List[PriceBar] = Field(default_factory=list)
 
+    #: Which bar size these candles are: "day" | "week" | "month". Served
+    #: because the dates alone do not say -- a weekly frame and a daily one
+    #: both carry ISO dates, and a client that mislabels the axis has drawn a
+    #: different instrument from the one it names.
+    timeframe: str = "day"
+    timeframe_label: str = "Day"
+    #: "session" / "week" / "month" and their plurals, so the client writes one
+    #: noun in its own copy rather than keeping three maps of its own.
+    bar_noun: str = "session"
+    bar_noun_plural: str = "sessions"
+    #: The interval the rest of the API spells this as ("1d"/"1wk"/"1mo"),
+    #: so a caller can ask other routes for the *same* bars.
+    interval: str = "1d"
+    #: False when the final candle's period has not closed -- a weekly bar read
+    #: on a Wednesday. It is the newest information available and is served
+    #: rather than dropped, so it has to be labelled.
+    last_bar_complete: bool = True
+    #: Daily sessions inside that final candle. Five on a settled week; fewer
+    #: on a forming one or a holiday week.
+    last_bar_sessions: Optional[int] = None
+
 
 class SimpleForecastPoint(BaseModel):
     """
@@ -495,6 +516,30 @@ class SimpleForecastResponse(BaseModel):
     #:            "Forecast Price" implies the opposite of the call. Common
     #:            after a gap, and not a disagreement about anything.
     split_reason: Optional[str] = None
+
+    #: The bar size this forecast is *about*: "day" | "week" | "month". Every
+    #: member of the stack is a one-step model, so the bar it was handed is the
+    #: horizon it answered -- a weekly frame makes `forecast_price` next week's
+    #: close, not tomorrow's. This is therefore not a display hint; it is the
+    #: unit of the number beside it, and `horizon_label` is how it is written.
+    timeframe: str = "day"
+    timeframe_label: str = "Day"
+    bar_noun: str = "session"
+    bar_noun_plural: str = "sessions"
+    interval: str = "1d"
+    #: Bars of this timeframe the models read. `history_days` counts the daily
+    #: rows behind them, which is a much larger and much less relevant number
+    #: on a weekly or monthly frame -- 900 daily rows is 180 weekly bars, and
+    #: it is the 180 that decides what the forecast is worth.
+    bars_available: Optional[int] = None
+    #: False when `anchor_price` came off a period that is still forming -- a
+    #: weekly candle read mid-week. The forecast is for the *next* completed
+    #: bar either way; this says whether the bar it was measured from is one.
+    last_bar_complete: bool = True
+    #: Daily sessions inside that anchor bar, and the calendar days it spans.
+    last_bar_sessions: Optional[int] = None
+    last_bar_start: Optional[str] = None
+    last_bar_end: Optional[str] = None
 
     forecast: List[SimpleForecastPoint] = Field(default_factory=list)
 

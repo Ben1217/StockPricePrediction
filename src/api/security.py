@@ -12,19 +12,26 @@ Both are **opt-in** so the default local-development experience is unchanged:
 
 The limiter is per-process and in-memory. That is the right scope for a single
 uvicorn worker; running multiple workers needs a shared store (Redis) for both the
-limiter and the job/backtest state (see the notes in routes/training.py).
+limiter and the job/backtest state (see the notes in src/api/jobs.py).
+
+Clients are identified by API key when one is presented and by peer address
+otherwise. ``X-Forwarded-For`` is honoured only when
+``QUANTVISION_TRUST_PROXY_HEADERS`` is set, because a forgeable header used as a
+limiter key is not a limiter — see :data:`TRUST_FORWARDED_FOR_ENV`.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
+import secrets
 import threading
 import time
 from collections import deque
-from typing import Deque, Dict, Iterable
+from typing import Deque, Dict, Iterable, Optional
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -126,15 +133,51 @@ class SlidingWindowLimiter:
 limiter = SlidingWindowLimiter()
 
 
+#: Whether to believe ``X-Forwarded-For``.
+#:
+#: The header is client-supplied and trivially forged, so honouring it
+#: unconditionally turns the rate limiter off: a caller that varies the header per
+#: request gets a fresh budget every time, and one that pins it to somebody else's
+#: address spends *their* budget. It is only meaningful when a proxy this service
+#: trusts is guaranteed to overwrite it, so it is opt-in and off by default —
+#: which is also the safe default for the local-development case, where there is
+#: no proxy and ``request.client.host`` is already the truth.
+TRUST_FORWARDED_FOR_ENV = "QUANTVISION_TRUST_PROXY_HEADERS"
+
+
+def trust_forwarded_for() -> bool:
+    return os.getenv(TRUST_FORWARDED_FOR_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _peer_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _forwarded_client_ip(request: Request) -> Optional[str]:
+    """The left-most valid address in ``X-Forwarded-For``, or None."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    candidate = forwarded.split(",")[0].strip()
+    if not candidate:
+        return None
+    try:
+        # Validated rather than echoed: an unparseable value is an attempt to make
+        # the bucket key arbitrary, and an arbitrary key is an unlimited budget.
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        logger.debug("Ignoring malformed X-Forwarded-For value %r", candidate[:64])
+        return None
+
+
 def _client_id(request: Request) -> str:
     # When the key is present it is the better identity; otherwise fall back to IP.
     key = request.headers.get(API_KEY_HEADER)
     if key:
         return f"key:{key[:12]}"
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return f"ip:{forwarded.split(',')[0].strip()}"
-    return f"ip:{request.client.host if request.client else 'unknown'}"
+    if trust_forwarded_for():
+        forwarded = _forwarded_client_ip(request)
+        if forwarded:
+            return f"ip:{forwarded}"
+    return f"ip:{_peer_ip(request)}"
 
 
 def _bucket(path: str, method: str) -> str:
@@ -182,7 +225,11 @@ async def security_middleware(request: Request, call_next):
 
     if auth_enabled():
         provided = request.headers.get(API_KEY_HEADER, "")
-        if not provided or provided != get_api_key():
+        # compare_digest, not ==. Python's string equality returns as soon as two
+        # bytes differ, so the time it takes leaks how long a common prefix the
+        # guess shares with the key — enough, over many requests, to recover the
+        # key one character at a time.
+        if not provided or not secrets.compare_digest(provided, get_api_key()):
             return JSONResponse(
                 status_code=401,
                 content={"detail": f"Missing or invalid {API_KEY_HEADER} header"},
